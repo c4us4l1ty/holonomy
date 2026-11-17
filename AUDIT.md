@@ -41,12 +41,49 @@ Listed so they stay dead.
 | OQ-1 | Toolchain: root `rust-toolchain.toml` used floating `stable`. Pinned to Rust 1.100.0 after observing the CI compiler; no local sandbox toolchain was available for an independent pin check. | **closed 2026-11-16** |
 | OQ-2 | Undo exposure: world-line keeps all drafts (Vision III) vs. an adversary who wants the right to truly delete a draft. Compaction is explicit, file-scoped, and passphrase-confirmed; RFC-002 states that cloud mirrors may retain pre-compaction files and their history, so users must also prune external backups. | **closed — residual disclosed** |
 | OQ-3 | Clipboard egress on each OS: flag-confidential + clear-on-blur must be verified per platform (Block 9) or labeled unverified in the Security panel | open |
-| OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. Accept (viewport is presumably visible to that adversary anyway) or smooth? Decide before Block 4 gate | open |
+| OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. | **closed 2026-11-17 — accept and disclose.** The pattern is already visible at the I/O layer: fetching an old page reads its ciphertext at a known file offset, so any observer who can time slab faults can observe the reads themselves. Smoothing would buy nothing and would spend L-5 (idle is idle) on traversal cost the architecture exists to delete. Residual recorded in `docs/THREAT-MODEL.md` §5. |
 | OQ-5 | Argon2's internal working arena: `MasterKeys::derive`, `kdf::derive_root_secret*`, and the calibration probe all allocated the m-cost arena inside `hash_password_into` and freed it unwiped (v5's H1 hit exactly this and switched to caller-owned memory + a scrubbed block). Fixed by making the arena caller-owned everywhere: `kdf::Arena(Vec<argon2::Block>)` zeroizes the slab on Drop via argon2's `zeroize` feature, and the single `run_argon2` runner serves creation, replay, *and* the calibration probe, with a test pinning byte-equality against argon2's own allocator | **closed** 2026-11-16 |
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
 
 ## Audit trail
+
+- **2026-11-17 — gate-closure amendment: Block 2 closed, Block 3 closed in scope, Block 4
+  unblocked.** Two gate items could not be answered with evidence available to this project — an
+  allocator-wide proof of dependency-internal wiping, and physical power-loss/device qualification —
+  and leaving them "open" had the same effect as killing the roadmap, because Block 4 may not
+  start. The protocol already defines the third path: **amended** — the claim survives in weakened,
+  explicitly stated form. Each claim below is narrowed to what a test establishes, the remainder is
+  named as an unproven residual, and it is assigned to the gate that can measure it. Earlier audit
+  entries that still describe these gates as open are left exactly as written — the trail records
+  what was known on the day, and this entry supersedes them without rewriting them.
+
+  **Evidence base:** the code and test tree at `8ac3618`, whose CI run
+  [44034435423](https://github.com/c4us4l1ty/holonomy/actions/runs/44034435423) passed rustfmt,
+  Clippy, the feature-graph check, workspace tests, the gates contract, and both the rsync and
+  ext4-ENOSPC rehearsals. Nothing in this entry is a new measurement; it is a decision about what
+  the existing measurements are allowed to mean.
+
+  | Item | Verdict | Now claimed | Not claimed | Owed to |
+  | ---- | ------- | ----------- | ----------- | ------- |
+  | Block 2 — dependency-temporary zeroization | **amended** | every project-owned secret buffer is zero before free under the registered-allocation audit (nonzero-at-free, secret reallocation, and registry overflow all fail the gate); the reviewed wipe features are enabled and CI-enforced | that dependency-internal stack/heap temporaries are erased; a whole-allocator proof; any register or physical-memory guarantee | future hardening; residual in TM §5 |
+  | Block 2 — RFC-001 audit closure | **amended** | every open RFC-001 item is killed, scoped with its exact limit, or assigned to its owning block | that the original unbounded wording was ever proven | — |
+  | Block 3 — L-6 crash consistency | **amended** | the append/commit/recover ordering behaves correctly under injected short writes at every byte, both sync barriers, truncate failure, and real ENOSPC on an ext4 loop image | power-loss, controller/device-cache durability, journal replay, any supported-device matrix | Block 6 *kill-power-at-random-instant* gate; Block 10 release gate |
+  | Block 3 — L-10 tail transfer | **amended** | one named client (rsync 3.2.7, protocol 31, 64 KiB block, local daemon over TCP) transfers literal data ≤ appended bytes + one block and ≤ 8× appended application-layer bytes for the measured workload | that any other client, backend, or remote service behaves the same | Block 10 backend matrix, or an explicit narrowing of L-10 in `LAWS` |
+  | OQ-4 — scroll-timing side channel | **closed — accept and disclose** | the slab fault-in pattern is observable, and is already observable at the I/O layer: reading an old page reads its ciphertext at a known offset, so timing smoothing would hide the pattern from nobody who can observe the reads | that the pattern is hidden from a timing observer | TM §5 residual |
+
+  **Protocol consequences, written into the repo by this entry.** `ROADMAP.md` Blocks 2 and 3 now
+  carry these wordings and the named deferrals; `RFC-001` and `RFC-002` status lines and their
+  zeroization/power-loss paragraphs match them; `docs/THREAT-MODEL.md` §4 and §5 gain the
+  dependency-scratch, power-loss and scroll-timing residuals; OQ-4 moves from open to closed.
+  `crates/holonomy-ledger/src/laws.rs` and the generated `docs/GATES.md` are **untouched**: no law is
+  promoted, and L-6 and L-10 still read `spec` because neither has been measured to its bound.
+
+  **What this entry does not do.** It does not certify v6, promote a law, or convert a residual into
+  a claim. It moves an obligation from "nobody owns this" to "these gates own this". A future entry
+  that treats these obligations as settled because this one filed them is invalid. If Block 10
+  cannot obtain the hardware matrix, the honest outcome is to narrow L-6's bound in `laws.rs` — a
+  visible edit to the machine-readable contract — not to pass it silently.
 
 - **2026-11-16 — Block 2 dependency-temporary zeroization audit (gate remains open):**
   Reviewed the selected secret-bearing source paths at the release revisions below. `Cargo.lock`

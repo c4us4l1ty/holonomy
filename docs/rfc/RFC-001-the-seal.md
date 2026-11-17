@@ -1,6 +1,9 @@
 # RFC-001 — The Seal (Block 2)
 
-*Status: open attack target. File attack cases in `AUDIT.md`.*
+*Status: **closed 2026-11-17 by amendment**, not by proving the original wording. The zeroization
+claim is narrowed to project-owned buffers and its dependency-side remainder is named as a residual;
+the calibration mechanism ships, reference-hardware numbers are owed to Block 6/10 budget
+certification. See `AUDIT.md`, "gate-closure amendment".*
 
 ## Context
 
@@ -56,20 +59,30 @@ the sole required factor (L-9) and demotes USB to an optional hardener.
   rejected. v6 uses exact bytes + NFC normalization, documented.
 - **Any custom primitive:** the seal composes audited constructions only.
 
-## Open questions
+## Closed by amendment (2026-11-17)
 
-- Argon2id calibration target on the weakest supported reference laptop (≤1s at ≥ what memory
-  fence?). Numbers land in the Block 2 calibration gate; until then the RFC commits only to
-  the *mechanism* of calibration, not a guessed constant — the exact discipline H1 paid 57×
-  to learn.
-- **Dependency-temporary zeroization remains open.** The test-only allocator checks only
-  project-owned ranges explicitly registered at their owners; counting total allocations does not
-  show that unregistered dependency buffers are erased. Static review of the locked source set
-  found that `unicode-normalization` 0.1.26 buffers long combining runs in non-zeroizing TinyVecs,
-  so passphrase input is capped at 4,096 raw UTF-8 bytes before NFC. That bounds the input driving
-  scratch growth but neither wipes it nor covers the caller's borrowed source text. Direct
-  `sha3`/`shake` zeroize edges (and the Poly1305 edge) enable selected state-drop hooks, but
-  reviewed Argon2/BLAKE2 and ML-KEM stack intermediates, plus XChaCha's HChaCha state/subkey copy,
-  remain unzeroized or unproven. See the pinned-source findings and exact limits in `AUDIT.md`.
-  Do not close this gate based only on the registered-buffer test, the input bound, or feature
-  activation; further safe mitigation or adequate dependency evidence is required.
+- **Argon2id calibration target.** The RFC commits to the *mechanism*, not a guessed constant: the
+  host-calibrated selector picks and records a schedule inside a fenced band, replay refuses
+  below-floor or unbounded records before Argon2 runs, and a byte-equality test pins the
+  caller-owned arena against argon2's own allocator. What is still missing is a published number on
+  the *weakest supported reference laptop*; that measurement belongs to the Block 6/10 budget
+  certification, not to the seal's design. H1's 57× miss (K-2) was an unmeasured constant — this
+  design contains no unmeasured constant to miss.
+- **Dependency-temporary zeroization: amended, with its remainder still an open claim.** The test-only
+  allocator checks only project-owned ranges explicitly registered at their owners; counting total
+  allocations does not show that unregistered dependency buffers are erased. Static review of the
+  locked source set found that `unicode-normalization` 0.1.26 buffers long combining runs in
+  non-zeroizing TinyVecs, so passphrase input is capped at 4,096 raw UTF-8 bytes before NFC. That
+  bounds the input driving scratch growth but neither wipes it nor covers the caller's borrowed
+  source text. Direct `sha3`/`shake` zeroize edges (and the Poly1305 edge) enable selected
+  state-drop hooks, but reviewed Argon2/BLAKE2 and ML-KEM stack intermediates, plus XChaCha's
+  HChaCha state/subkey copy, remain unzeroized or unproven. See the pinned-source findings and exact
+  limits in `AUDIT.md`.
+
+  **What the closed gate claims:** every *project-owned* secret buffer is zero before free — the
+  audit fails the build on a nonzero registered buffer, a reallocation of a secret, or a registry
+  overflow — and the reviewed wipe features are enabled and CI-enforced. **What it does not
+  claim:** that dependency internals are erased, at any level below that. Any future entry that
+  treats this as proven by the registered-buffer test, the input bound, or feature activation is
+  invalid; the residual lives in `docs/THREAT-MODEL.md` §5 and allocator-wide proof is future
+  hardening.

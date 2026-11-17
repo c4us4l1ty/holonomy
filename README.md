@@ -21,6 +21,10 @@ Neither folder is a workspace member; both are prior art, kept unmodified.
 
 ## Building
 
-Rust stable (see `rust-toolchain.toml`). `cargo test --workspace` compiles and passes today
-(CI proves it every push); the workspace currently holds the Block 1 ground: gate machinery
-(`holonomy-ledger`), constitution-carrying stubs for the Blocks 2–5 crates, and `xtask`.
+Rust pinned to 1.100.0 (see `rust-toolchain.toml`). `cargo test --workspace` compiles and passes
+today (CI proves it every push). The workspace holds the gates machinery (`holonomy-ledger`), the
+seal (`holonomy-seal`, Block 2 — closed 2026-11-17 by scope amendment), the append-only world-line
+(`holonomy-line`, Block 3 — closed in scope, with L-6/L-10 qualification owed to Blocks 6 and 10),
+law-carrying stubs for the still-unstarted Spine and Eye, and `xtask`. Every unmeasured law reads
+`spec` in `GATES.md`; that column is the honest one and nothing is promoted to `gated` without a
+measurement in CI.

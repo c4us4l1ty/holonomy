@@ -1,5 +1,7 @@
 # HOLONOMY v6 — THREAT MODEL
-*Status: Block 1 working canon. Versioned with the repo; changes require an AUDIT.md entry.*
+*Status: Block 1 working canon. Versioned with the repo; changes require an AUDIT.md entry.
+Amended 2026-11-17 — see AUDIT.md, "gate-closure amendment" (zeroization scope, L-6 deferral,
+scroll timing).*
 
 This is the legal system the rest of v6 is built under. It says what we protect, against
 whom, at which moments — and, just as importantly, what we **refuse to pretend** to protect.
@@ -55,8 +57,10 @@ The threat model bites hardest at specific instants; each has a designated behav
 
 - **Open:** plaintext delta is the viewport neighborhood (L-2), never the file (RFC-002).
 - **Scroll/edit:** slabs wipe as they exit residency; keystrokes allocate zero (L-2).
-- **Save:** append sealed segments and sync a witness commit point. Crash-consistency injections
-  exist, but actual power-loss/device durability remains unqualified (L-6 is still `spec`).
+- **Save:** append sealed segments and sync a witness commit point. The ordering is exercised by
+  injected short writes at every byte, both sync barriers, truncate failure, and real ENOSPC on an
+  ext4 loop image. Actual power-loss/device-cache durability remains unqualified and is owned by the
+  Block 6 kill-power suite and the Block 10 release gate (L-6 is still `spec`).
 - **Blur/lock:** plaintext pages shed residency and wipe; clipboard cleared (Block 9).
 - **Suspend/quit/tripwire:** L-7 verified wipe — wipe set is the (bounded) resident set, so
   the v5 problem of a 180 MiB wipe exceeding its budget is deleted by construction.
@@ -78,6 +82,21 @@ Recorded so no future version quietly upgrades these into claims:
   legitimately shorter file without trusted monotonic state outside the copied `.wavefunction`.
   v6 claims integrity of the bytes present and crash consistency, not freshness against this
   rollback; see RFC-002 and AUDIT OQ-7.
+- **Dependency-internal scratch is not claimed erased.** Project-owned secret buffers are zeroized
+  under the registered-allocation audit, and the reviewed crates' wipe features are enabled and
+  CI-enforced. Stack and heap temporaries *inside* those dependencies — Argon2/BLAKE2 intermediates,
+  ML-KEM stack state, XChaCha's HChaCha state/subkey copy, and `unicode-normalization`'s non-wiping
+  `TinyVec` buffers for long combining runs — are bounded where possible (4,096-byte passphrase cap
+  before NFC) and recorded in AUDIT.md, but not proven wiped. No allocator-wide, register, or
+  physical-memory erasure is claimed anywhere.
+- **Physical power loss is an obligation, not a result.** Crash consistency is evidenced under a
+  software failure model plus one ext4 loop-filesystem ENOSPC rehearsal. A controlled power cut,
+  controller-cache evaluation, and a supported-device matrix have not been run; they are owed to the
+  Block 6 kill-power gate and the Block 10 release gate, and L-6 stays `spec` until then.
+- **Which pages you read is observable.** Slab fault-in timing is a side channel, accepted rather
+  than smoothed (AUDIT OQ-4): the same adversary can see the ciphertext reads at known file offsets,
+  and smoothing would cost idle work proportional to traversal. This is a disclosed property of the
+  residency model, not a defended one.
 
 ## 6. Registry: law → adversary
 

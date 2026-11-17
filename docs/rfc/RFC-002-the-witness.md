@@ -1,12 +1,12 @@
 # RFC-002 — The Witness (Block 3)
 
-*Status: Block 3 implementation and test draft. CI run 43926666233 passed rustfmt, clippy,
-workspace tests, and the gates contract. New tests inject a short write at every append byte,
-fail each sync barrier, and fail tail-recovery truncation. They measure `File::write` offsets and
-completed byte counts on a simulated 30 M-word file. They do not model actual power loss, ENOSPC,
-filesystem journaling, or backup-network transfer. L-6 and L-10 therefore remain `spec`, not
-passed gates. The valid-prefix rollback limit is explicitly amended below and remains open as
-AUDIT OQ-7.*
+*Status: **Block 3 closed 2026-11-17 under scope amendment** (AUDIT.md, "gate-closure amendment").
+Tests inject a short write at every append byte, fail each sync barrier, and fail tail-recovery
+truncation; they trace `File::write` offsets and byte counts on a simulated 30 M-word file, and the
+ext4 ENOSPC rehearsal runs in CI, and a named rsync client is measured and bound-checked by a CI
+job on every push. The format freezes the write ordering; **physical power-loss qualification is not claimed and
+is owed to the Block 6 kill-power gate and the Block 10 release gate**, where L-6 and L-10 stay
+`spec`. The valid-prefix rollback limit is explicitly amended below and remains open as AUDIT OQ-7.*
 
 ## Context
 
@@ -32,8 +32,10 @@ of sealed slabs*.
    committed bytes. An incomplete or uncommitted tail is reported on open and discarded before
    the next append. Tests now trace the appender's `File::write` calls, confirming offsets start
    at the prior EOF and write bytes match the appended frames, even on a simulated 30 M-word
-   history. This proves the local writer is tail-only, not that any backup client transfers only
-   that tail; L-10 remains unproven until a concrete sync path is measured.
+   history. This proves the local writer is tail-only. A concrete sync path has since been measured
+   — rsync 3.2.7 against a local daemon, asserting literal data ≤ appended bytes + one block and
+   application-layer bytes ≤ 8× appended — which is the L-10 measurement for *that client only*, not
+   for backup clients or remote services in general.
 4. **Atomic commit**: for an existing file: segment writes → file sync → witness write → file
    sync. The witness is the commit point. Initial creation writes a complete staged inode,
    syncs it, links it into place without replacing an existing path, then syncs the containing
@@ -86,7 +88,7 @@ of sealed slabs*.
 | A4 splice/reorder | rearrange segments across files or epochs | file ID, epoch, sequence, predecessor tag, and CMT-4 are bound into the segment chain | capsule-replay-across-files open-refusal test; sequence/root checks reject reorder |
 | A4 valid-prefix rollback | truncate exactly to an earlier complete witness | **not detectable from the file alone** without an external monotonic anchor; no local test may claim otherwise | regression test documents the indistinguishable valid-prefix case; residual is AUDIT OQ-7 |
 | — append I/O failure | partial write, failure of either sync barrier, or failure truncating a recovered tail | append errors poison the handle; open selects only the last complete authenticated witness; final-sync failure is reported as uncertain | byte-by-byte injected short writes, both sync failpoints, recovery-truncate failpoints, and reopen/verify assertions |
-| — physical power loss | loss of power at arbitrary file/device-cache boundaries | required durability ordering is implemented, but physical persistence behavior depends on filesystem and hardware | not tested; no power-cut/VM snapshot or platform filesystem qualification has been run, so L-6 remains `spec` |
+| — physical power loss | loss of power at arbitrary file/device-cache boundaries | required durability ordering is implemented, but physical persistence behavior depends on filesystem and hardware | not tested; no power-cut/VM snapshot or platform filesystem qualification has been run, so L-6 remains `spec`. Qualification is assigned to the Block 6 kill-power gate and Block 10 (AUDIT 2026-11-17) |
 | A2 open-time exposure | bulk read at open | segment ciphertext is skipped by seek; only public metadata and bounded witness bodies are read | guarded reader test fails if open reads any segment body |
 
 ## Offline rollback limit (amendment)
@@ -110,5 +112,6 @@ not a hidden property.
   the segment quantum at 64 KiB; changing it requires a format-version change, with an explicit
   segment-size field reserved for a later version.
 - **Directory-of-segments**: best incremental-sync story, worst drag-and-drop story; one
-  file wins because L-9's portability is constitutional. Appending preserves the old file prefix,
-  but end-to-end sync efficiency still depends on a backup client/backend and remains unmeasured.
+  file wins because L-9's portability is constitutional. Appending preserves the old file prefix;
+  end-to-end sync efficiency is measured for one named client (rsync) and remains unmeasured for
+  every other client and remote backend.

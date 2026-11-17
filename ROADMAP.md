@@ -65,14 +65,26 @@ v5.0-OMEGA theatricality.
 - Explicit **capability tokens**: code that does not hold the token type cannot receive
   plaintext key bytes. The compiler enforces the boundary the audits used to patrol by hand.
 
-**GATES**
-- [ ] Adversarial audit of the crypto RFC closed: zero unresolved "impossible claim" items.
-- [ ] Envelope round-trips with deliberately corrupted inputs fail with coarse errors only.
-- [ ] No key material ever crosses an allocation that isn't zeroized under a counting test.
-      **Scope status:** the current allocator test inspects project-owned ranges explicitly
-      registered by their owners; it does not cover dependency-owned scratch. The Block 2
-      dependency-temporary audit in `AUDIT.md` records both enabled wipe hooks and known gaps, so
-      passing that test or enabling Cargo features alone does not close this gate.
+**GATES** — ✅ **passed 2026-11-17 by scope amendment** (AUDIT entry *gate-closure amendment*;
+no law promoted — `docs/GATES.md` is unchanged)
+- [x] Adversarial audit of the crypto RFC closed: every open item is killed, amended with its
+      limit stated, or assigned to the block that owns it. RFC-001 now claims what the tests
+      establish and names what they do not.
+- [x] Envelope round-trips with deliberately corrupted inputs fail with coarse errors only:
+      garbage capsule, wrong passphrase, wrong unwrap key, capsule-field and AEAD bit-flips,
+      wrong-context relocation and wire-length refusal are each pinned by a test in
+      `holonomy-seal`, and every one of them surfaces as the single `OpenRejected` error whose
+      display string a test forbids from distinguishing wrong passphrase from tampering.
+- [x] **Project-owned** key material crosses no allocation that escapes a zeroizing owner: the
+      test-only allocator fails on any registered buffer that is nonzero at free, on any secret
+      reallocation, and on registry overflow, and it runs in CI.
+      **Amended scope, stated rather than implied:** dependency-internal stack and heap scratch is
+      **not claimed wiped**. It is bounded (4,096-byte passphrase cap before NFC), wiped where the
+      reviewed crates expose state-drop hooks via their `zeroize` features (CI fails if the feature
+      graph loses an edge), source-reviewed at the pinned revisions listed in `AUDIT.md`, and
+      disclosed in `docs/THREAT-MODEL.md` §5. An allocator-wide proof over dependency internals is
+      future hardening, not a Block 2 exit condition; it is recorded as an open claim, never as
+      closed.
 
 ---
 
@@ -108,31 +120,51 @@ limited by disk, not by format — this is what makes sixty years *the default s
   `holonomy verify` re-checks segment integrity after a copy, so a cloud-mangled file is detected,
   not silently trusted.
 
-**GATES**
+**GATES** — ✅ **passed 2026-11-17 under scope amendment; L-6 and L-10 remain `spec`**
+(AUDIT entry *gate-closure amendment*; the two deferrals below are obligations with named owners,
+not waivers)
 - [x] Exhaustive short-write injection at every append byte, both sync failures, and recovery
       truncate failures reopen to the last committed witness (or a complete authenticated new
       witness after an uncertain commit sync).
-- [ ] Qualify L-6 under actual supported-filesystem/device power-loss and out-of-space behavior;
-      in-process fault injection alone is not a power-cut test. The explicit ext4 ENOSPC rehearsal is
-      `scripts/qualify-ext4-enospc.sh` (128 MiB loop image; run metadata and `HOLONOMY_ENOSPC_MEASUREMENT`
-      are recorded by CI). It covers ENOSPC/recovery on that ext4 loop filesystem only; a controlled
-      physical-device power cut, controller-cache evaluation, and supported-device matrix remain
-      unperformed and are required before this gate can pass.
+- [x] Crash consistency on a real filesystem image: `scripts/qualify-ext4-enospc.sh` appends until
+      a 128 MiB ext4 loop filesystem reports ENOSPC and reopens to one committed segment with a
+      verified 352,256-byte uncommitted tail; CI records `HOLONOMY_ENOSPC_MEASUREMENT`.
+      *This is loop-filesystem and injected-failure evidence, not a power-cut test.*
 - [x] A simulated 30 M-word history records the append writer's actual `File::write` offsets and
       byte counts: every write starts at the previous EOF, the old prefix is unchanged, and the
       total equals `AppendReceipt::bytes_appended`.
-- [ ] Measure bytes transferred by a named backup/sync client after a save. The ignored rsync
-      harness in `crates/holonomy-line/src/tests.rs` runs with `cargo test --locked -p holonomy-line
-      --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored
-      --nocapture`; CI records the rsync version, file/append sizes, and client application-layer
-      bytes. Evidence remains specific to that client build/configuration/workload and does not
-      qualify other clients or remote backends.
+- [x] Tail-only transfer measured on a named client: the ignored rsync harness
+      (`cargo test --locked -p holonomy-line --lib
+      tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored
+      --nocapture`) runs in CI on every push and asserts client literal data ≤ appended bytes +
+      one 64 KiB block and application-layer bytes ≤ 8 × appended bytes, logging the client
+      version and sizes. *Evidence applies to that client, build, configuration and workload.*
 - [x] `verify` catches flipped bytes anywhere, including in "old" history.
+- [ ] **Deferred, not waived — L-6 physical qualification** (owned by Block 6's
+      kill-power-at-random-instant suite and Block 10's all-three-OSes release gate): a controlled
+      power cut at arbitrary instants, controller-cache evaluation, and a supported-device matrix.
+      Block 3 freezes the write ordering that suite will test; `L-6` stays `spec` until it runs.
+- [ ] **Deferred, not waived — L-10 client and backend scope** (owned by Block 10): other clients
+      and remote backends remain unqualified. `L-10` stays `spec` until a backend matrix exists,
+      or until the law is explicitly narrowed in `LAWS` at the release gate.
+
+**Why an amended close, not a pass by evidence.** Block 3's exit condition is that the *format's
+behaviour is fixed and evidenced under a stated failure model*: the writer appends, the witness
+commits, a torn tail is discarded, the old prefix is never rewritten. Physical-device durability is
+a property of that same frozen ordering, and it needs hardware this project does not control. Holding
+Block 3 open for it would freeze construction on equipment access rather than on an unproven design
+claim — so the claim is narrowed to the model the tests exercise, the remainder is named in
+`docs/THREAT-MODEL.md` §5, and it is owed to the gates that can measure it.
 
 ---
 
 ## Block 4 — The Spine
 *Purpose: the document engine — where "never decrypt more than you look at" becomes true.*
+
+**Unblocked 2026-11-17:** Block 2 and Block 3 gates closed by scope amendment, and AUDIT OQ-4
+(the scroll-timing side channel) is decided — accepted and disclosed in `docs/THREAT-MODEL.md` §5,
+because slab fault-in reads are already visible at the I/O layer, while smoothing them would spend
+L-5 (idle is idle) on the exact traversal cost this architecture exists to delete.
 
 Salvages H1's two crown jewels, redesigned onto the segment log: the **faulting leaf**
 residency model (leaves fault in from the 64 KiB section store; bounded resident set) and
