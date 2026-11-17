@@ -124,8 +124,8 @@ fn finding_the_window_costs_a_logarithm_not_a_walk() {
     // The bound is a multiple of the tree's depth plus a constant, which is what "logarithmic"
     // means as an assertion: 59 reads on 43,945 leaves is a depth of 15, so about four reads per
     // level — and a walk would have been 43,945.
-    let depth_big = u64::from(big_spine.slab_count()).ilog2();
-    let depth_small = u64::from(small_spine.slab_count()).ilog2();
+    let depth_big = u64::from(big_spine.slab_count().ilog2());
+    let depth_small = u64::from(small_spine.slab_count().ilog2());
     let bound = |depth: u64| 4 * (depth + 1) + 8;
     assert!(
         big.reads <= bound(depth_big),
