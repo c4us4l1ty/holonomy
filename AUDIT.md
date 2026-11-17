@@ -48,8 +48,145 @@ Listed so they stay dead.
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
 | OQ-10 | A full resident slab has **no continuation policy**. `SlabText::insert` refuses with `WouldSplit { needed, capacity }` — correctly, since growing inside the keystroke path would hide an allocation — but nothing says what the editor does next. Committing the full leaf and re-faulting it with fresh slack works and is one line of wiring, at a price: every exhaustion re-seals the whole leaf, so a 64 KiB slab rewritten per few kilobytes of typing is 16× write amplification and a world-line that grows with redundant copies of the same text. The alternative is to split the leaf at the caret and start a **pending leaf** that exists in no spine yet — which the overlay cannot express, because `Draft` maps an existing leaf to a live length. Found 2026-11-17 while writing the many-commit stress test (which sidesteps it with generous slack). Decide with Block 5, where the editor's caret model makes the split point meaningful. | **open — found 2026-11-17, no fix yet** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
+| OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
+| OQ-12 | **The window is not yet known to be viewport-sized.** `layout_styled` shapes exactly the text it is handed and its cost is linear in that text; Block 5's cost gate — "layout cost on a 30 M-word doc is invariant in document length" — is a claim about the *caller*, and the caller does not exist yet. The index half now does: `HeightModel` (`heights.rs`) finds a leaf range for a viewport in O(log n) counted reads. What remains is the Spine wiring that turns a leaf range into text — and that wiring must decide OQ-10 first, because a pending leaf has text but no spine entry to hold its height. | **open — index landed 2026-11-17, caller not written** |
 
 ## Audit trail
+
+- **2026-11-17 — Block 5, bug hunt before merge: a break that stopped being a break.** Three real
+  defects in the segmentation and transform, found by reading the code adversarially rather than by
+  a failing user report.
+
+  **1. A mark after a newline swallowed the line break.** Segmentation joined a combining mark to
+  whatever preceded it, including `"\n"`. The cluster then read `"\n\u{301}"`, which is not
+  `"\n"`, so the layout never took the hard-break branch: the newline was laid out as nothing and
+  the next line's text joined the previous one. The caret and any renderer would have disagreed
+  about where the line ended — the exact failure class this crate exists to make impossible.
+
+  **2. A zero-width joiner reached across a newline** for the same reason, from the other side: the
+  ZWJ rule was unconditional, so `👨\u{200D}\n` was one cluster.
+
+  **3. A lone carriage return was not a break at all.** UAX #29 makes CR, LF and CR LF all mandatory
+  breaks (GB3/GB4); the layout only knew two of the three, so a CR-only document rendered its line
+  ends as glyphs and its carets ran through them.
+
+  The fix is a single guard: nothing joins across or onto a break, and CR LF is the only pair that
+  merges. The regression tests are the interesting part. Besides six segmentation assertions, the
+  layout now has an invariant that would have caught all three at once: **the window's bytes,
+  reassembled from the run tree in line order, must equal the window**. Clusters carry their text
+  and lines carry their boundaries, so the bytes between one line's end and the next line's start
+  are exactly the break that separated them — nothing at all for a soft wrap. A swallowed newline
+  disappears from that reconstruction. The check runs over a fixed corpus and inside the randomized
+  property test, so future segmentation edits have to keep the bytes.
+
+  **Also hardened, not fixed.** `View::to_device` multiplied a coordinate by the zoom numerator in
+  `i128` and cast the result with `as i64`: an absurd zoom (or a coordinate near the end of the
+  range) wrapped in release and panicked in debug. It now saturates, because a coordinate that
+  large is nowhere near a viewport and a saturated number stays visibly absurd where a wrapped one
+  looks like geometry. `View::hit_test` debug-asserts that a line box does not map to zero device
+  units, which is the one input that would make "which line is this click on" undefined.
+
+- **2026-11-17 — Block 5, fourth slice: the height index, and a cost claim that is counted.**
+  Block 5's second gate says layout cost must be invariant in document length. Half of that is the
+  index that finds the viewport without reading the document; the other half is the caller that
+  supplies windowed input, and the caller does not exist yet (OQ-12).
+
+  **What landed.** `HeightModel` keeps one measured height per leaf — Block 4's slab, the unit the
+  Spine already splits and re-faults, so the Eye does not invent a second partition of the text —
+  in a Fenwick tree. `prefix`, `set`, `leaf_at` and `window` are O(log n) cell reads. A window is a
+  leaf range plus its two document coordinates, so a scrolled viewport can be described without
+  touching the index again.
+
+  **Why the cost is counted.** A wall-clock test would measure the runner; the gate is a claim about
+  the algorithm. The model counts the index cells it reads, and the tests assert numbers: a window
+  over 2^18 leaves costs fewer than 160 reads, and sixteen times as many leaves costs less than
+  twice the reads. This is the same discipline as the counting-allocator gate, applied to reads
+  instead of allocations.
+
+  **Zero is a value, not a hole.** A leaf is unmeasured until it has been laid out, and its height
+  is zero until then. `leaf_at` steps over unmeasured leaves rather than pretending they occupy
+  space, which means a window that contains them is provisional — the docs say so, and a caller that
+  trusts such a window too early will see its scroll geometry move as measurement catches up. That
+  is a real limitation, recorded rather than smoothed over.
+
+  **What this does not do.** It does not decide where a leaf's text comes from when the leaf is a
+  *pending* draft that exists in no spine (OQ-10), and it does not yet ask the Spine for anything.
+  The next slice is that wiring, and it is the slice where OQ-10's answer has to be chosen, because
+  the same walk that picks leaves must decide what a pending leaf's height means before it is
+  committed.
+
+- **2026-11-17 — Block 5, second and third slices: zoom as a view transform, style runs as layout
+  data.** Both slices answer the same question — *which arithmetic is allowed to change a
+  coordinate* — and both answer it by adding none.
+
+  **Zoom/DPI has no inverse.** The tempting shape is paint multiplying by the scale and hit-test
+  dividing by it: two roundings, two answers, and zoom becomes the seam Block 5 exists to close.
+  [`View`] therefore exposes one mapping, `to_device`, and `hit_test` never maps a device point back
+  into layout space — it compares the point against the device positions paint would draw, computed
+  by that same mapping. The transform is exact rational integer scaling (`logical × zoom_milli × dpi
+  / 96_000`, rounded half away from zero in `i128`). A line box maps as a whole, so one line's
+  bottom is exactly the next line's top and a caret's own `y` always selects its own line; the
+  caret's painted height is the distance between the mapped top and bottom, so the box a renderer
+  draws is the box hit-testing tested. `Layout::paint_point` and `Layout::hit_test` are now
+  `View::IDENTITY`'s answers — one implementation of the walk, not two that must agree.
+
+  **Styles are geometry, not decoration.** A heading is not the same layout drawn bigger: bigger
+  fonts have bigger advances and taller line boxes, so a renderer that applies a style the layout
+  did not shape with owns a second geometry — the v3 disease wearing a hat. `Style` (size in
+  thousandths of a logical unit, bold, italic) now travels as `StyledRun`s in `StyledText`; the
+  `Shaper` is asked every metric question *with* the style it applies to; `Placed` carries the style
+  it was shaped with; a line box is as tall as its tallest cluster and an empty line takes the
+  height of the style that reaches it. Font families are deliberately absent — they are Block 8's
+  pipeline decision and cannot be tested before that pipeline exists.
+
+  **What the tests pin.** L-8's property test now sweeps a ten-string corpus (Latin, combining
+  marks, ZWJ emoji, CJK, hard breaks, trailing newline, empty text) over six wrap widths × eight
+  zoom steps × five DPIs, and asserts the strong form — *the same byte back* — wherever device
+  positions are distinct; a zero-width-cluster shaper pins the tie rule where they are not, because
+  two carets at one device position cannot be told apart by a click and the answer must not depend
+  on rounding. Style tests pin the run boundary, a wrapping window with three mixed-size runs, and
+  empty lines inheriting the style that reaches them. `View::IDENTITY` is asserted to answer exactly
+  as the layout does, so the transform is provably the only difference between the two spaces.
+
+  **Still `spec`.** `L-8` remains `spec`: the property holds for a fake shaper, and Block 8's real
+  pipeline has not been through it. Block 5's second gate (layout cost invariant in document length)
+  has no evidence at all — `layout_styled` shapes whatever window it is handed, and nothing yet
+  constrains that window to a viewport (OQ-12) — and its third gate (BiDi and multi-script
+  cluster-honest carets) still rests on the approximate segmentation recorded in OQ-11.
+
+- **2026-11-17 — Block 5, first slice: one geometry, two consumers.** The Eye's geometry core lands
+  as four modules with no dependencies, no font, and no window, because the property that matters
+  is provable without any of them.
+
+  **Coordinates are integers.** [`Fixed`] is an `i64` in 64ths of a logical unit. L-8 compares
+  positions for equality, and floats would make "the same point" a question about rounding: paint
+  would round one way and hit-test the other, reopening the seam inside the arithmetic itself. The
+  only float in the crate is `to_f32`, for the GPU, and nothing compares against it.
+
+  **Caret positions are cluster boundaries.** Segmentation is a hand-written, conservative
+  approximation of UAX #29: combining marks, variation selectors, ZWJ sequences, skin tones,
+  regional-indicator pairs and CRLF merge; **nothing ever splits a mark from its base**. The
+  approximation errs in the safe direction — a caret may sit where a real renderer would not allow
+  one (Hangul jamo stays split; OQ-11), but it can never produce two answers for one point.
+
+  **The one list.** `layout_window` builds lines of placed clusters; `Line::boundaries` yields
+  `(x, byte)` for every caret position on a line, and `paint_point` and `hit_test` are the same
+  walk in opposite directions. A soft-wrapped line deliberately exposes **no** end caret, because
+  wrapping inserts no character: offering one would give a byte two visual positions, which is the
+  drift this block exists to prevent. Ties in `hit_test` go to the earlier boundary, so the answer
+  never depends on storage order.
+
+  **What the tests pin.** Golden geometry (`"abc"` at three-unit glyphs, exact 64ths), wrap and
+  hard-break line splitting, empty lines keeping exactly one caret, click tie-breaks, every caret
+  position in nine corpus strings round-tripping at six widths, and 64 randomized windows over an
+  alphabet of combining marks, ZWJ emoji, skin tones, wide clusters and newlines. Advances enter
+  only through the `Shaper` trait, so a fake shaper proves the law without a font.
+
+  **Still `spec`.** `L-8` stays `spec` for two reasons, both stated in the crate docs rather than
+  hidden: segmentation is approximate (gate 3's BiDi half is not attempted at all), and the
+  zoom/DPI view transform does not exist yet, so "at every zoom and DPI" quantifies over nothing.
+  The transform is the next slice; promoting `L-8` before it lands would be the audit failure this
+  document exists to prevent.
 
 - **2026-11-17 — Block 4, fourth slice: the live-length overlay, so a stale spine still answers.**
   D-2 recorded its own cost in plain words: the resident slab is authoritative while it is edited,

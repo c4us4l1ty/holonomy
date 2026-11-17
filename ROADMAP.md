@@ -238,6 +238,17 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
 - Golden-corpus tests at multiple zooms and DPIs: for a fixed document and viewport,
   paint decisions and hit-test decisions must be bit-derived from one source tree.
 
+**Status (2026-11-17, in progress — no gate claimed)**
+- `holonomy-eye` has: integer geometry (`Fixed`, 64ths), grapheme-cluster segmentation, one run
+  tree both consumers walk, zoom/DPI as a single exact view transform with no inverse to round
+  against, and style runs as layout data. L-8's property test exists and passes over a corpus of
+  scripts at 8 zooms × 5 DPIs, on a fake shaper.
+- A Fenwick height model over leaf heights exists, and its cost is *counted* rather than asserted
+  (a viewport over 2^18 leaves costs < 160 index reads; 16× the leaves costs < 2× the reads).
+- Not yet: the Spine wiring that turns a leaf range into windowed text (so gate 2 has an index but
+  no caller — OQ-12), real UAX-29 segmentation and BiDi reordering (gate 3), and a real shaper
+  (Block 8), without which L-8 stays `spec` rather than `enforced`.
+
 **GATES**
 - [ ] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
       shaped glyph — the v3 regression made impossible, proven.
