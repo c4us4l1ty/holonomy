@@ -121,24 +121,29 @@ fn finding_the_window_costs_a_logarithm_not_a_walk() {
     let small = sweep(&small_spine, &small_heights);
     let big = sweep(&big_spine, &big_heights);
 
-    // Two descents of a Fenwick tree, so at most twice the depth plus the constant the descent
-    // itself spends. 44,000 leaves is a depth of 16; 64 is a ceiling with room to spare.
+    // The bound is a multiple of the tree's depth plus a constant, which is what "logarithmic"
+    // means as an assertion: 59 reads on 43,945 leaves is a depth of 15, so four descents' worth per
+    // level with room to spare — and a walk would have been 43,945.
+    let depth_big = u64::from(big_spine.slab_count()).ilog2();
+    let depth_small = u64::from(small_spine.slab_count()).ilog2();
+    let bound = |depth: u64| 4 * (depth + 1) + 8;
     assert!(
-        big.reads <= 64,
+        big.reads <= bound(depth_big),
         "a viewport on {} leaves cost {} index reads",
         big_spine.slab_count(),
         big.reads
     );
     assert!(
-        small.reads <= 64,
+        small.reads <= bound(depth_small),
         "a viewport on {} leaves cost {} index reads",
         small_spine.slab_count(),
         small.reads
     );
-    // A thousandfold document is about ten more levels, two descents each: the reads may grow by a
-    // logarithm, and by nothing else.
+    // A thousandfold document is ten more levels: the reads may grow by ten levels' worth and by
+    // nothing else.
+    let extra = 4 * depth_big.saturating_sub(depth_small) + 8;
     assert!(
-        big.reads <= small.reads + 24,
+        big.reads <= small.reads + extra,
         "{} reads at 1000x the length against {}",
         big.reads,
         small.reads

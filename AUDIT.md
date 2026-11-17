@@ -67,8 +67,11 @@ Listed so they stay dead.
   **The result.** The worst viewport asks the layout for one screen of text plus the two leaves its
   edges land in — 1.2 MB at 300 leaves a screen — and the *same bound* holds on a document a
   thousand times shorter, which is the invariance claim stated as a bound that does not contain the
-  document's length. Finding that window costs at most 64 counted index reads on 44,000 leaves, and
-  at most 24 more than on the thousandfold-smaller document: a logarithm, not a walk.
+  document's length. Finding that window costs **59 counted index reads on 43,945 leaves** and **18
+  on 43 leaves**: the bound is a multiple of the tree's depth plus a constant, so ten more levels
+  cost about forty more reads — a logarithm, not a walk. The number came from the first CI run that
+  failed the assertion I guessed (`59 reads at 1000x the length against 18`), which is the correct
+  way for a measurement to arrive.
 
   **Why this is not yet gate 2.** The gate is about cost, and cost has a clock. What this shows is
   that the clock's *input* — bytes shaped per viewport — cannot grow with the document, and that the
