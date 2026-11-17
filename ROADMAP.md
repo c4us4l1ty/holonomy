@@ -69,6 +69,10 @@ v5.0-OMEGA theatricality.
 - [ ] Adversarial audit of the crypto RFC closed: zero unresolved "impossible claim" items.
 - [ ] Envelope round-trips with deliberately corrupted inputs fail with coarse errors only.
 - [ ] No key material ever crosses an allocation that isn't zeroized under a counting test.
+      **Scope status:** the current allocator test inspects project-owned ranges explicitly
+      registered by their owners; it does not cover dependency-owned scratch. The Block 2
+      dependency-temporary audit in `AUDIT.md` records both enabled wipe hooks and known gaps, so
+      passing that test or enabling Cargo features alone does not close this gate.
 
 ---
 

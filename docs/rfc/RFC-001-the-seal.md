@@ -22,10 +22,13 @@ the sole required factor (L-9) and demotes USB to an optional hardener.
 2. **Envelope (inherited):** passphrase → Argon2id (memory-hard, host-calibrated cost,
    recorded ledger-style) → `K_unwrap` → phase-1 unwrap of the per-save hybrid decapsulation
    key → ML-KEM-1024 + X25519 decapsulation → `K_DEM`. Key-committing AEAD (CMT-4) per sealed
-   object; owned secret buffers are zeroized, and OS page protections are reported honestly:
-   Unix `mlock` / Windows `VirtualLock`, plus Linux `MADV_DONTDUMP` where accepted. `memfd_secret`
-   availability is probed on supported Linux architectures, but key cells are not backed by it;
-   there is no process-wide core-dump disable or `DONTFORK` claim.
+   object; project-owned secret buffers have explicit zeroizing guards, and available dependency
+   wipe-on-drop features are enabled where reviewed. Dependency-internal scratch is not covered
+   by that statement; its current evidence and known gaps are recorded below and in `AUDIT.md`.
+   OS page protections are reported honestly: Unix `mlock` / Windows `VirtualLock`, plus Linux
+   `MADV_DONTDUMP` where accepted. `memfd_secret` availability is probed on supported Linux
+   architectures, but key cells are not backed by it; there is no process-wide core-dump disable
+   or `DONTFORK` claim.
 3. **USB, truly optional:** the KDF info string carries a domain-separated *optional* USB
    secret slot; absent → passphrase-only derivation passes the same code path with the slot
    inactive. No boolean fork of security logic; one path, one code review.
@@ -59,7 +62,14 @@ the sole required factor (L-9) and demotes USB to an optional hardener.
   fence?). Numbers land in the Block 2 calibration gate; until then the RFC commits only to
   the *mechanism* of calibration, not a guessed constant — the exact discipline H1 paid 57×
   to learn.
-- The allocation-audit test observes explicitly registered secret buffers and total allocator
-  activity, but cannot by itself prove that every dependency-owned temporary is secret-free or
-  wiped. Complete the heap proof with dependency/allocation coverage (including normalization
-  internals) or a safe alternative before closing Block 2's zeroization gate.
+- **Dependency-temporary zeroization remains open.** The test-only allocator checks only
+  project-owned ranges explicitly registered at their owners; counting total allocations does not
+  show that unregistered dependency buffers are erased. Static review of the locked source set
+  found that `unicode-normalization` 0.1.26 buffers long combining runs in non-zeroizing TinyVecs,
+  so passphrase input is capped at 4,096 raw UTF-8 bytes before NFC. That bounds the input driving
+  scratch growth but neither wipes it nor covers the caller's borrowed source text. Direct
+  `sha3`/`shake` zeroize edges (and the Poly1305 edge) enable selected state-drop hooks, but
+  reviewed Argon2/BLAKE2 and ML-KEM stack intermediates, plus XChaCha's HChaCha state/subkey copy,
+  remain unzeroized or unproven. See the pinned-source findings and exact limits in `AUDIT.md`.
+  Do not close this gate based only on the registered-buffer test, the input bound, or feature
+  activation; further safe mitigation or adequate dependency evidence is required.

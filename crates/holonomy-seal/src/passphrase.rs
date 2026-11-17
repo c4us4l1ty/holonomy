@@ -56,12 +56,14 @@ impl core::fmt::Display for PassphraseError {
 
 impl std::error::Error for PassphraseError {}
 
-/// A normalized, zeroizing passphrase. Bytes are exposed only inside a callback so nothing
-/// holds a second copy after the row of work is done.
+/// A normalized passphrase whose owned output buffer is zeroized on drop. Bytes are exposed
+/// only inside a callback. The borrowed source text and unicode-normalization's internal
+/// iterator buffers are outside this guard; `new` bounds, but does not wipe, the latter.
 pub struct PassphraseInput(Zeroizing<String>);
 
 impl PassphraseInput {
-    /// Accept user text: NFC-normalize, bound-check, wrap zeroizing.
+    /// NFC-normalize and bound-check borrowed user text into a zeroizing output buffer.
+    /// This does not zeroize the caller's source text or dependency-owned normalization scratch.
     pub fn new(raw: &str) -> Result<Self, PassphraseError> {
         if raw.is_empty() {
             return Err(PassphraseError::Empty);
@@ -170,7 +172,8 @@ mod tests {
         let mark = char::from_u32(0x0301).unwrap();
         let raw = format!(
             "a{}b",
-            mark.to_string().repeat((MAX_PASSPHRASE_INPUT_BYTES - 2) / mark.len_utf8())
+            mark.to_string()
+                .repeat((MAX_PASSPHRASE_INPUT_BYTES - 2) / mark.len_utf8())
         );
         assert_eq!(raw.len(), MAX_PASSPHRASE_INPUT_BYTES);
         assert_eq!(

@@ -116,6 +116,7 @@ jobs:
             'argon2 feature "zeroize"' \
             'chacha20 feature "zeroize"' \
             'curve25519-dalek feature "zeroize"' \
+            'digest feature "zeroize"' \
             'ml-kem feature "zeroize"' \
             'poly1305 feature "zeroize"' \
             'sha3 feature "zeroize"' \
