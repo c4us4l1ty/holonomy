@@ -474,6 +474,79 @@ fn a_click_lands_on_a_cluster_boundary_and_a_drag_selects() {
 }
 
 #[test]
+fn a_taller_viewport_pulls_the_scroll_back_inside_the_document() {
+    let mut shell = editor(Repeated::new(64));
+    shell.type_text(&repeat_leaf().repeat(64)).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    assert_eq!(shell.heights().total(), Fixed::units(420), "twenty-one lines");
+
+    // The last screen of a 40-unit viewport, and then the window grows: the maximum scroll is a
+    // function of the viewport, so 380 is past the end of a 200-unit one.
+    shell.scroll_to(Fixed::units(380));
+    assert_eq!(shell.scroll(), Fixed::units(380));
+    shell.resize(WIDTH, Fixed::units(200));
+    assert_eq!(shell.scroll(), Fixed::units(220), "420 units, less the 200 on screen");
+
+    // And the frame it produces is still the document's: 220 is the start of line eleven.
+    let origin = shell.frame().expect("framed").origin();
+    assert_eq!(origin, 11 * 200);
+}
+
+#[test]
+fn a_crlf_split_across_a_leaf_is_one_break() {
+    let document = "abc\r\n".repeat(20);
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+
+    // A hundred bytes into sixty-four-byte leaves: the cut lands between the CR of the twenty-first
+    // unit's break and its LF. Laid out apart, the LF starts a line the document does not have.
+    assert_eq!(shell.heights().len(), 2, "two leaves");
+    let whole = layout_styled(StyledText::plain(&document), 0, WIDTH, &Fake);
+    assert_eq!(shell.heights().total(), whole.height(), "twenty-one lines, not twenty-two");
+    assert_eq!(shell.heights().total(), Fixed::units(21 * 20));
+}
+
+#[test]
+fn a_backspace_crosses_a_leaf_boundary_to_take_its_cluster() {
+    let mut document = "a".repeat(63);
+    document.push_str("e\u{301}");
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    assert_eq!(shell.document_len(), 66, "sixty-three letters, then e and its mark");
+
+    // The caret is after the mark, and the leaf cut fell between the base and the mark — so the
+    // cluster the backspace takes begins in the leaf before the caret's.
+    assert!(shell.backspace().expect("a backspace"), "there is a cluster to take");
+    assert_eq!(shell.document_len(), 63, "the base goes with its mark");
+    assert_eq!(shell.caret(), 63);
+}
+
+#[test]
+fn a_delete_crosses_a_leaf_boundary_to_take_its_cluster() {
+    let mut document = "a".repeat(63);
+    document.push_str("e\u{301}");
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+
+    // The caret goes to the base, which is the last byte of the first leaf; its mark is the first
+    // byte of the second. One cluster, so `delete` takes both.
+    let clicked = shell
+        .click(Point::new(Fixed::units(63), Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(clicked.map(|caret| caret.byte), Some(63), "the base's boundary");
+    assert!(shell.delete_forward().expect("a delete"));
+    assert_eq!(shell.document_len(), 63, "the mark goes with its base");
+    assert_eq!(shell.caret(), 63);
+}
+
+#[test]
 fn every_caret_a_frame_offers_is_a_character_boundary() {
     // The check OQ-15 said was missing, and that only a shell could make: every byte the frame
     // offers as a caret position must be a boundary of the text the frame was laid out from, and

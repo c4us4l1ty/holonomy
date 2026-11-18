@@ -584,8 +584,15 @@ fn is_pictographic(character: char) -> bool {
 /// What GB11 needs to know about the characters already in the cluster.
 #[derive(Debug, Clone, Copy, Default)]
 struct Context {
-    /// The cluster so far ends in `Pictographic Extend* [ZWJ]` — GB11's left context.
+    /// The cluster so far — up to but not including a ZWJ just absorbed — is
+    /// `Pictographic Extend*`, which is GB11's left context.
     pictographic: bool,
+    /// The character last absorbed was a ZWJ, and the run before it was `Pictographic Extend*`.
+    ///
+    /// GB11's text is `Pictographic Extend* ZWJ`, so the ZWJ has to remember the run behind it —
+    /// and it has to *end* that run. A second ZWJ's left context is a ZWJ, which is not Extend, so
+    /// `👨‍‍👩` is two clusters; keeping `pictographic` set across the ZWJ made it one.
+    joins_after_zwj: bool,
     /// Regional indicators in the cluster so far, for GB12/GB13's odd/even rule.
     regionals: u32,
 }
@@ -593,9 +600,11 @@ struct Context {
 impl Context {
     /// Folds one more character into the context.
     fn absorb(&mut self, property: Property) {
+        // Decided before the run is updated: a ZWJ's left context is the run *behind* it.
+        self.joins_after_zwj = property == Property::Zwj && self.pictographic;
         self.pictographic = match property {
             Property::Pictographic => true,
-            Property::Extend | Property::Zwj => self.pictographic,
+            Property::Extend => self.pictographic,
             _ => false,
         };
         self.regionals = if property == Property::RegionalIndicator {
@@ -642,7 +651,7 @@ fn joins(previous: Property, current: Property, context: Context) -> bool {
         return true;
     }
     // GB11: Pictographic Extend* ZWJ × Pictographic.
-    if previous == Zwj && context.pictographic && current == Pictographic {
+    if previous == Zwj && context.joins_after_zwj && current == Pictographic {
         return true;
     }
     // GB12 and GB13: an even number of regional indicators in the cluster means the next one starts
@@ -745,6 +754,31 @@ mod tests {
         assert_eq!(
             clusters("\u{1F600}\u{200D}a"),
             vec!["\u{1F600}\u{200D}", "a"]
+        );
+    }
+
+    #[test]
+    fn a_second_zwj_ends_the_pictographic_run() {
+        // GB11's text is `Pictographic Extend* ZWJ` — one joiner at the end of the run. Two
+        // joiners put a ZWJ where the Extend* has to be, so the sequence cannot reach across the
+        // second one: `👨‍‍👩` is the man-and-joiner cluster and then the woman. The first
+        // implementation kept the pictographic flag alive across every ZWJ, which made it one.
+        assert_eq!(
+            clusters("\u{1F468}\u{200D}\u{200D}\u{1F469}"),
+            vec!["\u{1F468}\u{200D}\u{200D}", "\u{1F469}"]
+        );
+        // One joiner, with Extend* behind it, still joins — the family sequence is untouched.
+        let family = "\u{1F468}\u{1F3FD}\u{200D}\u{1F469}";
+        assert_eq!(clusters(family), vec![family]);
+        // And the run behind a second joiner may still be entered again from the new cluster: the
+        // mark after it is a fresh `Pictographic` for the next rule, not a continuation.
+        let rejoined = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(
+            clusters(rejoined),
+            vec![
+                "\u{1F468}\u{200D}\u{1F469}",
+                "\u{200D}\u{1F467}"
+            ]
         );
     }
 
