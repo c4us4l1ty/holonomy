@@ -413,7 +413,8 @@ impl<S: SegmentSink> Typing<S> {
         } else {
             let span = SlabSpan::new(open.at, Slab::new(open.source, 0, open.registered));
             self.draft
-                .record(span, u64::try_from(len).expect("a buffer fits in u64"))?;
+                .record(span, u64::try_from(len).expect("a buffer fits in u64"))
+                .expect("the only drafted leaf cannot overlap another");
         }
         Ok(())
     }
@@ -426,7 +427,9 @@ impl<S: SegmentSink> Typing<S> {
         let registered = u32::try_from(len).expect("capacity fits in u32");
         let source = self.sources.open();
         let at = self.next_at.take().unwrap_or_else(|| self.spine.len());
-        self.spine = self.spine.insert_slab(at, Slab::new(source, 0, registered))?;
+        self.spine = self
+            .spine
+            .insert_slab(at, Slab::new(source, 0, registered))?;
         self.open = Some(Open {
             source,
             at,
