@@ -48,8 +48,10 @@
 //!   eyes-only law at clipboard granularity.
 //! * Undo of typing is a **length**, not a copy: [`Typing::mark`] records how many bytes the open
 //!   source had, and the overlay hides the rest, so undo and redo copy no root, write no byte and
-//!   allocate nothing. The undo stack is bounded at a thousand marks and a seal ends it — history's
-//!   memory does not grow with the number of edits (OQ-8).
+//!   allocate nothing. Undo of a **deletion** is the other half and costs a pointer: the root from
+//!   before the cut, restored by name, because the segments a cut removed are still in the
+//!   world-line. Both halves are rings — 1024 lengths and 64 roots — so history's memory is bounded
+//!   by the tree's depth and not by the number of edits (OQ-8).
 
 pub mod commit;
 pub mod draft;
