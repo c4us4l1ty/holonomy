@@ -7,10 +7,11 @@
 //! ([`commit`]) that seals an edited slab into the world-line, takes the witness, and path-copies
 //! the spine to the new root — proven against a real `holonomy-line` world-line in
 //! `tests/commit_boundary.rs`; the live-length overlay ([`Draft`]) that keeps every position
-//! query correct *between* commits, while the spine is stale by design; and the typing session
-//! ([`Typing`]) where open sources are born, typed into, sealed and deleted. What is still missing
-//! is the editor itself and Block 5's Eye, so L-2 as a whole remains `spec` and the Block 4 gates
-//! remain open.
+//! query correct *between* commits, while the spine is stale by design; the typing session
+//! ([`Typing`]) where open sources are born, typed into, sealed and deleted; and selection
+//! ([`Selection`], [`select::copy`]) — a range in the live document, the leaves it covers, and the
+//! bytes behind them. What is still missing is the editor itself and Block 5's Eye, so L-2 as a
+//! whole remains `spec` and the Block 4 gates remain open.
 //!
 //! The constitutional clause still governs everything here:
 //!
@@ -19,7 +20,7 @@
 //! > it. Undo is a pointer walk, never a plaintext buffer — otherwise the wipe set would grow
 //! > with history.
 //!
-//! Eight structural consequences, each witnessed by a test in this crate:
+//! Nine structural consequences, each witnessed by a test in this crate:
 //!
 //! * A [`Spine`] holds no plaintext at all — only [`Slab`] references — so a sixty-year document
 //!   costs bytes that scale with segment count, not with readable text.
@@ -42,10 +43,14 @@
 //! * Deletion is a pointer operation: removing a range copies a root and writes no bytes, because
 //!   the bytes were never the document's. It follows that deletion does not erase — the world-line
 //!   keeps what was removed, exactly as an append-only log must ([`Typing::delete`], OQ-14).
+//! * A selection costs the bytes it covers: [`select::copy`] faults in exactly the leaves the range
+//!   touches and clips each one, so two bytes out of a 64 KiB leaf return two bytes — the
+//!   eyes-only law at clipboard granularity.
 
 pub mod commit;
 pub mod draft;
 pub mod residency;
+pub mod select;
 pub mod slab;
 pub mod source;
 mod spine;
@@ -56,6 +61,7 @@ pub mod typing;
 pub use commit::{commit_slab, Appended, CommitError, Committed, SegmentSink, Witness};
 pub use draft::{Draft, DraftError, LiveHit, LiveSpan};
 pub use residency::{ResidencyError, ResidentSet, SegmentSource};
+pub use select::{CopyError, Selection};
 pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
 pub use source::{is_provisional, Location, OpenSources, SealError};
 pub use spine::{History, Spine, SpineError};
