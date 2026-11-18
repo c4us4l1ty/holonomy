@@ -56,10 +56,16 @@
 //! the bytes were never discarded — the tail simply stops being part of the document until
 //! something edits it.
 //!
-//! What undo cannot do is bring back bytes an edit destroyed. A mark promises that the bytes before
-//! its length are unchanged, so a delete inside the buffer pops the marks it invalidates, and a
-//! seal pops all of them because the bytes move to the world-line and the buffer is dropped.
-//! Undoing a deletion needs the root from before the cut — a pointer swap, and the next slice.
+//! A length cannot bring back bytes an edit destroyed, so a delete inside the buffer pops the marks
+//! it invalidates: a mark promises that the bytes before its length are unchanged, and a cut breaks
+//! that promise. Undoing *those* is the other half of the history, and it is a **root**: a deletion
+//! that reaches sealed text records the tree from before the cut, and undo names that root again.
+//! It costs no plaintext — the segments a cut removed were never written to or erased from — which
+//! is OQ-14 seen from the other side, and it is why a replacement is one undoable action.
+//!
+//! Both halves are rings: a thousand lengths and sixty-four roots, so the history's memory is
+//! bounded by the tree's depth and not by the number of edits. A seal ends the epoch, because a
+//! root recorded before an append would orphan the segment it names (OQ-8).
 
 use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
@@ -137,6 +143,13 @@ struct Open {
 /// not a fraction of the history — which is OQ-8's answer for typing.
 const UNDO_DEPTH: usize = 1024;
 
+/// How many roots a session keeps, each O(log leaves) shared nodes.
+///
+/// Roots are the expensive half of the history and the only half that can restore destroyed bytes,
+/// so they get their own, much smaller ring: the session's history memory is bounded by
+/// `ROOT_DEPTH × O(log leaves)` plus `UNDO_DEPTH` words, and by nothing else (OQ-8).
+const ROOT_DEPTH: usize = 64;
+
 /// A state the session can return to.
 ///
 /// A mark is a **length**, never a copy. The bytes it refers to are still in the buffer, because an
@@ -158,6 +171,25 @@ enum Mark {
     },
 }
 
+/// One state the session can return to.
+#[derive(Debug, Clone)]
+enum Step {
+    /// A length inside the open source — cheap, and it covers typing.
+    Mark(Mark),
+    /// A fully sealed document: the root to return to, and where the caret was.
+    ///
+    /// A root is a pointer (path-copied nodes shared with the current tree), so this is the only
+    /// thing in the session that can restore **destroyed** bytes: the segments a cut removed from
+    /// the spine were never written to or erased from, so naming them again brings the text back
+    /// without decrypting anything (D-11's OQ-14, arriving from the other side).
+    Root {
+        /// The tree as it was before the cut.
+        spine: Spine,
+        /// The document offset the cut started at — where the caret goes back to.
+        at: u64,
+    },
+}
+
 /// A document's tail while it is being typed into.
 pub struct Typing<S> {
     spine: Spine,
@@ -171,9 +203,9 @@ pub struct Typing<S> {
     next_at: Option<u64>,
     sealed_bytes: u64,
     /// States the session can return to, oldest first.
-    marks: Vec<Mark>,
+    steps: Vec<Step>,
     /// States an undo left behind, oldest first — the redo stack.
-    undone: Vec<Mark>,
+    undone: Vec<Step>,
 }
 
 impl<S: SegmentSink> Typing<S> {
@@ -199,7 +231,7 @@ impl<S: SegmentSink> Typing<S> {
             open: None,
             next_at: None,
             sealed_bytes: 0,
-            marks: Vec::new(),
+            steps: Vec::new(),
             undone: Vec::new(),
         }
     }
@@ -288,8 +320,12 @@ impl<S: SegmentSink> Typing<S> {
                 return Ok(());
             }
         }
-        // Something sealed is involved: seal what is open so every offset is exact, then cut.
+        // Something sealed is involved: seal what is open so every offset is exact, then cut. The
+        // root is recorded first, so the cut can be taken back as a pointer swap — no bytes need to
+        // be remembered, because the bytes a cut removes are still in the world-line.
         self.flush()?;
+        self.undone.clear();
+        self.push_root(start);
         self.spine = self.spine.remove_range(start, end)?;
         self.next_at = Some(start);
         Ok(())
@@ -302,10 +338,8 @@ impl<S: SegmentSink> Typing<S> {
     pub fn mark(&mut self) {
         self.undone.clear();
         let mark = self.current_mark();
-        if self.marks.len() == UNDO_DEPTH {
-            self.marks.remove(0);
-        }
-        self.marks.push(mark);
+        self.cap_marks();
+        self.steps.push(Step::Mark(mark));
     }
 
     /// Returns to the last mark, reporting whether there was one.
@@ -318,11 +352,24 @@ impl<S: SegmentSink> Typing<S> {
     /// A spine range the geometry refuses, when the state being restored had no open source and the
     /// leaf the action registered has to leave the tree.
     pub fn undo(&mut self) -> Result<bool, TypingError> {
-        let Some(mark) = self.marks.pop() else {
+        let Some(step) = self.steps.pop() else {
             return Ok(false);
         };
-        let current = self.current_mark();
-        self.restore(mark)?;
+        let current = match step {
+            Step::Mark(mark) => {
+                let current = Step::Mark(self.current_mark());
+                self.restore_mark(mark)?;
+                current
+            }
+            Step::Root { spine, at } => {
+                let current = Step::Root {
+                    spine: self.spine.clone(),
+                    at: self.caret(),
+                };
+                self.restore_root(spine, at)?;
+                current
+            }
+        };
         self.undone.push(current);
         Ok(true)
     }
@@ -333,19 +380,32 @@ impl<S: SegmentSink> Typing<S> {
     ///
     /// As [`Self::undo`]: restoring a state with an open source may have to register a leaf.
     pub fn redo(&mut self) -> Result<bool, TypingError> {
-        let Some(mark) = self.undone.pop() else {
+        let Some(step) = self.undone.pop() else {
             return Ok(false);
         };
-        let current = self.current_mark();
-        self.restore(mark)?;
-        self.marks.push(current);
+        let current = match step {
+            Step::Mark(mark) => {
+                let current = Step::Mark(self.current_mark());
+                self.restore_mark(mark)?;
+                current
+            }
+            Step::Root { spine, at } => {
+                let current = Step::Root {
+                    spine: self.spine.clone(),
+                    at: self.caret(),
+                };
+                self.restore_root(spine, at)?;
+                current
+            }
+        };
+        self.steps.push(current);
         Ok(true)
     }
 
     /// How many undo states the session holds.
     #[must_use]
     pub fn undo_depth(&self) -> usize {
-        self.marks.len()
+        self.steps.len()
     }
 
     /// How many states [`Self::redo`] can re-apply.
@@ -357,9 +417,9 @@ impl<S: SegmentSink> Typing<S> {
     /// Replaces `start..end` with `bytes` — typing over a selection.
     ///
     /// It is [`Self::delete`] then [`Self::insert_at`], which is the whole implementation as well
-    /// as the specification: the caret ends after the inserted text, and a replacement that
-    /// destroys bytes can no more be undone than the deletion inside it can (see the module
-    /// documentation).
+    /// as the specification: the caret ends after the inserted text, and the pair is **one**
+    /// undoable action, because the deletion records the root from before the cut and the text the
+    /// insert left pending is dropped when that root is restored.
     ///
     /// # Errors
     ///
@@ -379,8 +439,8 @@ impl<S: SegmentSink> Typing<S> {
         }
     }
 
-    /// Moves the session to `mark`, touching lengths and at most one leaf — never bytes.
-    fn restore(&mut self, mark: Mark) -> Result<(), TypingError> {
+    /// Moves the session to a length, touching at most one leaf — never bytes.
+    fn restore_mark(&mut self, mark: Mark) -> Result<(), TypingError> {
         match (mark, self.open) {
             (Mark::Live { len }, Some(_)) => self.set_live(len),
             (Mark::Live { len }, None) => self.attach(len),
@@ -399,6 +459,71 @@ impl<S: SegmentSink> Typing<S> {
                 self.next_at = Some(at.min(self.spine.len()));
                 Ok(())
             }
+        }
+    }
+
+    /// Moves the session to a sealed state: this root, and this caret.
+    fn restore_root(&mut self, spine: Spine, at: u64) -> Result<(), TypingError> {
+        // Anything open here is *pending*: a seal would have dropped this step, so the bytes were
+        // never written and discarding them loses nothing the world-line has. The text a cut
+        // removed is the other way round — it is in the log, and the root names it again.
+        if let Some(open) = self.open {
+            self.sources.close(open.source);
+            self.open = None;
+        }
+        self.draft.clear();
+        self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
+            .expect("an empty slab is valid UTF-8");
+        self.spine = spine;
+        self.next_at = Some(at.min(self.spine.len()));
+        Ok(())
+    }
+
+    /// Records the tree as it is now, so a cut about to happen can be taken back.
+    fn push_root(&mut self, at: u64) {
+        self.cap_roots();
+        self.steps.push(Step::Root {
+            spine: self.spine.clone(),
+            at,
+        });
+    }
+
+    /// Drops the oldest length once the length ring is full.
+    fn cap_marks(&mut self) {
+        let marks = self
+            .steps
+            .iter()
+            .filter(|step| matches!(step, Step::Mark(_)))
+            .count();
+        if marks < UNDO_DEPTH {
+            return;
+        }
+        if let Some(index) = self
+            .steps
+            .iter()
+            .position(|step| matches!(step, Step::Mark(_)))
+        {
+            self.steps.remove(index);
+        }
+    }
+
+    /// Drops the oldest root once the root ring is full. The ring is small because a root is the
+    /// expensive half of the history, and the world-line is the deeper store (OQ-8).
+    fn cap_roots(&mut self) {
+        let roots = self
+            .steps
+            .iter()
+            .filter(|step| matches!(step, Step::Root { .. }))
+            .count();
+        if roots < ROOT_DEPTH {
+            return;
+        }
+        if let Some(index) = self
+            .steps
+            .iter()
+            .position(|step| matches!(step, Step::Root { .. }))
+        {
+            self.steps.remove(index);
         }
     }
 
@@ -464,11 +589,11 @@ impl<S: SegmentSink> Typing<S> {
     /// Pops every mark whose promise this edit breaks: a mark says the bytes before its length are
     /// unchanged, and an edit below that length changes them.
     fn pop_marks_above(&mut self, len: usize) {
-        while let Some(Mark::Live { len: mark }) = self.marks.last().copied() {
-            if mark <= len {
+        while let Some(Step::Mark(Mark::Live { len: mark })) = self.steps.last() {
+            if *mark <= len {
                 break;
             }
-            self.marks.pop();
+            self.steps.pop();
         }
     }
 
@@ -626,8 +751,9 @@ impl<S: SegmentSink> Typing<S> {
         self.next_at = Some(open.at + u64::try_from(len).expect("a buffer fits in u64"));
         self.open = None;
         // A seal is an undo floor: the bytes move to the world-line and the buffer is dropped, so
-        // no mark that promises them can be honoured any more.
-        self.marks.clear();
+        // no mark that promises them can be honoured any more — and a root recorded before the
+        // append would orphan the segment it names, so those go too.
+        self.steps.clear();
         self.undone.clear();
         self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
             .expect("an empty slab is valid UTF-8");
@@ -938,6 +1064,120 @@ mod tests {
         );
         assert_eq!(typing.document_len(), 7);
         assert!(!typing.undo().expect("nothing left to undo"));
+    }
+
+    #[test]
+    fn undoing_a_deletion_is_a_pointer_swap_and_writes_nothing() {
+        let mut typing = session(8);
+        typing.insert(b"0123456789").expect("typed");
+        typing.flush().expect("flushed");
+        let leaves = typing.spine().slab_count();
+        let written = typing.sink.written().len();
+        typing.delete(2, 4).expect("deleted");
+        assert_eq!(typing.document_len(), 8);
+        assert_eq!(
+            typing.undo_depth(),
+            1,
+            "the cut recorded the root before it"
+        );
+        assert!(typing.undo().expect("undone"));
+        assert_eq!(typing.document_len(), 10, "the text came back");
+        assert_eq!(typing.spine().len(), 10);
+        assert_eq!(typing.spine().slab_count(), leaves);
+        assert_eq!(typing.caret(), 2, "the caret is back at the cut");
+        assert_eq!(
+            typing.sink.written().len(),
+            written,
+            "undoing a cut wrote no byte, and neither did the cut"
+        );
+        assert_eq!(typing.sealed_bytes(), 10);
+    }
+
+    #[test]
+    fn redo_of_a_deletion_cuts_the_same_range_again() {
+        let mut typing = session(8);
+        typing.insert(b"0123456789").expect("typed");
+        typing.flush().expect("flushed");
+        typing.delete(2, 4).expect("deleted");
+        assert!(typing.undo().expect("undone"));
+        assert!(typing.redo().expect("redone"));
+        assert_eq!(typing.document_len(), 8);
+        assert_eq!(typing.spine().len(), 8);
+        assert_eq!(typing.caret(), 2);
+        assert!(typing.undo().expect("undone again"));
+        assert_eq!(typing.document_len(), 10, "redo left the root takable too");
+    }
+
+    #[test]
+    fn a_seal_after_a_deletion_ends_its_undo() {
+        let mut typing = session(8);
+        typing.insert(b"0123456789").expect("typed");
+        typing.flush().expect("flushed");
+        typing.delete(2, 4).expect("deleted");
+        assert_eq!(typing.undo_depth(), 1);
+        // Nine bytes into a new eight-byte buffer: the ninth forces a seal, and the root recorded
+        // before the cut would orphan the segment that seal appends.
+        typing.insert(b"abcdefghi").expect("typed");
+        assert_eq!(typing.sealed_bytes(), 18);
+        assert_eq!(typing.undo_depth(), 0, "the seal is the floor");
+        assert!(!typing.undo().expect("nothing to undo"));
+    }
+
+    #[test]
+    fn typing_after_a_deletion_still_undoes_to_the_root() {
+        let mut typing = session(64);
+        typing.insert(b"0123456789").expect("typed");
+        typing.flush().expect("flushed");
+        typing.delete(2, 4).expect("deleted");
+        typing.insert(b"xy").expect("typed");
+        assert_eq!(typing.document_len(), 10);
+        assert!(typing.undo().expect("undone"));
+        assert_eq!(
+            typing.document_len(),
+            10,
+            "the pending text went, the cut text came back"
+        );
+        assert!(typing.pending().is_empty(), "nothing is open");
+        assert_eq!(typing.sources().open_count(), 0);
+        assert_eq!(typing.caret(), 2);
+    }
+
+    #[test]
+    fn replacing_sealed_text_is_one_undoable_action() {
+        let mut typing = session(8);
+        typing.insert(b"hello world").expect("typed");
+        typing.flush().expect("flushed");
+        typing.replace(6, 11, b"there").expect("replaced");
+        assert_eq!(typing.document_len(), 11);
+        assert_eq!(typing.caret(), 11);
+        assert!(typing.undo().expect("undone"));
+        assert_eq!(
+            typing.document_len(),
+            11,
+            "the old text is back and the new text is gone"
+        );
+        assert_eq!(typing.caret(), 6, "the caret is where the selection began");
+        assert!(typing.pending().is_empty());
+    }
+
+    #[test]
+    fn the_root_stack_is_a_ring_and_the_world_line_is_the_deeper_store() {
+        let mut typing = session(256);
+        let text: Vec<u8> = (0..200u32).map(|n| b'a' + (n % 26) as u8).collect();
+        typing.insert(&text).expect("typed");
+        typing.flush().expect("flushed");
+        for _ in 0..(ROOT_DEPTH + 10) {
+            typing.delete(0, 1).expect("deleted");
+        }
+        assert_eq!(
+            typing.undo_depth(),
+            ROOT_DEPTH,
+            "the ring holds roots, not the whole history"
+        );
+        // Seventy-four cuts of a byte leave 126; the newest root is the state before the last cut.
+        assert_eq!(typing.document_len(), 126);
+        assert!(typing.undo().expect("the newest root is still there"));
+        assert_eq!(typing.document_len(), 127);
     }
 
     #[test]

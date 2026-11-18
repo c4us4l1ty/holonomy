@@ -44,7 +44,7 @@ Listed so they stay dead.
 | OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. | **closed 2026-11-17 — accept and disclose.** The pattern is already visible at the I/O layer: fetching an old page reads its ciphertext at a known file offset, so any observer who can time slab faults can observe the reads themselves. Smoothing would buy nothing and would spend L-5 (idle is idle) on traversal cost the architecture exists to delete. Residual recorded in `docs/THREAT-MODEL.md` §5. |
 | OQ-5 | Argon2's internal working arena: `MasterKeys::derive`, `kdf::derive_root_secret*`, and the calibration probe all allocated the m-cost arena inside `hash_password_into` and freed it unwiped (v5's H1 hit exactly this and switched to caller-owned memory + a scrubbed block). Fixed by making the arena caller-owned everywhere: `kdf::Arena(Vec<argon2::Block>)` zeroizes the slab on Drop via argon2's `zeroize` feature, and the single `run_argon2` runner serves creation, replay, *and* the calibration probe, with a test pinning byte-equality against argon2's own allocator | **closed** 2026-11-16 |
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
-| OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. Either bound the in-memory history (a ring of roots plus reconstruction from the log) or state the growth openly. Decide before Block 6, where a session is long enough for it to matter. **Narrowed 2026-11-17 by D-14:** the typing half is answered — a mark is a *length*, the stack is capped at 1024 of them, and a seal ends the epoch, so undo of typing is constant memory and constant work. What remains open is the destructive half: undo of a deletion needs the root from before the cut, and the choice between a ring of roots and reconstruction from the log is still unmade. | **open — narrowed 2026-11-17; typing answered, deletions not** |
+| OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. **Answered in the session by D-14 and D-15:** a length is a `usize` and a root is a pointer, and both are rings — 1024 lengths, 64 roots — so history memory is `1024 words + 64 × O(log leaves)` and does not grow with the number of edits. What that buys is stated exactly: undo depth is 64 destructive actions back, and a seal ends the epoch. Deeper history is the world-line's job (Block 8: reconstruct a root from the log), which is named and not built. | **closed 2026-11-17 for the session — bounded rings; deeper undo is Block 8** |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
 | OQ-10 | A full resident slab has **no continuation policy** — solved by D-7 and built as D-8/D-9: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; a seal appends the bytes once, renames the source, and corrects one leaf's length in the current root — **no history entry**, so undo never steps through a seal; each byte is written once. `Typing::insert_at` handles mid-document typing by cutting the leaf the caret lands in (pure geometry — the halves name adjacent ranges of one segment, so nothing moves). Deletion is D-11 (a pointer operation; the bytes stay in the log — OQ-14). Not yet: selection. | **closed 2026-11-17 — `typing.rs`** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
@@ -55,6 +55,44 @@ Listed so they stay dead.
 | OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8 — which the resident set refuses when it faults that leaf in. The asymmetry is the finding: offsets inside the open buffer are checked (`SlabText` holds the bytes and returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. Fixing it means putting the reader and the edit in the same place, which is Block 6's shell; the intended architecture already discharges the precondition because the caret is a cluster boundary from `holonomy-eye`'s segmentation. What is missing is a check that the two agree — a test that every caret the Eye can produce is a character boundary of the document — and that test needs the reader too. | **open — found 2026-11-17 by the deletion bug hunt; the buffer path refuses, the sealed path cannot** |
 
 ## Audit trail
+
+- **2026-11-17 — D-15 — undo of a deletion is a root, and the asymmetry is the design.**
+  D-14 made typing undoable without keeping a byte. This closes the other half — the actions that
+  *destroy* bytes — and it closes it cheaply for a reason worth stating plainly: **the bytes a cut
+  removes are still in the world-line.** So undo does not have to remember them; it has to remember
+  the tree that named them. A root is a pointer, and naming it again restores the text without
+  decrypting anything (OQ-14, arriving from the other side).
+
+  **The asymmetry, stated as the rule.** A length undoes typing; a root undoes destruction. They are
+  not interchangeable, and the session keeps them in one stack of `Step`s so undo is a single
+  gesture: `Typing::delete` seals what is open, records the root, then cuts; `Typing::mark` records a
+  length.
+
+  **The invariant that keeps it sound.** A root recorded *before* an append would orphan the segment
+  that append wrote — the exact thing `commit_slab` refuses at the commit boundary. So a seal ends
+  the epoch for both halves: any seal drops every step. Undoing a root is therefore only ever a swap
+  between sealed states, and a test seals once after a cut to prove the step is gone.
+
+  **Undo across pending typing discards it.** If the user types after a cut and then undoes, the
+  pending bytes are dropped and the root restored. That is safe *because* of the rule above: a seal
+  would have dropped the step, so anything still open was never written, and nothing in the log is
+  lost. The pending text is undo's, and undo takes it.
+
+  **A replacement is finally one action.** `Typing::replace` = delete + insert; the delete records the
+  root, the insert's bytes stay pending, and one undo puts the old text back with the caret where the
+  selection began. That is the promise made two slices ago, now true and tested.
+
+  **OQ-8, closed for the session.** Two rings: 1024 lengths and 64 roots. History memory is
+  `1024 words + 64 × O(log leaves)` nodes, independent of the number of edits; a test makes 74 cuts
+  and shows the depth stays at 64 while the document keeps changing. What the bound gives up is depth,
+  not correctness — and deeper history is already on disk, because the world-line is append-only, so
+  "reconstruct a root from the log" is Block 8's work rather than a new question. The row now says
+  that instead of "open".
+
+  **Two expectations caught before CI this time.** A seal needs the *ninth* byte into an eight-byte
+  buffer, not the eighth — the buffer-full check is exact, so the seal is what the next byte causes —
+  and one undo moves back one cut, not sixty-four. Both were my arithmetic, both were fixed by
+  reading the engine rather than by a failed run, which is the cheaper order.
 
 - **2026-11-17 — D-14 — undo of typing is a length, and that is the whole trick.**
   Undo usually means keeping the states you might return to, which in this architecture means keeping
