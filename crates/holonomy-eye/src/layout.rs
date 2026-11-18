@@ -318,9 +318,10 @@ pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
             x = Fixed::ZERO;
             line_height = Fixed::ZERO;
             start_byte = byte;
-            continued = false;
         }
         line_height = line_height.max(shaped_line_height(shaper, style));
+        // A line with a cluster on it starts there, whether the cluster opened the line or was
+        // pushed onto it: either way the next cluster must not end it early.
         continued = true;
         clusters.push(Placed {
             byte,
@@ -692,7 +693,10 @@ mod tests {
                 .map(|line| line.start_byte())
                 .filter(|byte| *byte > start)
                 .collect();
-            assert_eq!(tail_starts, whole_starts, "the lines after the tail at {start}");
+            assert_eq!(
+                tail_starts, whole_starts,
+                "the lines after the tail at {start}"
+            );
         }
     }
 
@@ -700,14 +704,25 @@ mod tests {
     fn a_carried_line_that_is_full_wraps_before_its_first_cluster() {
         let width = Fixed::units(10);
         let laid = layout_styled_from(StyledText::plain("abc"), 40, width, width, &Fake::new());
-        assert_eq!(laid.lines().len(), 2, "the full line, then the cluster's line");
+        assert_eq!(
+            laid.lines().len(),
+            2,
+            "the full line, then the cluster's line"
+        );
         let carried = &laid.lines()[0];
-        assert!(carried.clusters().is_empty(), "the tail has no clusters here");
+        assert!(
+            carried.clusters().is_empty(),
+            "the tail has no clusters here"
+        );
         assert!(!carried.has_end(), "a soft wrap offers no caret of its own");
         assert_eq!(carried.end_x(), width);
         assert_eq!(carried.start_byte(), 40, "the line it inherits ends here");
         let fresh = &laid.lines()[1];
         assert_eq!(fresh.start_byte(), 40);
-        assert_eq!(fresh.clusters()[0].x, Fixed::ZERO, "the cluster starts the line");
+        assert_eq!(
+            fresh.clusters()[0].x,
+            Fixed::ZERO,
+            "the cluster starts the line"
+        );
     }
 }

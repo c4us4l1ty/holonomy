@@ -509,7 +509,10 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let base = if carried.is_zero() {
                 Fixed::ZERO
             } else {
-                layout.lines().first().map_or(Fixed::ZERO, |line| line.height())
+                layout
+                    .lines()
+                    .first()
+                    .map_or(Fixed::ZERO, |line| line.height())
             };
             if let Some(caret) = layout.paint_point(caret_at) {
                 return Ok(Some((
@@ -973,12 +976,6 @@ fn measure_window(
         .iter()
         .enumerate()
         .filter(|(_, span)| span.offset() >= start && span.offset() + span.len() <= end)
-        .map(|(index, _)| {
-            (
-                index,
-                heights[index],
-                offsets[index].unwrap_or(Fixed::ZERO),
-            )
-        })
+        .map(|(index, _)| (index, heights[index], offsets[index].unwrap_or(Fixed::ZERO)))
         .collect()
 }

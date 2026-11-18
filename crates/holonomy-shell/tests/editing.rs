@@ -247,7 +247,11 @@ fn reflow_agrees_with_one_continuous_layout_of_the_document() {
     split.flush().expect("sealed");
     split.reflow().expect("measured");
     let whole = layout_styled(StyledText::plain(&paragraph), 0, WIDTH, &Fake);
-    assert_eq!(split.heights().total(), whole.height(), "one paragraph, 64 leaves");
+    assert_eq!(
+        split.heights().total(),
+        whole.height(),
+        "one paragraph, 64 leaves"
+    );
 
     // A document that ends every line, where the empty line after each break belongs to the leaf
     // that continues it — and the last one belongs to the document.
@@ -271,7 +275,11 @@ fn a_frame_begins_at_the_line_a_scroll_position_falls_in() {
     shell.flush().expect("sealed");
     shell.reflow().expect("measured");
     let measured = shell.heights().total();
-    assert_eq!(measured, Fixed::units(420), "twenty-one lines of twenty units");
+    assert_eq!(
+        measured,
+        Fixed::units(420),
+        "twenty-one lines of twenty units"
+    );
 
     shell.scroll_to(Fixed::units(380));
     let (origin, clusters, leaves) = {
@@ -283,7 +291,10 @@ fn a_frame_begins_at_the_line_a_scroll_position_falls_in() {
         )
     };
     assert_eq!(origin, 3_800, "the line, not the leaf it is drawn in");
-    assert_eq!(clusters, 200, "the first line is a full line of the document");
+    assert_eq!(
+        clusters, 200,
+        "the first line is a full line of the document"
+    );
     assert_eq!(leaves, 4, "the bytes behind a two-line screen");
     assert_eq!(
         shell.heights().total(),
@@ -295,34 +306,65 @@ fn a_frame_begins_at_the_line_a_scroll_position_falls_in() {
 #[test]
 fn revealing_the_caret_scrolls_the_smallest_amount_that_shows_it() {
     let mut shell = editor(Repeated::new(64));
-    shell.type_text(&repeat_leaf().repeat(4_000)).expect("typed");
+    shell
+        .type_text(&repeat_leaf().repeat(4_000))
+        .expect("typed");
     shell.flush().expect("sealed");
     shell.reflow().expect("measured");
     let bottom = Fixed::units(1_280 * 20 - 40);
 
     // The caret is at the end of a document nobody has scrolled, so showing it is one scroll — to
     // the last screen — and then nothing at all.
-    assert!(shell.reveal_caret().expect("a reveal"), "the caret is off screen");
+    assert!(
+        shell.reveal_caret().expect("a reveal"),
+        "the caret is off screen"
+    );
     assert_eq!(shell.scroll(), bottom, "the last screen");
-    assert!(!shell.reveal_caret().expect("a reveal"), "it is visible now");
+    assert!(
+        !shell.reveal_caret().expect("a reveal"),
+        "it is visible now"
+    );
 
     // A caret above the screen. The frame at the bottom of the document does not hold it, and a
     // caret a frame does not hold has no frame-relative y to read: the answer has to come from the
     // document, or the reveal does nothing.
     shell.scroll_to(Fixed::ZERO);
-    let clicked = shell.click(Point::new(Fixed::ZERO, Fixed::ZERO)).expect("clicked");
-    assert_eq!(clicked.map(|caret| caret.byte), Some(0), "the document's start");
+    let clicked = shell
+        .click(Point::new(Fixed::ZERO, Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(
+        clicked.map(|caret| caret.byte),
+        Some(0),
+        "the document's start"
+    );
     shell.scroll_to(bottom);
-    assert!(shell.reveal_caret().expect("a reveal"), "the caret is above the screen");
-    assert_eq!(shell.scroll(), Fixed::ZERO, "the smallest scroll is up to its line");
+    assert!(
+        shell.reveal_caret().expect("a reveal"),
+        "the caret is above the screen"
+    );
+    assert_eq!(
+        shell.scroll(),
+        Fixed::ZERO,
+        "the smallest scroll is up to its line"
+    );
 
     // A click on the first line of a screen whose scroll position is not a line boundary. The caret
     // lands at the start of the line at 12,800 — above the scroll position, so revealing it is one
     // line up and **not** up to the top of the document, which is what a frame-relative y would do.
     shell.scroll_to(Fixed::units(12_805));
-    let clicked = shell.click(Point::new(Fixed::ZERO, Fixed::ZERO)).expect("clicked");
-    assert_eq!(clicked.map(|caret| caret.byte), Some(128_000), "the line's start");
-    assert_eq!(shell.scroll(), Fixed::units(12_805), "a click does not scroll");
+    let clicked = shell
+        .click(Point::new(Fixed::ZERO, Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(
+        clicked.map(|caret| caret.byte),
+        Some(128_000),
+        "the line's start"
+    );
+    assert_eq!(
+        shell.scroll(),
+        Fixed::units(12_805),
+        "a click does not scroll"
+    );
     assert!(shell.reveal_caret().expect("a reveal"));
     assert_eq!(shell.scroll(), Fixed::units(12_800), "one line up");
     assert!(!shell.reveal_caret().expect("a reveal"), "and then nothing");
@@ -338,7 +380,11 @@ fn a_keystroke_on_a_long_document_shapes_only_the_screen() {
     shell.reflow().expect("measured");
     assert_eq!(shell.heights().len(), 4_000);
     let measured = shell.heights().total();
-    assert_eq!(measured, Fixed::units(1_280 * 20), "256,000 letters, 1,280 lines");
+    assert_eq!(
+        measured,
+        Fixed::units(1_280 * 20),
+        "256,000 letters, 1,280 lines"
+    );
 
     // Halfway down a document this has never shown: the frame shapes two lines, not four thousand.
     shell.scroll_to(Fixed::units(1_280 * 20 / 2));
@@ -351,10 +397,19 @@ fn a_keystroke_on_a_long_document_shapes_only_the_screen() {
             frame.reads(),
         )
     };
-    assert_eq!(origin, 128_000, "halfway is a line, which here is a leaf boundary");
-    assert!(shaped <= 420, "{shaped} clusters shaped for a two-line screen");
+    assert_eq!(
+        origin, 128_000,
+        "halfway is a line, which here is a leaf boundary"
+    );
+    assert!(
+        shaped <= 420,
+        "{shaped} clusters shaped for a two-line screen"
+    );
     assert!(bytes <= 420, "{bytes} bytes read for a two-line screen");
-    assert!(reads <= 256, "{reads} index reads for 4000 leaves: searches");
+    assert!(
+        reads <= 256,
+        "{reads} index reads for 4000 leaves: searches"
+    );
 
     // A keystroke at the document's end appends one leaf, and the index grows by one instead of
     // being rebuilt: every height measured a moment ago is still the truth. A rebuild would leave
