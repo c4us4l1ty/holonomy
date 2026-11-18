@@ -57,11 +57,12 @@ mod style;
 mod view;
 mod window;
 
-pub use crate::cluster::Clusters;
+pub use crate::cluster::{ClusterContext, Clusters};
 pub use crate::geom::{Fixed, Point};
 pub use crate::heights::{HeightModel, Window};
 pub use crate::layout::{
-    layout_styled, layout_styled_from, layout_window, Caret, Layout, Line, Placed,
+    layout_styled, layout_styled_continuing, layout_styled_from, layout_window, Caret, Layout,
+    Line, Placed,
 };
 pub use crate::shaper::Shaper;
 pub use crate::style::{Style, StyledRun, StyledText};

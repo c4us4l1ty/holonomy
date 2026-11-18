@@ -55,8 +55,48 @@ Listed so they stay dead.
 | OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8. The asymmetry was the finding: offsets inside the open buffer are checked (`SlabText` returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. **Narrowed by D-18:** the reader refuses a window whose edge falls inside a character, naming the offset. **Closed for the session by D-19:** the check OQ-15 asked for exists — `holonomy-shell` holds the reader and the edit in one place, and its test asserts over every caret every frame offers that the byte is a character boundary of the frame's text and hit-tests back to itself. What remains is not a missing check but a missing *type*: the offset is still a `u64` a caller can get wrong, and a caller that bypasses the Eye still asks for a mid-character cut — which is now refused at read time instead of silently rendered. Making it impossible would need an offset type the Eye alone can mint, which is a Block 6 API decision, not a hole in this one. | **closed 2026-11-18 — the caret check passes; a bypassing caller is refused at read** |
 
 | OQ-16 | **A leaf's height is measured apart from the line it is in, so the scroll bar counts a line the document does not have.** `reflow` laid each leaf out alone — necessarily, because measuring the continuous document would mean decrypting it — so a paragraph continuing across a boundary broke there in the measurement, and the per-leaf sum exceeded the continuous layout's height by up to one line per crossed boundary. **Closed by D-20**: the line is carried across the boundary as two words (the x the next cluster sits at, and whether the line began earlier), `layout_styled_from` lays a piece out as the continuation of a line, and `reflow`'s total now equals one continuous layout of the same text — proven by a test that lays the whole document out once. The fix also closed a bug that had not been written down: a frame used to begin at a leaf, which re-wrapped the paragraph from a point the document never breaks at. | **closed 2026-11-18 — the partition is exact, and frames begin at lines** |
-| OQ-17 | **A window that begins at a leaf decides its first cluster without the text before it.** Coverage (OQ-11) says segmentation is a pure function of the text; it is a function of the text *from the window's start*, and a leaf cut can fall inside a cluster, so the first cluster of such a window is segmented as if the cluster began there. `reflow`/`measure_leaf` and `line_start`/`caret_place` lay leaves out alone, so a leaf whose first cluster is a continuation can pay the wrong advance (a height a line off, in either direction, depending on the shaper) and can then wrap where the document does not — while a frame cannot: a frame begins at a line, and a line break is between clusters (D-20). D-21 fixed the two *editing* symptoms with one leaf of context and stated the residual bound (a cluster crossing two boundaries is still split). The design is D-20's shape: the carry gains the UAX #29 state beside the `x` (`previous` property, the pictographic run, the regional-indicator count), `Clusters` gains `continuing(text, state)` and `carry()`, and `layout_styled_from` gains the state, so `Measured` stores exactly what places a leaf's first cluster *and* what segments it. It changes the Eye's API and the shell's carry together, and a half-done version (state without the boundary filter, or the filter without the state) is worse than the stated bound, so it is a slice of its own. Nothing here is a cryptographic or durability claim. | **open — design is D-20's shape** |
+| OQ-17 | **A window that begins at a leaf decided its first cluster without the text before it.** It made a boundary the document does not have into a caret position, and stopped backspace/delete at the leaf edge. **Closed by D-22:** the UAX #29 state (last property, GB11 run, regional-indicator count) is carried beside the line position — `Clusters::continuing`/`carry`, `Layout::carry`, `layout_styled_continuing` — so a piece that opens inside a cluster segments as the document does, and its first line offers no boundary there. A frame was never affected: it begins at a line, and a line break is between clusters (D-20). The *advance* of a split cluster is OQ-18, measured, not assumed away. | **closed 2026-11-18 — segmentation is a function of the text and the state carried into it** |
+| OQ-18 | **A cluster split by a leaf cut pays its advance twice.** The eye shapes one cluster at a time, so a cluster whose bytes fall either side of a leaf cut is advanced on both sides: `e` + U+0301 is one unit wide in the document and two when a 64-unit wrap and a 64-byte leaf put the cut between them, which is one extra line in the scroll bar. Segmentation is exact after D-22; the advance is not, and it cannot be made exact without shaping the cluster whole. `a_cluster_split_by_a_leaf_costs_its_advance_twice` measures the residual (40 units where the document has 20). | **open — needs two leaves shaped together** | The measurement would read the leaf *and* the one after it when the leaf's text ends inside a cluster (the carry says whether it might), lay the pair out with the carry, and charge only the lines that start in the first leaf. What stops it being free: `reflow`'s stated bound is one faulted leaf at a time (OQ-12, L-2), and a pair read is two — so the fix has to be honest about doubling the read for the leaves that need it, or wait for a shaper that can be handed a cluster in pieces. Nothing here is a cryptographic or durability claim. |
 ## Audit trail
+
+- **2026-11-18 — D-22 — the cluster carry: a window that opens inside a cluster stops inventing a
+  caret.** OQ-17's fix. The geometry's answer depended on where a leaf ended, which is the one thing
+  a document's geometry may never do: a leaf cut is a byte count, so a window can open on a
+  combining mark whose base is in the window before, and the piece was segmented **from its own
+  first byte**. Two symptoms followed. A caret position the document does not have appeared at the
+  window's first byte — L-8's exact subject — and `backspace`/`delete` stopped at the leaf edge,
+  taking half a grapheme, which D-21 fixed one leaf deep and left the rest to this.
+
+  **The state is two words, not text.** UAX #29 needs only the property of the last character
+  consumed (the left context GB3–GB13 read), whether the run behind a ZWJ is `Pictographic Extend*`
+  (GB11), and the regional-indicator count within the cluster (GB12/GB13). `ClusterContext` is
+  exactly that, `Clusters::carry()` is the state at the end of a piece, `Clusters::continuing()` is
+  the state at the start of the next — so a piece can begin inside a cluster and still segment as
+  the document does. `Layout` carries it out (`Layout::carry`) and takes it in
+  (`layout_styled_continuing`), and a first line whose cluster began earlier **does not offer its
+  first byte as a caret** (`Line::boundaries` skips it, reading a private flag on that first line).
+
+  **What it buys, exactly.** `a_piece_that_continues_a_cluster_segments_as_the_whole_text_does`
+  cuts a text with a mark, a joiner chain and a flag at *every* character boundary and checks that
+  the piece's first cluster ends where the document's does;
+  `a_window_that_opens_inside_a_cluster_offers_no_boundary_there` pins the caret claim in both
+  directions (with the state, byte 1 is not offered; without it, it is). The shell's
+  `cluster_before`/`cluster_after` now follow a cluster across leaves — up to eight, then stop,
+  because a document of nothing but marks must not make one backspace a walk of the document — so
+  `a_backspace_crosses_two_leaf_boundaries_to_take_its_cluster` takes a base and forty marks that
+  span three leaves, where D-21's one-leaf context stopped at the second.
+
+  **What it does not buy, measured rather than claimed.** A cluster's *advance* is exact only when
+  the cluster is shaped whole: the eye shapes cluster by cluster, so a cluster split by a cut pays
+  its advance on both sides and can gain the next leaf a line. That is OQ-18, opened by this entry
+  and pinned by `a_cluster_split_by_a_leaf_costs_its_advance_twice` — a test that asserts the
+  residual (40 units where the document has 20) precisely so that fixing it has to change a number
+  rather than slip past.
+
+  **Why this was not part of D-21.** It changes the Eye's API (`Clusters::continuing`, `ClusterContext`,
+  `Layout::carry`, `layout_styled_continuing`, `Line::continues_cluster`) and the shell's carry at
+  the same time, and a half-done version — state without the boundary filter, or a filter without
+  the state — is worse than the bound D-21 stated.
 
 - **2026-11-18 — D-21 — a hunt across the tree: four defects, three fixed, one filed.** The sweep
   was over boundary arithmetic — every `+ 1`, every `- 1`, every "and then the next leaf" — because

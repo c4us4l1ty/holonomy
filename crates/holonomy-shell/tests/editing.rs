@@ -570,6 +570,49 @@ fn a_delete_crosses_a_leaf_boundary_to_take_its_cluster() {
 }
 
 #[test]
+fn a_backspace_crosses_two_leaf_boundaries_to_take_its_cluster() {
+    // A base at the last byte of one leaf and forty marks after it: the cluster spans three leaves.
+    // One leaf of context (D-21) stopped at the second; the carry follows it to where it begins.
+    let mut document = "a".repeat(63);
+    document.push('e');
+    document.push_str(&"\u{301}".repeat(40));
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    assert_eq!(shell.heights().len(), 3, "64, 64 and 16 bytes");
+    assert_eq!(shell.document_len(), 144);
+
+    assert!(shell.backspace().expect("a backspace"));
+    assert_eq!(shell.document_len(), 63, "the base and all forty marks go together");
+    assert_eq!(shell.caret(), 63);
+}
+
+#[test]
+fn a_cluster_split_by_a_leaf_costs_its_advance_twice() {
+    // OQ-18's residual, measured rather than asserted as right. A cluster's advance is exact only
+    // when the cluster is shaped whole, and the shell lays leaves out one at a time: `e` + U+0301
+    // is one unit wide in the document and two when a leaf cut falls between them at a 64-unit
+    // wrap, so the scroll bar here is a line long. Segmentation is exact (OQ-17); this is what is
+    // left, and fixing it needs the two leaves shaped together.
+    let mut document = "a".repeat(63);
+    document.push_str("e\u{301}");
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.resize(Fixed::units(64), VIEWPORT);
+    shell.reflow().expect("measured");
+
+    let whole = layout_styled(StyledText::plain(&document), 0, Fixed::units(64), &Fake);
+    assert_eq!(whole.height(), Fixed::units(20), "one line in the document");
+    assert_eq!(
+        shell.heights().total(),
+        Fixed::units(40),
+        "two leaves, and one glyph of advance counted at each side of the cut"
+    );
+}
+
+#[test]
 fn every_caret_a_frame_offers_is_a_character_boundary() {
     // The check OQ-15 said was missing, and that only a shell could make: every byte the frame
     // offers as a caret position must be a boundary of the text the frame was laid out from, and

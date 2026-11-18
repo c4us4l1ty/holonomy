@@ -20,7 +20,7 @@
 //! are later slices. The layout takes the window's text and its document offset, which is all the
 //! arithmetic needs — and all a test needs to build the whole tree.
 
-use crate::cluster::Clusters;
+use crate::cluster::{ClusterContext, Clusters};
 use crate::geom::{Fixed, Point};
 use crate::shaper::Shaper;
 use crate::style::{Style, StyledText};
@@ -65,6 +65,10 @@ pub struct Line<'a> {
     end_byte: u64,
     end_x: Fixed,
     has_end: bool,
+    /// The line's first cluster began **before** this window, in a window laid out as a
+    /// continuation — so the window's first byte is inside a cluster and is not a caret position
+    /// (AUDIT OQ-17). Only ever set on the first line.
+    continues_cluster: bool,
 }
 
 impl<'a> Line<'a> {
@@ -119,9 +123,11 @@ impl<'a> Line<'a> {
     /// This is the one list both directions of the geometry walk. A line has a boundary before
     /// each cluster, plus its end position when the line ends in a hard break.
     pub fn boundaries(&self) -> impl Iterator<Item = (Fixed, u64)> + '_ {
+        let skip = usize::from(self.continues_cluster);
         let starts = self
             .clusters
             .iter()
+            .skip(skip)
             .map(|cluster| (cluster.x, cluster.byte));
         starts.chain(self.has_end.then_some((self.end_x, self.end_byte)))
     }
@@ -133,6 +139,7 @@ pub struct Layout<'a> {
     lines: Vec<Line<'a>>,
     width: Fixed,
     height: Fixed,
+    carry: ClusterContext,
 }
 
 impl<'a> Layout<'a> {
@@ -152,6 +159,17 @@ impl<'a> Layout<'a> {
     #[must_use]
     pub fn height(&self) -> Fixed {
         self.height
+    }
+
+    /// The segmentation state at the end of the window's text: what the next piece of the document
+    /// must be handed as [`layout_styled_continuing`]'s `context`.
+    ///
+    /// A caller that lays a document out in pieces carries this beside the line position, which is
+    /// what makes a piece's first cluster continue the one before it instead of starting a new one
+    /// (AUDIT OQ-17).
+    #[must_use]
+    pub fn carry(&self) -> ClusterContext {
+        self.carry
     }
 
     /// The caret at document byte `byte`, if `byte` is a caret position in this window.
@@ -265,7 +283,38 @@ pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
     width: Fixed,
     shaper: &S,
 ) -> Layout<'a> {
+    layout_styled_continuing(
+        styled,
+        origin,
+        start_x,
+        ClusterContext::START,
+        width,
+        shaper,
+    )
+}
+
+/// Lays styled text out as the continuation of a **cluster** as well as of a line.
+///
+/// This is [`layout_styled_from`] with the segmentation state a piece of a document needs when it
+/// begins inside a cluster: `context` is the previous piece's [`Layout::carry`], and the result's
+/// [`Layout::carry`] is this piece's. The first cluster may then begin before `origin`, and the
+/// first line will not offer `origin` as a caret position — because the document does not.
+///
+/// # Errors
+///
+/// None: segmentation never fails. A piece that begins mid-cluster is laid out with the cluster it
+/// belongs to, however much of it the shaper is given.
+#[must_use]
+pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
+    styled: StyledText<'a>,
+    origin: u64,
+    start_x: Fixed,
+    context: ClusterContext,
+    width: Fixed,
+    shaper: &S,
+) -> Layout<'a> {
     let text = styled.text();
+    let opens_inside_a_cluster = text.chars().next().is_some_and(|first| context.joins(first));
     let mut lines: Vec<Line<'a>> = Vec::new();
     let mut clusters: Vec<Placed<'a>> = Vec::new();
     let mut x = start_x;
@@ -277,7 +326,8 @@ pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
     // first cluster, in the window before it. A line never ends before its first cluster.
     let mut continued = !start_x.is_zero();
 
-    for (offset, cluster) in Clusters::new(text) {
+    let mut segments = Clusters::continuing(text, context);
+    for (offset, cluster) in segments.by_ref() {
         let byte = origin + offset as u64;
         if cluster == "\n" || cluster == "\r" || cluster == "\r\n" {
             // The line's content ends before the break; the next line starts after it.
@@ -290,6 +340,7 @@ pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
                 end_byte: byte,
                 end_x: x,
                 has_end: true,
+                continues_cluster: false,
             });
             top += height;
             x = Fixed::ZERO;
@@ -313,6 +364,7 @@ pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
                 end_byte,
                 end_x: x,
                 has_end: false,
+                continues_cluster: false,
             });
             top += height;
             x = Fixed::ZERO;
@@ -342,12 +394,17 @@ pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
         end_byte,
         end_x: x,
         has_end: true,
+        continues_cluster: false,
     });
+    if let Some(first) = lines.first_mut() {
+        first.continues_cluster = opens_inside_a_cluster;
+    }
     let total = top + height;
     Layout {
         lines,
         width,
         height: total,
+        carry: segments.carry(),
     }
 }
 
@@ -698,6 +755,35 @@ mod tests {
                 "the lines after the tail at {start}"
             );
         }
+    }
+
+    #[test]
+    fn a_window_that_opens_inside_a_cluster_offers_no_boundary_there() {
+        // `e` + U+0301 is one cluster, so the document's carets are 0, 3 and 4. A window over the
+        // mark's bytes, handed the state that says the cluster is open, must offer 3 and 4 only.
+        let mut prefix = Clusters::new("e");
+        while prefix.next().is_some() {}
+        let width = Fixed::units(200);
+        let continued = layout_styled_continuing(
+            StyledText::plain("\u{301}x"),
+            1,
+            Fixed::ZERO,
+            prefix.carry(),
+            width,
+            &Fake::new(),
+        );
+        let offered: Vec<u64> = continued.lines()[0]
+            .boundaries()
+            .map(|(_, byte)| byte)
+            .collect();
+        assert_eq!(offered, vec![3, 4], "the mark's own byte is not a caret");
+        assert!(continued.paint_point(1).is_none());
+        assert!(continued.paint_point(3).is_some());
+
+        // Told nothing about the text before it, the same bytes do offer byte 1 — which is the
+        // caret the document does not have, and the whole reason the state is carried.
+        let alone = layout_styled(StyledText::plain("\u{301}x"), 1, width, &Fake::new());
+        assert!(alone.paint_point(1).is_some());
     }
 
     #[test]
