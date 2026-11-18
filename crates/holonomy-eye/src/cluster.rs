@@ -40,8 +40,19 @@
 //! sparse list, which can only split a pictograph sequence that a renderer would join.
 //!
 //! Both of those are *coverage* gaps and are stated as such (AUDIT OQ-11), not hidden behind a
-//! claim of completeness. What the crate does own is that the coverage is a pure function of the
-//! text: the same point always answers the same way, which is what L-8 requires.
+//! claim of completeness. What the crate does own is that segmentation is a pure function of the
+//! text **and of the state carried into it**: the same point answers the same way however the text
+//! was split into windows, which is what L-8 requires.
+//!
+//! # A window is a piece, and a piece can begin inside a cluster
+//!
+//! A leaf cut is a byte count, so a window can open on a combining mark whose base is in the window
+//! before. [`ClusterContext`] is the two words UAX #29 needs from the text before a piece — the
+//! property of its last character, the GB11 run and the regional-indicator count — so a piece
+//! handed it segments exactly as the whole document does; [`Clusters::carry`] at the end of one
+//! piece is [`Clusters::continuing`] at the start of the next. Without it, a boundary the document
+//! does not have became a caret position, and the caret a backspace deleted by stopped at the leaf
+//! edge (AUDIT OQ-17).
 //!
 //! BiDi reordering is **not** here — the other half of the RFC's caret claim — and it changes paint
 //! order rather than segmentation, so it belongs beside the run tree.
@@ -582,7 +593,7 @@ fn is_pictographic(character: char) -> bool {
 }
 
 /// What GB11 needs to know about the characters already in the cluster.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Context {
     /// The cluster so far — up to but not including a ZWJ just absorbed — is
     /// `Pictographic Extend*`, which is GB11's left context.
@@ -663,17 +674,84 @@ fn joins(previous: Property, current: Property, context: Context) -> bool {
 }
 
 /// An iterator over `(byte offset, cluster text)` pairs.
+/// The segmentation state at a cluster boundary: what UAX #29 needs from the text before it.
+///
+/// A leaf cut is a byte count, so a piece of a document can begin **inside** a cluster — a mark or
+/// a joiner at the first byte of a window, with its base at the last byte of the one before.
+/// Segmenting that piece from its own first byte would make a boundary a caret position the
+/// document does not have (`a` + ZWJ + `b`'s tail, or half a flag), which is AUDIT OQ-17. So the
+/// state travels: [`Clusters::carry`] at the end of one piece is [`Clusters::continuing`] at the
+/// start of the next, and it is two small words rather than text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClusterContext {
+    /// The property of the last character consumed, which is what GB3–GB13's left context reads.
+    previous: Option<Property>,
+    /// The GB11 run and the GB12/GB13 regional-indicator count *within* the current cluster.
+    context: Context,
+}
+
+impl ClusterContext {
+    /// The state before the document's first byte: nothing consumed, no cluster open.
+    pub const START: Self = Self {
+        previous: None,
+        context: Context {
+            pictographic: false,
+            joins_after_zwj: false,
+            regionals: 0,
+        },
+    };
+
+    /// Whether `character` continues the cluster that ends at this boundary.
+    ///
+    /// A caller that wants to know if a piece begins inside a cluster asks this about its first
+    /// character, which is exactly what the segmenter asks itself.
+    #[must_use]
+    pub fn joins(self, character: char) -> bool {
+        self.previous
+            .is_some_and(|before| joins(before, property(character), self.context))
+    }
+}
+
+/// An iterator over the extended grapheme clusters of a text, from the state it was handed.
+///
+/// [`Clusters::new`] starts at the beginning of a text with nothing before it;
+/// [`Clusters::continuing`] starts inside one, told how the text before it ended.
+/// [`Clusters::carry`] is the state at the last cluster emitted: hand it to `continuing` and the
+/// next piece of the same document segments as the whole document does.
 #[derive(Debug, Clone)]
 pub struct Clusters<'a> {
     text: &'a str,
     start: usize,
+    /// The state at `start`: what the text before this piece said, or the end of the last cluster
+    /// this iterator emitted.
+    carried: ClusterContext,
 }
 
 impl<'a> Clusters<'a> {
     /// Segments `text` from the beginning.
     #[must_use]
     pub fn new(text: &'a str) -> Self {
-        Self { text, start: 0 }
+        Self::continuing(text, ClusterContext::START)
+    }
+
+    /// Segments `text` as the continuation of a document that ends at `context`.
+    ///
+    /// The first cluster of the piece may then begin *before* the piece does, in which case its
+    /// boundary inside the piece is not a caret position — the segmenter simply emits it starting
+    /// at byte zero, and [`crate::Layout`] keeps it out of the line's boundaries.
+    #[must_use]
+    pub fn continuing(text: &'a str, context: ClusterContext) -> Self {
+        Self {
+            text,
+            start: 0,
+            carried: context,
+        }
+    }
+
+    /// The state at the end of the text consumed so far — what the next piece needs.
+    #[must_use]
+    pub fn carry(&self) -> ClusterContext {
+        self.carried
     }
 }
 
@@ -686,10 +764,21 @@ impl<'a> Iterator for Clusters<'a> {
         if start >= text.len() {
             return None;
         }
+        let rest = &text[start..];
         let mut end = start;
-        let mut previous: Option<Property> = None;
-        let mut context = Context::default();
-        for (offset, character) in text[start..].char_indices() {
+        let mut previous = self.carried.previous;
+        let mut context = self.carried.context;
+        // The piece's first character decides whether this cluster is a continuation. If it does
+        // not join, the cluster ended before the piece began and this one opens a new cluster —
+        // decided once, here, so the loop below can start from a clean state.
+        let breaks = rest.chars().next().is_some_and(|first| {
+            previous.is_some_and(|before| !joins(before, property(first), context))
+        });
+        if breaks {
+            previous = None;
+            context = Context::default();
+        }
+        for (offset, character) in rest.char_indices() {
             let class = property(character);
             if previous.is_some_and(|before| !joins(before, class, context)) {
                 break;
@@ -699,6 +788,7 @@ impl<'a> Iterator for Clusters<'a> {
             end = start + offset + character.len_utf8();
         }
         self.start = end;
+        self.carried = ClusterContext { previous, context };
         Some((start, &text[start..end]))
     }
 }
@@ -774,6 +864,37 @@ mod tests {
         // standard's own family sequence, which the first implementation also got wrong.
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
         assert_eq!(clusters(family), vec![family]);
+    }
+
+    #[test]
+    fn a_piece_that_continues_a_cluster_segments_as_the_whole_text_does() {
+        // A leaf cut is a byte count, so a piece can begin inside a cluster. Handed the state the
+        // text before it ended in, the piece's first cluster ends where the document's does — at
+        // every character boundary of a text that has a mark, a joiner chain and a flag in it.
+        let text = "e\u{301}x\u{1F468}\u{200D}\u{1F469}\u{1F1E6}\u{1F1E7}\u{1F1E8}";
+        let whole: Vec<(usize, usize)> = Clusters::new(text)
+            .map(|(at, cluster)| (at, at + cluster.len()))
+            .collect();
+        for cut in 1..text.len() {
+            if !text.is_char_boundary(cut) {
+                continue;
+            }
+            let mut prefix = Clusters::new(&text[..cut]);
+            while prefix.next().is_some() {}
+            let context = prefix.carry();
+            let (_, next) = Clusters::continuing(&text[cut..], context)
+                .next()
+                .expect("a cluster after the cut");
+            let expected = whole
+                .iter()
+                .find(|(at, end)| *at <= cut && cut < *end)
+                .map(|(_, end)| *end);
+            assert_eq!(
+                Some(cut + next.len()),
+                expected,
+                "a cut at {cut} ends where the document's cluster does"
+            );
+        }
     }
 
     #[test]

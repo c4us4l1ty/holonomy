@@ -25,10 +25,12 @@
 //! * A leaf's height is the height of the **lines that start in it**. That partitions the document
 //!   exactly (every line starts once, so the heights sum to the height of one continuous layout of
 //!   the document) which is why the index also stores **where each leaf's first cluster sits in its
-//!   line, and whether the leaf ended on a bare CR**. Without the first, a paragraph split across
-//!   two leaves would break where the leaf ends and the scroll bar would grow a line per boundary
-//!   (AUDIT OQ-16, D-20); without the second, a `\r\n` whose two bytes fall either side of a leaf
-//!   cut would be charged two lines instead of one (AUDIT D-21).
+//!   line, whether the leaf ended on a bare CR, and the segmentation state its text ended in**.
+//!   Without the first, a paragraph split across two leaves would break where the leaf ends and the
+//!   scroll bar would grow a line per boundary (AUDIT OQ-16, D-20); without the second, a `\r\n`
+//!   whose two bytes fall either side of a leaf cut would be charged two lines instead of one
+//!   (AUDIT D-21); without the third, a leaf that opens inside a cluster would invent a caret no
+//!   renderer draws and would stop a backspace at its edge (AUDIT OQ-17, D-22).
 //! * Because the carry is stored, a frame can begin at a **line** rather than at a leaf. A screen
 //!   that began at a leaf boundary would re-wrap the paragraph from a point the document never
 //!   breaks at, and every cluster below it would be drawn where the document does not put it.
@@ -47,9 +49,9 @@
 //! over every caret a frame offers.
 
 use holonomy_eye::{
-    byte_window, layout_styled, layout_styled_from, window_text, Caret, Clusters, Fixed,
-    HeightModel, Layout, Point, ShapedWindow, Shaper, StyledText, View, Window, WindowText,
-    WindowTextError,
+    byte_window, layout_styled, layout_styled_continuing, window_text, Caret, ClusterContext,
+    Clusters, Fixed, HeightModel, Layout, Point, ShapedWindow, Shaper, StyledText, View, Window,
+    WindowText, WindowTextError,
 };
 use holonomy_text::{
     LiveSpan, ResidentSet, SegmentSink, SegmentSource, Selection, Typing, TypingError,
@@ -153,6 +155,15 @@ impl<'a> Frame<'a> {
         self.caret
     }
 }
+
+/// How many leaves one cluster is followed across by `cluster_before`/`cluster_after`.
+///
+/// A leaf cut can land inside a cluster, and a cluster — a base plus any number of marks — can
+/// therefore span leaves. The walk follows it, but a document that is thousands of leaves of
+/// nothing but combining marks would make one backspace a walk of the document, so it stops here
+/// and the part of the cluster it has is the answer. Eight leaves of one grapheme is a guard
+/// against a hostile document, not a claim about text.
+const CLUSTER_LEAF_LIMIT: usize = 8;
 
 /// The editor loop: a session, a resident set, a height index, a view and a selection.
 ///
@@ -506,10 +517,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let carried = self.measured.carry(leaf);
             let read = self.read(start, end)?;
             let (text, from) = leaf_text(read.text(), start, carried);
-            let layout = layout_styled_from(
+            let layout = layout_styled_continuing(
                 StyledText::plain(text),
                 from,
                 carried.x,
+                carried.cluster,
                 self.width,
                 &self.shaper,
             );
@@ -604,10 +616,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let (start, end) = (span.offset(), span.offset() + span.len());
         let read = self.read(start, end)?;
         let (text, from) = leaf_text(read.text(), start, carried);
-        let layout = layout_styled_from(
+        let layout = layout_styled_continuing(
             StyledText::plain(text),
             from,
             carried.x,
+            carried.cluster,
             self.width,
             &self.shaper,
         );
@@ -635,6 +648,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
                 _ => Fixed::ZERO,
             },
             after_cr: text.ends_with('\r'),
+            cluster: layout.carry(),
         };
         Ok((height, next))
     }
@@ -776,10 +790,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let carried = self.measured.carry(leaf);
         let read = self.read(start, end)?;
         let (text, from) = leaf_text(read.text(), start, carried);
-        let layout = layout_styled_from(
+        let layout = layout_styled_continuing(
             StyledText::plain(text),
             from,
             carried.x,
+            carried.cluster,
             self.width,
             &self.shaper,
         );
@@ -825,35 +840,58 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Some((span.offset(), span.offset() + span.len()))
     }
 
+    /// The live byte range of leaf `index`, or `None` past the end of the spine.
+    ///
+    /// The open leaf's length is the draft's, not the registered one, so the range is asked for by
+    /// a byte inside it and only falls back to the registered geometry.
+    fn leaf_bounds(&self, index: usize) -> Option<(u64, u64)> {
+        let span = self.typing.spine().slab_span(index as u32)?;
+        let start = span.offset();
+        self.leaf_range(start)
+            .or(Some((start, span.offset() + span.len())))
+    }
+
     /// Where the cluster before `at` begins, or `None` at the document's start.
     fn cluster_before(&mut self, at: u64) -> Result<Option<u64>, ShellError> {
         if at == 0 {
             return Ok(None);
         }
+        let Some(mut leaf) = self.leaf_of(at - 1) else {
+            return Ok(None);
+        };
         // A leaf is cut on a byte count, not on a cluster boundary: a mark or a joiner can be the
-        // first byte of the leaf holding the caret, with its base at the last byte of the leaf
-        // before. The grapheme a backspace removes starts where its *cluster* starts, so one leaf
-        // of left context is read with the caret's own. The bound is stated: a cluster that
-        // crosses two leaf boundaries is not joined up (AUDIT OQ-17).
-        let (leaf_start, _) = match self.leaf_range(at - 1) {
-            Some(range) => range,
-            None => (0, at),
-        };
-        let from = if leaf_start == 0 {
-            0
-        } else {
-            self.leaf_range(leaf_start - 1)
-                .map_or(0, |(start, _)| start)
-        };
-        let from = from.min(at);
-        if from == at {
-            return Ok(None);
+        // first byte of the leaf holding the caret, with its base at the last byte of the one
+        // before, and a run of marks can straddle several leaves. The grapheme a backspace removes
+        // starts where its *cluster* starts, so the walk steps back over every leaf whose first
+        // cluster is a continuation of the one before it — which the leaf's carried state says
+        // without reading anything.
+        let mut hops = 0;
+        loop {
+            let Some((from, _)) = self.leaf_bounds(leaf) else {
+                return Ok(None);
+            };
+            if from >= at {
+                return Ok(None);
+            }
+            let context = self.measured.carry(leaf).cluster;
+            let read = self.read(from, at)?;
+            let text = read.text();
+            let clusters = Clusters::continuing(text, context);
+            let Some((offset, _)) = clusters.last() else {
+                return Ok(None);
+            };
+            let opens_inside = offset == 0
+                && text
+                    .chars()
+                    .next()
+                    .is_some_and(|first| context.joins(first));
+            if opens_inside && leaf > 0 && hops < CLUSTER_LEAF_LIMIT {
+                leaf -= 1;
+                hops += 1;
+                continue;
+            }
+            return Ok(Some(from + offset as u64));
         }
-        let read = self.read(from, at)?;
-        let Some((offset, _)) = Clusters::new(read.text()).last() else {
-            return Ok(None);
-        };
-        Ok(Some(from + offset as u64))
     }
 
     /// Where the cluster after `at` ends, or `None` at the document's end.
@@ -862,28 +900,34 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         if at >= document {
             return Ok(None);
         }
+        let Some(mut leaf) = self.leaf_of(at) else {
+            return Ok(None);
+        };
         // The mirror of `cluster_before`: the cluster that starts at the caret can end in the leaf
-        // after the caret's, so one leaf of right context is read too.
-        let (start, leaf_end) = match self.leaf_range(at) {
-            Some((start, end)) => (start, end.min(document)),
-            None => (at, document),
-        };
-        let end = if leaf_end < document {
-            self.leaf_range(leaf_end)
-                .map_or(document, |(_, end)| end)
-                .min(document)
-        } else {
-            leaf_end
-        };
-        let from = at.max(start);
-        if from >= end {
-            return Ok(None);
+        // after it, so the window is widened leaf by leaf until the cluster it opens with ends
+        // inside it. A cluster that reaches the document's end is complete there.
+        let mut hops = 0;
+        loop {
+            let Some((_, end)) = self.leaf_bounds(leaf) else {
+                return Ok(None);
+            };
+            let end = end.min(document);
+            if end <= at {
+                return Ok(None);
+            }
+            let context = self.measured.carry(leaf).cluster;
+            let read = self.read(at, end)?;
+            let mut clusters = Clusters::continuing(read.text(), context);
+            let Some((_, cluster)) = clusters.next() else {
+                return Ok(None);
+            };
+            let cluster_end = at + cluster.len() as u64;
+            if cluster_end < end || end >= document || hops >= CLUSTER_LEAF_LIMIT {
+                return Ok(Some(cluster_end));
+            }
+            leaf += 1;
+            hops += 1;
         }
-        let read = self.read(from, end)?;
-        let Some((_, cluster)) = Clusters::new(read.text()).next() else {
-            return Ok(None);
-        };
-        Ok(Some(from + cluster.len() as u64))
     }
 
     /// Moves the caret, sealing whatever was open — the session does that itself.
@@ -905,9 +949,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
 
 /// What one leaf hands the next when the document is measured leaf by leaf.
 ///
-/// A leaf cut is a byte count, not a line boundary, so a leaf's layout is only meaningful together
-/// with this: where its predecessor's last line had got to, and whether that line ended on a bare
-/// carriage return.
+/// A leaf cut is a byte count, not a line or a cluster boundary, so a leaf's layout is only
+/// meaningful together with this: where its predecessor's last line had got to, whether that line
+/// ended on a bare carriage return, and the segmentation state at the end of the leaf's text.
 #[derive(Debug, Clone, Copy, Default)]
 struct Carry {
     /// How wide the predecessor's last line was when it ended; zero means the leaf begins a line.
@@ -915,6 +959,9 @@ struct Carry {
     /// The predecessor's last byte is a CR, so a LF at the first byte of this leaf is the second
     /// half of **one** break rather than a line of its own.
     after_cr: bool,
+    /// The UAX #29 state at the end of the predecessor's text: a leaf can begin inside a cluster,
+    /// and a piece handed this state segments as the document does (AUDIT OQ-17).
+    cluster: ClusterContext,
 }
 
 /// The measured geometry of the document: one height per leaf, and the carry each leaf was measured
@@ -1006,6 +1053,24 @@ fn measure_window(
     }
     let mut heights = vec![Fixed::ZERO; spans.len()];
     let mut offsets: Vec<Option<Fixed>> = vec![None; spans.len()];
+    // The segmentation state each leaf hands the next. The window is already text, so this is one
+    // pass over it with no read and no shaping: a leaf that begins inside a cluster is recorded
+    // with the state that says so, which is what keeps a later leaf-by-leaf layout of it segmenting
+    // as the document does (AUDIT OQ-17).
+    let mut context = ClusterContext::default();
+    let mut contexts: Vec<ClusterContext> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let low = usize::try_from(span.offset().saturating_sub(start)).unwrap_or(0);
+        let high = usize::try_from((span.offset() + span.len()).saturating_sub(start))
+            .unwrap_or(0)
+            .min(text.len());
+        if let Some(slice) = text.get(low..high) {
+            let mut clusters = Clusters::continuing(slice, context);
+            while clusters.next().is_some() {}
+            context = clusters.carry();
+        }
+        contexts.push(context);
+    }
     for line in layout.lines() {
         let at = line.start_byte();
         let found = spans
@@ -1049,6 +1114,7 @@ fn measure_window(
                 Carry {
                     x: offsets[index].unwrap_or(Fixed::ZERO),
                     after_cr: last == Some(&b'\r'),
+                    cluster: contexts[index],
                 },
             )
         })
