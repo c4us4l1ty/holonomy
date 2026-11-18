@@ -608,7 +608,10 @@ fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
     };
     assert!(end > 0 && end < text.len() as u64, "the window is a prefix");
     assert_eq!(end % 64, 0, "it ends at a leaf");
-    assert!(!starts.contains(&end), "and that leaf cut is inside a grapheme");
+    assert!(
+        !starts.contains(&end),
+        "and that leaf cut is inside a grapheme"
+    );
     let before = starts
         .iter()
         .copied()
