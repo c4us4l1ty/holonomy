@@ -662,15 +662,17 @@ mod tests {
         assert_eq!(typing.spine().len(), 10, "the tree and the document agree");
         // Three leaves, not two: the leaves the cut lands in are split, and nothing rejoins them.
         assert_eq!(typing.spine().slab_count(), 3);
-        // And the fragments point at the right bytes: keeping 0..2 of "01234567" and 12..16 of
-        // "89abcdef" means inner offsets 2 and 4, so the document reads "01" + "cdef" + "ghij".
+        // And the fragments point at the right bytes: keeping bytes 0..2 of segment 0 and 4..8 of
+        // segment 1 means inner offsets 0 and 4 — the middle one is the check, because it is the
+        // only offset a bounds-only implementation could get wrong — so the document reads
+        // "01" + "cdef" + "ghij".
         let spans: Vec<(u64, u64, u32)> = typing
             .spine()
             .spans_in(0, typing.spine().len())
             .iter()
             .map(|span| (span.offset(), span.len(), span.slab().start()))
             .collect();
-        assert_eq!(spans, vec![(0, 2, 2), (2, 4, 4), (6, 4, 0)]);
+        assert_eq!(spans, vec![(0, 2, 0), (2, 4, 4), (6, 4, 0)]);
         // The removed bytes are still in the world-line. That is OQ-14, and it is why this is
         // called deletion and not erasure.
         assert_eq!(typing.sink.written().len(), 20);
@@ -710,7 +712,9 @@ mod tests {
         typing.flush().expect("flushed");
         // Sealed, the session has no reader and cannot tell: the cut goes through. That
         // asymmetry is OQ-15, and it is why the caret that calls this is an Eye cluster boundary.
-        typing.delete(1, 2).expect("the geometry does not check characters");
+        typing
+            .delete(1, 2)
+            .expect("the geometry does not check characters");
         assert_eq!(typing.document_len(), 3);
         assert_eq!(typing.spine().len(), 3);
     }
