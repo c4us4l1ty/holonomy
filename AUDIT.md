@@ -54,8 +54,54 @@ Listed so they stay dead.
 | OQ-14 | **Deletion does not erase.** `Typing::delete` removes a range from the tree, which is a pointer operation: no bytes written, no segment sealed. The deleted text therefore stays in the world-line as ciphertext, decryptable by anyone holding the passphrase. That is inherent to an authenticated append-only log — the log *is* the history, and the document is a view of it — and it is also why the log is trustworthy. A policy is needed (segment-by-segment re-encryption in a compaction pass, or a per-document epoch the user is expected to rotate), and until one exists "deleted" must not be read as "erased" in any user-facing claim. Found 2026-11-17 while implementing deletion. | **open — found 2026-11-17, no policy yet** |
 | OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8. The asymmetry was the finding: offsets inside the open buffer are checked (`SlabText` returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. **Narrowed by D-18:** the reader refuses a window whose edge falls inside a character, naming the offset. **Closed for the session by D-19:** the check OQ-15 asked for exists — `holonomy-shell` holds the reader and the edit in one place, and its test asserts over every caret every frame offers that the byte is a character boundary of the frame's text and hit-tests back to itself. What remains is not a missing check but a missing *type*: the offset is still a `u64` a caller can get wrong, and a caller that bypasses the Eye still asks for a mid-character cut — which is now refused at read time instead of silently rendered. Making it impossible would need an offset type the Eye alone can mint, which is a Block 6 API decision, not a hole in this one. | **closed 2026-11-18 — the caret check passes; a bypassing caller is refused at read** |
 
-| OQ-16 | **A leaf's height is measured alone, so a paragraph that spans a leaf boundary is charged a line it does not occupy.** `reflow` lays each leaf out as its own window — necessarily, because measuring the continuous document would mean decrypting it, which the single law forbids — so a paragraph continuing across a boundary breaks there in the measurement even though a frame spanning the boundary draws it as one line. The per-leaf sum can therefore exceed the continuous layout's height by one line per boundary a paragraph crosses, which makes the scroll bar's total an upper bound rather than an equality. Scroll positions stay exact to the leaf, because a leaf's height is charged to the leaf whose line begins in it, and a frame that covers a boundary corrects the leaves it touched. Two ways out: give `reflow` one line of context on each side (read the tail of the previous leaf with the head of the next, still residency-bounded), or measure continuously now that a real shaper makes it affordable. Neither is this slice's. Found 2026-11-18 while building the loop (D-19). | **open — found 2026-11-18, bounded by one line per crossed boundary** |
+| OQ-16 | **A leaf's height is measured apart from the line it is in, so the scroll bar counts a line the document does not have.** `reflow` laid each leaf out alone — necessarily, because measuring the continuous document would mean decrypting it — so a paragraph continuing across a boundary broke there in the measurement, and the per-leaf sum exceeded the continuous layout's height by up to one line per crossed boundary. **Closed by D-20**: the line is carried across the boundary as two words (the x the next cluster sits at, and whether the line began earlier), `layout_styled_from` lays a piece out as the continuation of a line, and `reflow`'s total now equals one continuous layout of the same text — proven by a test that lays the whole document out once. The fix also closed a bug that had not been written down: a frame used to begin at a leaf, which re-wrapped the paragraph from a point the document never breaks at. | **closed 2026-11-18 — the partition is exact, and frames begin at lines** |
 ## Audit trail
+
+- **2026-11-18 — D-20 — a leaf boundary is not a line boundary.** D-19 said the geometry was a
+  document's, and it was not: it was the leaves'. Two bugs had the same cause — the wrap state at a
+  leaf boundary, which is two numbers (where the next cluster would go, and whether the line it lands
+  on began earlier), was thrown away.
+
+  **The scroll bar was wrong.** `reflow` laid each leaf out *alone*, which measures a leaf's own
+  layout and not the document's. A paragraph split across 64 leaves counted 64 lines where the
+  document has 21: **1,280 units of scroll for a 420-unit document**, and the error grew with the
+  number of boundaries a paragraph crossed. That was OQ-16, recorded as a standing tax.
+
+  **The screen was wrong, and nobody had said so.** A frame began at the *leaf* the scroll position
+  fell in. A line can start inside a leaf — in a 4,000-leaf document, line 19 starts at byte 3,800,
+  which is 24 bytes into leaf 59 — so the frame re-wrapped the paragraph from a point the document
+  never breaks at. Paint and hit-test still agreed with each other (L-8 holds for the frame), and
+  every cluster on screen was drawn where the *frame* says, which is not where the document says.
+  The first bug made the second visible; the second was the serious one, and it had never been
+  written down.
+
+  **The fix is one idea in two places.** `layout_styled_from` lays text out as the continuation of a
+  line that is already `start_x` wide, wrapping before its first cluster if that cluster does not
+  fit, and marking the first line as inherited. The shell carries `start_x` from leaf to leaf in
+  `reflow`, and stores it with each leaf's height in one `Measured` value — the two have the same
+  lifetime, because both describe a wrap the document no longer has after an edit or a resize. A
+  frame then asks the index which leaf the scroll position falls in, lays *that* leaf out from its
+  carry, and begins at the byte where the position's line starts.
+
+  **What is measured, and the test that could fail.** `reflow`'s total now equals one continuous
+  layout of the same text — 420 units for a 4,096-letter paragraph in 64 leaves, and 20,500 for 1,024
+  hard breaks in 64 leaves — and the test computes both by laying the whole document out once, which
+  is the one thing the shell may never do. A frame at y = 380 begins at byte 3,800 with a full line
+  of 200 clusters, and the height it writes back leaves every leaf it only began inside alone.
+  `cargo test` proves the partition; nothing here needs a font.
+
+  **The third bug, found on the way.** `reveal_caret` read a *frame*-relative caret top as a
+  document coordinate, and could only see a caret the frame already held — which is the case a scroll
+  is not needed for. It scrolled to the top of the document to show a caret one line above the scroll
+  position, and did nothing when the caret was far below. It now asks the document: binary-search the
+  leaf, lay it out with its carry, and add the leaf's measured top. `revealing_the_caret_scrolls_...`
+  pins the smallest scroll in three cases, including a caret that no frame holds.
+
+  **What is still owed.** A line crossing the *window's* end is charged the height it has inside the
+  window, which is exact while every line is the same height — true of the shell, which lays out
+  plain text, and not true of a styled document, which would have to carry the running line height
+  and correct the charge when the line ends. The residency story is unchanged: `reflow` still holds
+  one faulted leaf at a time, and a carry is two words, not text.
 
 - **2026-11-18 — D-19 — the loop exists, and the caret check OQ-15 asked for passes.** Block 5 ended
   with a chain of parts that each had a test and none had a caller: an index that knew where the
@@ -82,17 +128,15 @@ Listed so they stay dead.
      scroll position must resolve to.
   2. Measuring a whole document (`reflow`) lays each leaf out **alone**, one faulted leaf at a time
      and never more. That is what keeps the constitutional clause true while measuring 4,000 leaves —
-     and it introduces OQ-16: a paragraph that would have continued across a leaf boundary is charged
-     the line it breaks there. A frame that *begins* at or before a leaf corrects that leaf; a leaf a
-     line merely **crosses** keeps the height `reflow` gave it, because the frame has no measurement
-     of it and writing back a zero would erase one. (That write-back bug was the last thing the first
-     CI run found: two frames took exactly one viewport of height off a document, and now
-     `a_frame_does_not_zero_a_leaf_it_only_crosses` keeps it honest.)
+     and in the first draft it also introduced OQ-16: a paragraph that would have continued across a
+     leaf boundary was charged the line it breaks there. **D-20 is the rest of that sentence**: the
+     leaf is laid out alone, but the *line* is carried across the boundary, so convention 1 is now
+     true of `reflow` as well as of frames, and OQ-16 is closed.
 
   **What the loop measures, in counts.** On a 4,000-leaf document: reflow faults each leaf exactly
-  once and the resident set never holds more than its budget; a frame halfway down shapes 128
-  clusters (two leaves) and reads the index at most a couple of hundred times, for four thousand
-  leaves; and a keystroke at the document's end appends one leaf —
+  once and the resident set never holds more than its budget; a frame halfway down shapes 384
+  clusters (two lines of 200 units) and reads the index at most a couple of hundred times, for four
+  thousand leaves; and a keystroke at the document's end appends one leaf —
   `HeightModel::push`, O(log n) — instead of rebuilding the index, so no measured height is
   invalidated by typing. A **cut** cannot do that: it moves every offset after it, so the index is
   emptied and the next frame re-measures what it shows. That asymmetry is the honest one.

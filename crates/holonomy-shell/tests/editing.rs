@@ -5,7 +5,7 @@
 //! numbers are exact rather than approximate — which is what makes the caret check at the end a
 //! proof about every caret a frame offers instead of a sample of them.
 
-use holonomy_eye::{Fixed, Point, Shaper, Style, View};
+use holonomy_eye::{layout_styled, Fixed, Point, Shaper, Style, StyledText, View};
 use holonomy_shell::Editor;
 use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
 use std::cell::{Cell, RefCell};
@@ -209,8 +209,8 @@ fn reflow_measures_every_leaf_one_at_a_time() {
     assert_eq!(shell.heights().len(), 64, "one leaf per sealed segment");
     assert_eq!(
         shell.heights().total(),
-        Fixed::units(64 * 20),
-        "sixty-four lines of twenty units, measured leaf by leaf"
+        Fixed::units(21 * 20),
+        "four thousand and ninety-six letters, twenty-one lines, measured leaf by leaf"
     );
     assert_eq!(
         shell.residency().source().loads,
@@ -222,42 +222,152 @@ fn reflow_measures_every_leaf_one_at_a_time() {
         "measuring the document did not mean holding it"
     );
 
-    shell.scroll_to(Fixed::units(64 * 20));
+    shell.scroll_to(Fixed::units(21 * 20));
     assert_eq!(
         shell.scroll(),
-        Fixed::units(64 * 20 - 40),
+        Fixed::units(21 * 20 - 40),
         "the scroll clamps to the last screen"
     );
     let frame = shell.frame().expect("a frame");
     assert!(!frame.provisional());
-    assert_eq!(frame.leaves().len(), 2, "a two-line screen");
+    assert_eq!(frame.origin(), 3_800, "the last screen starts at a line");
     assert!(frame.text().ends_with('a'), "{:?}", frame.text());
 }
 
 #[test]
-fn a_frame_does_not_zero_a_leaf_it_only_crosses() {
+fn reflow_agrees_with_one_continuous_layout_of_the_document() {
+    // The claim the whole index rests on: a leaf's height is the height of the lines that **start**
+    // in it, so the leaves sum to the height of the document laid out in one piece — even when a
+    // paragraph runs straight through every leaf boundary. A shell may never lay the document out
+    // in one piece; a test may, and did, and before the carry existed this failed by a line per
+    // boundary.
+    let paragraph = repeat_leaf().repeat(64);
+    let mut split = editor(Repeated::new(64));
+    split.type_text(&paragraph).expect("typed");
+    split.flush().expect("sealed");
+    split.reflow().expect("measured");
+    let whole = layout_styled(StyledText::plain(&paragraph), 0, WIDTH, &Fake);
+    assert_eq!(
+        split.heights().total(),
+        whole.height(),
+        "one paragraph, 64 leaves"
+    );
+
+    // A document that ends every line, where the empty line after each break belongs to the leaf
+    // that continues it — and the last one belongs to the document.
+    let lines = "abc\n".repeat(1_024);
+    let mut broken = session();
+    broken.type_text(&lines).expect("typed");
+    broken.flush().expect("sealed");
+    broken.reflow().expect("measured");
+    let whole = layout_styled(StyledText::plain(&lines), 0, WIDTH, &Fake);
+    assert_eq!(broken.heights().total(), whole.height(), "1024 hard breaks");
+}
+
+#[test]
+fn a_frame_begins_at_the_line_a_scroll_position_falls_in() {
+    // The bug OQ-16 laid bare: a window that started at a leaf would begin in the middle of a line
+    // and re-wrap the paragraph from there, so every cluster below it would be drawn where the
+    // document does not put it. Line 19 of this document starts at byte 3,800 — inside leaf 59 —
+    // and the frame has to begin *there*.
     let mut shell = editor(Repeated::new(64));
     shell.type_text(&repeat_leaf().repeat(64)).expect("typed");
     shell.flush().expect("sealed");
     shell.reflow().expect("measured");
     let measured = shell.heights().total();
-    assert_eq!(measured, Fixed::units(64 * 20));
+    assert_eq!(
+        measured,
+        Fixed::units(420),
+        "twenty-one lines of twenty units"
+    );
 
-    // A two-leaf screen filled by **one** line: every leaf measured 20 units on its own, and the
-    // only line in the window starts in the first of them. Writing a zero back for the second
-    // would erase a measurement this frame never made, and the document would silently lose a line
-    // of scroll for as long as the leaf was off screen.
-    let (leaves, lines) = {
+    shell.scroll_to(Fixed::units(380));
+    let (origin, clusters, leaves) = {
         let frame = shell.frame().expect("a frame");
-        (frame.leaves().len(), frame.layout().lines().len())
+        (
+            frame.origin(),
+            frame.layout().lines()[0].clusters().len(),
+            frame.leaves().len(),
+        )
     };
-    assert_eq!(leaves, 2, "two leaves on screen");
-    assert_eq!(lines, 1, "one line across both, so the second is crossed");
+    assert_eq!(origin, 3_800, "the line, not the leaf it is drawn in");
+    assert_eq!(
+        clusters, 200,
+        "the first line is a full line of the document"
+    );
+    assert_eq!(leaves, 4, "the bytes behind a two-line screen");
     assert_eq!(
         shell.heights().total(),
         measured,
-        "a crossed leaf keeps the height it was measured at"
+        "a frame a leaf began inside leaves that leaf's measurement alone"
     );
+}
+
+#[test]
+fn revealing_the_caret_scrolls_the_smallest_amount_that_shows_it() {
+    let mut shell = editor(Repeated::new(64));
+    shell
+        .type_text(&repeat_leaf().repeat(4_000))
+        .expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    let bottom = Fixed::units(1_280 * 20 - 40);
+
+    // The caret is at the end of a document nobody has scrolled, so showing it is one scroll — to
+    // the last screen — and then nothing at all.
+    assert!(
+        shell.reveal_caret().expect("a reveal"),
+        "the caret is off screen"
+    );
+    assert_eq!(shell.scroll(), bottom, "the last screen");
+    assert!(
+        !shell.reveal_caret().expect("a reveal"),
+        "it is visible now"
+    );
+
+    // A caret above the screen. The frame at the bottom of the document does not hold it, and a
+    // caret a frame does not hold has no frame-relative y to read: the answer has to come from the
+    // document, or the reveal does nothing.
+    shell.scroll_to(Fixed::ZERO);
+    let clicked = shell
+        .click(Point::new(Fixed::ZERO, Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(
+        clicked.map(|caret| caret.byte),
+        Some(0),
+        "the document's start"
+    );
+    shell.scroll_to(bottom);
+    assert!(
+        shell.reveal_caret().expect("a reveal"),
+        "the caret is above the screen"
+    );
+    assert_eq!(
+        shell.scroll(),
+        Fixed::ZERO,
+        "the smallest scroll is up to its line"
+    );
+
+    // A click on the first line of a screen whose scroll position is not a line boundary. The caret
+    // lands at the start of the line at 12,800 — above the scroll position, so revealing it is one
+    // line up and **not** up to the top of the document, which is what a frame-relative y would do.
+    shell.scroll_to(Fixed::units(12_805));
+    let clicked = shell
+        .click(Point::new(Fixed::ZERO, Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(
+        clicked.map(|caret| caret.byte),
+        Some(128_000),
+        "the line's start"
+    );
+    assert_eq!(
+        shell.scroll(),
+        Fixed::units(12_805),
+        "a click does not scroll"
+    );
+    assert!(shell.reveal_caret().expect("a reveal"));
+    assert_eq!(shell.scroll(), Fixed::units(12_800), "one line up");
+    assert!(!shell.reveal_caret().expect("a reveal"), "and then nothing");
 }
 
 #[test]
@@ -270,30 +380,44 @@ fn a_keystroke_on_a_long_document_shapes_only_the_screen() {
     shell.reflow().expect("measured");
     assert_eq!(shell.heights().len(), 4_000);
     let measured = shell.heights().total();
-    assert_eq!(measured, Fixed::units(4_000 * 20));
+    assert_eq!(
+        measured,
+        Fixed::units(1_280 * 20),
+        "256,000 letters, 1,280 lines"
+    );
 
-    // Halfway down a document this has never shown: the frame shapes two leaves, not four thousand.
-    shell.scroll_to(Fixed::units(4_000 * 20 / 2));
-    let frame = shell.frame().expect("a frame");
-    assert_eq!(frame.leaves().len(), 2);
-    assert!(
-        frame.shaped() <= 130,
-        "{} clusters shaped for a two-line screen",
-        frame.shaped()
+    // Halfway down a document this has never shown: the frame shapes two lines, not four thousand.
+    shell.scroll_to(Fixed::units(1_280 * 20 / 2));
+    let (origin, shaped, bytes, reads) = {
+        let frame = shell.frame().expect("a frame");
+        (
+            frame.origin(),
+            frame.shaped(),
+            frame.text().len(),
+            frame.reads(),
+        )
+    };
+    assert_eq!(
+        origin, 128_000,
+        "halfway is a line, which here is a leaf boundary"
     );
     assert!(
-        frame.reads() <= 256,
-        "{} index reads for 4000 leaves: searches, not a walk",
-        frame.reads()
+        shaped <= 420,
+        "{shaped} clusters shaped for a two-line screen"
+    );
+    assert!(bytes <= 420, "{bytes} bytes read for a two-line screen");
+    assert!(
+        reads <= 256,
+        "{reads} index reads for 4000 leaves: searches"
     );
 
     // A keystroke at the document's end appends one leaf, and the index grows by one instead of
     // being rebuilt: every height measured a moment ago is still the truth. A rebuild would leave
     // four thousand zeroes and a total of zero, so the total is what tells the two apart.
     shell.type_text("z").expect("typed");
-    let (leaves, shaped) = {
+    let shaped = {
         let after = shell.frame().expect("a frame");
-        (after.leaves().len(), after.shaped())
+        after.shaped()
     };
     assert_eq!(shell.heights().len(), 4_001, "one appended leaf");
     assert_eq!(
@@ -301,8 +425,7 @@ fn a_keystroke_on_a_long_document_shapes_only_the_screen() {
         measured,
         "a tail append invalidated no measured height"
     );
-    assert_eq!(leaves, 2, "the screen is still the screen");
-    assert!(shaped <= 130, "{shaped} clusters shaped");
+    assert!(shaped <= 420, "{shaped} clusters shaped");
 }
 
 #[test]
