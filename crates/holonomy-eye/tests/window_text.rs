@@ -124,7 +124,12 @@ fn a_viewport_reads_exactly_the_bytes_it_covers() {
 fn reading_the_same_viewport_again_touches_no_segment() {
     let (spine, heights) = document(40);
     let mut residents = residency(World::of(40));
-    let window = byte_window(&spine, &heights, Fixed::units(0), Fixed::units(3 * LEAF_UNITS));
+    let window = byte_window(
+        &spine,
+        &heights,
+        Fixed::units(0),
+        Fixed::units(3 * LEAF_UNITS),
+    );
     let first = window_text(
         &mut residents,
         &spine,
@@ -158,7 +163,12 @@ fn an_open_leaf_reads_from_the_pending_buffer_and_faults_nothing() {
     typing.insert(b"hello world").expect("typed");
     let mut heights = HeightModel::new(typing.spine().slab_count() as usize);
     heights.set(0, Fixed::units(LEAF_UNITS));
-    let window = byte_window(typing.spine(), &heights, Fixed::ZERO, Fixed::units(LEAF_UNITS));
+    let window = byte_window(
+        typing.spine(),
+        &heights,
+        Fixed::ZERO,
+        Fixed::units(LEAF_UNITS),
+    );
     assert_eq!(window.bytes(), 0..11);
 
     let mut residents = residency(World::default());
@@ -189,7 +199,12 @@ fn a_window_that_spans_sealed_text_and_the_open_buffer_reads_both() {
     for leaf in 0..heights.len() {
         heights.set(leaf, Fixed::units(LEAF_UNITS));
     }
-    let window = byte_window(typing.spine(), &heights, Fixed::ZERO, Fixed::units(2 * LEAF_UNITS));
+    let window = byte_window(
+        typing.spine(),
+        &heights,
+        Fixed::ZERO,
+        Fixed::units(2 * LEAF_UNITS),
+    );
     assert_eq!(window.bytes(), 0..12, "the sealed ten and the pending two");
 
     let mut world = World::default();
