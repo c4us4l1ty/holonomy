@@ -8,7 +8,9 @@
 use holonomy_eye::{Fixed, Point, Shaper, Style, View};
 use holonomy_shell::Editor;
 use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 /// One logical unit per cluster, two for `m` and `中`.
 #[derive(Debug, Default)]
@@ -31,7 +33,53 @@ impl Shaper for Fake {
     }
 }
 
-/// A sink that mints distinct segment ids, so a session can run without a world-line.
+/// The world-line as a session uses it: one store, appended to through [`SegmentSink`] and read
+/// back through [`SegmentSource`], counting the reads.
+///
+/// Both halves share it, which is what makes a **sealed** leaf readable: typing into an open buffer
+/// never asks the world-line for anything, and the moment a seal commits a segment the reader must
+/// be able to fault it in. A sink and a source that did not share state would make every test that
+/// flushes a fake that disagrees with itself.
+#[derive(Debug, Clone, Default)]
+struct World {
+    segments: Rc<RefCell<BTreeMap<u64, Vec<u8>>>>,
+    next: Rc<Cell<u64>>,
+    loads: Rc<Cell<usize>>,
+}
+
+impl World {
+    fn loads(&self) -> usize {
+        self.loads.get()
+    }
+}
+
+impl SegmentSink for World {
+    fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+        let id = self.next.get();
+        self.next.set(id + 1);
+        self.segments.borrow_mut().insert(id, plaintext.to_vec());
+        Ok(Appended {
+            segment: SegmentId::new(id),
+            witness_sequence: id + 1,
+            segment_root: [0u8; 32],
+            bytes_written: plaintext.len() as u64,
+        })
+    }
+}
+
+impl SegmentSource for World {
+    fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+        self.loads.set(self.loads.get() + 1);
+        let segments = self.segments.borrow();
+        segments
+            .get(&segment.get())
+            .cloned()
+            .ok_or_else(|| format!("no {segment}"))
+    }
+}
+
+/// A sink that mints distinct segment ids and stores nothing — the commit half of the generated
+/// world-line below, whose leaves do not depend on what was typed.
 #[derive(Debug, Default)]
 struct Recorder {
     next: u64,
@@ -39,49 +87,33 @@ struct Recorder {
 
 impl SegmentSink for Recorder {
     fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
-        let segment = SegmentId::new(self.next);
+        let id = self.next;
         self.next += 1;
         Ok(Appended {
-            segment,
-            witness_sequence: self.next,
+            segment: SegmentId::new(id),
+            witness_sequence: id + 1,
             segment_root: [0u8; 32],
             bytes_written: plaintext.len() as u64,
         })
     }
 }
 
-/// The world-line, as plaintext by segment id, counting what it is asked for.
-#[derive(Debug, Default)]
-struct Segments {
-    segments: BTreeMap<u64, Vec<u8>>,
-    loads: usize,
-}
-
-impl Segments {
-    fn with(entries: &[(u64, &str)]) -> Self {
-        let segments = entries
-            .iter()
-            .map(|(id, text)| (*id, text.as_bytes().to_vec()))
-            .collect();
-        Self { segments, loads: 0 }
-    }
-}
-
-impl SegmentSource for Segments {
-    fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
-        self.loads += 1;
-        self.segments
-            .get(&segment.get())
-            .cloned()
-            .ok_or_else(|| format!("no {segment}"))
-    }
-}
-
 /// A world-line that generates its leaves, so a four-thousand-leaf document costs the residency
-/// nothing: each leaf is `"a" * (leaf_bytes - 1) + "\n"`.
+/// nothing: each leaf is `leaf_bytes` letters and no line break, which is one measured line per
+/// leaf — the number the assertions below are written in.
 #[derive(Debug)]
 struct Repeated {
     leaf_bytes: usize,
+    loads: usize,
+}
+
+impl Repeated {
+    fn new(leaf_bytes: usize) -> Self {
+        Self {
+            leaf_bytes,
+            loads: 0,
+        }
+    }
 }
 
 impl SegmentSource for Repeated {
@@ -89,11 +121,8 @@ impl SegmentSource for Repeated {
         if segment.get() >= 4_096 {
             return Err(format!("no {segment}"));
         }
-        let mut bytes = vec![b'a'; self.leaf_bytes];
-        if let Some(last) = bytes.last_mut() {
-            *last = b'\n';
-        }
-        Ok(bytes)
+        self.loads += 1;
+        Ok(vec![b'a'; self.leaf_bytes])
     }
 }
 
@@ -102,19 +131,33 @@ const VIEWPORT: Fixed = Fixed::units(40);
 /// Four leaf-sized buffers fit in the resident set; measuring a document is not holding it.
 const BUDGET: usize = 256;
 
-fn editor<R: SegmentSource>(source: R) -> Editor<Recorder, R, Fake> {
-    let residency = ResidentSet::new(source, BUDGET, 0).expect("a workable budget");
-    Editor::new(Typing::new(Recorder::default(), 64), residency, Fake, WIDTH, VIEWPORT)
+/// A session whose world-line can be sealed and read back.
+fn session() -> Editor<World, World, Fake> {
+    let world = World::default();
+    let residency = ResidentSet::new(world.clone(), BUDGET, 0).expect("a workable budget");
+    Editor::new(Typing::new(world, 64), residency, Fake, WIDTH, VIEWPORT)
 }
 
-/// One leaf of a [`Repeated`] document.
+/// A session over a generated world-line, for documents too large to type by hand.
+fn editor(source: Repeated) -> Editor<Recorder, Repeated, Fake> {
+    let residency = ResidentSet::new(source, BUDGET, 0).expect("a workable budget");
+    Editor::new(
+        Typing::new(Recorder::default(), 64),
+        residency,
+        Fake,
+        WIDTH,
+        VIEWPORT,
+    )
+}
+
+/// One leaf of a [`Repeated`] document: sixty-four letters, one line, twenty units.
 fn repeat_leaf() -> String {
-    "a".repeat(63) + "\n"
+    "a".repeat(64)
 }
 
 #[test]
 fn typing_is_visible_in_the_next_frame() {
-    let mut shell = editor(Segments::default());
+    let mut shell = session();
     shell.type_text("hello world").expect("typed");
     let frame = shell.frame().expect("a frame");
     assert_eq!(frame.text(), "hello world");
@@ -129,13 +172,16 @@ fn typing_is_visible_in_the_next_frame() {
 
 #[test]
 fn a_fresh_document_measures_itself_and_stops_being_provisional() {
-    let mut shell = editor(Segments::default());
+    let mut shell = session();
     shell.type_text("one\ntwo\nthree\n").expect("typed");
-    let first = shell.frame().expect("a frame");
-    assert!(first.provisional(), "nothing had been measured before it");
+    let (provisional, height) = {
+        let first = shell.frame().expect("a frame");
+        (first.provisional(), first.layout().height())
+    };
+    assert!(provisional, "nothing had been measured before it");
     assert_eq!(
         shell.heights().total(),
-        first.layout().height(),
+        height,
         "the frame wrote back what it laid out"
     );
     assert_eq!(shell.heights().len(), 1);
@@ -143,14 +189,21 @@ fn a_fresh_document_measures_itself_and_stops_being_provisional() {
     let second = shell.frame().expect("a frame");
     assert!(!second.provisional(), "the first frame measured the screen");
     assert_eq!(second.text(), "one\ntwo\nthree\n");
-    assert_eq!(second.layout().lines().len(), 4, "the empty last line counts");
+    assert_eq!(
+        second.layout().lines().len(),
+        4,
+        "the empty last line counts"
+    );
 }
 
 #[test]
 fn reflow_measures_every_leaf_one_at_a_time() {
-    let mut shell = editor(Repeated { leaf_bytes: 64 });
+    let mut shell = editor(Repeated::new(64));
     shell.type_text(&repeat_leaf().repeat(64)).expect("typed");
     assert_eq!(shell.document_len(), 64 * 64);
+    // Seal, so every leaf has a segment of its own: a document left with an open buffer would be
+    // measured through the reader's pending path instead of the world-line.
+    shell.flush().expect("sealed");
     shell.reflow().expect("measured");
 
     assert_eq!(shell.heights().len(), 64, "one leaf per sealed segment");
@@ -178,13 +231,16 @@ fn reflow_measures_every_leaf_one_at_a_time() {
     let frame = shell.frame().expect("a frame");
     assert!(!frame.provisional());
     assert_eq!(frame.leaves().len(), 2, "a two-line screen");
-    assert!(frame.text().ends_with("a\n"), "{:?}", frame.text());
+    assert!(frame.text().ends_with('a'), "{:?}", frame.text());
 }
 
 #[test]
 fn a_keystroke_on_a_long_document_shapes_only_the_screen() {
-    let mut shell = editor(Repeated { leaf_bytes: 64 });
-    shell.type_text(&repeat_leaf().repeat(4_000)).expect("typed");
+    let mut shell = editor(Repeated::new(64));
+    shell
+        .type_text(&repeat_leaf().repeat(4_000))
+        .expect("typed");
+    shell.flush().expect("sealed");
     shell.reflow().expect("measured");
     assert_eq!(shell.heights().len(), 4_000);
     let measured = shell.heights().total();
@@ -200,31 +256,36 @@ fn a_keystroke_on_a_long_document_shapes_only_the_screen() {
         frame.shaped()
     );
     assert!(
-        frame.reads() <= 8 * 12 + 32,
-        "{} index reads for 4000 leaves",
+        frame.reads() <= 256,
+        "{} index reads for 4000 leaves: searches, not a walk",
         frame.reads()
     );
 
     // A keystroke at the document's end appends one leaf, and the index grows by one instead of
-    // being rebuilt: every height measured a moment ago is still the truth.
+    // being rebuilt: every height measured a moment ago is still the truth. A rebuild would leave
+    // four thousand zeroes and a total of zero, so the total is what tells the two apart.
     shell.type_text("z").expect("typed");
-    let after = shell.frame().expect("a frame");
+    let (leaves, shaped) = {
+        let after = shell.frame().expect("a frame");
+        (after.leaves().len(), after.shaped())
+    };
     assert_eq!(shell.heights().len(), 4_001, "one appended leaf");
     assert_eq!(
         shell.heights().total(),
         measured,
         "a tail append invalidated no measured height"
     );
-    assert!(after.shaped() <= 130, "the screen is still the screen");
+    assert_eq!(leaves, 2, "the screen is still the screen");
+    assert!(shaped <= 130, "{shaped} clusters shaped");
 }
 
 #[test]
 fn backspace_takes_the_whole_cluster() {
-    let mut shell = editor(Segments::default());
+    let mut shell = session();
     // `e` + COMBINING ACUTE is one cluster of three bytes, and the caret sits after all three.
     shell.type_text("e\u{301}x").expect("typed");
-    assert!(shell.backspace().expect("deleted"));
-    assert_eq!(shell.document_len(), 1);
+    assert!(shell.backspace().expect("deleted"), "x goes");
+    assert_eq!(shell.document_len(), 3, "`e` and its mark are three bytes");
     assert_eq!(shell.frame().expect("a frame").text(), "e\u{301}");
     assert!(shell.backspace().expect("deleted"));
     assert_eq!(shell.document_len(), 0);
@@ -236,7 +297,7 @@ fn backspace_takes_the_whole_cluster() {
 
 #[test]
 fn a_click_lands_on_a_cluster_boundary_and_a_drag_selects() {
-    let mut shell = editor(Segments::default());
+    let mut shell = session();
     // `m` is two units wide and `i` one: `mimi` puts boundaries at bytes 0-4 and x 0, 2, 3, 5, 6.
     shell.type_text("mimi").expect("typed");
     let clicked = shell
@@ -255,7 +316,11 @@ fn a_click_lands_on_a_cluster_boundary_and_a_drag_selects() {
     assert_eq!(shell.selection().normalised(), (0, 3));
     assert_eq!(shell.selection().caret_offset(), 0, "the caret is the drag");
     assert!(shell.delete_selection().expect("deleted"));
-    assert_eq!(shell.document_len(), 1, "one byte was left outside the selection");
+    assert_eq!(
+        shell.document_len(),
+        1,
+        "one byte was left outside the selection"
+    );
     assert_eq!(shell.frame().expect("a frame").text(), "i");
 }
 
@@ -264,7 +329,7 @@ fn every_caret_a_frame_offers_is_a_character_boundary() {
     // The check OQ-15 said was missing, and that only a shell could make: every byte the frame
     // offers as a caret position must be a boundary of the text the frame was laid out from, and
     // every one must hit-test back to itself.
-    let mut shell = editor(Segments::default());
+    let mut shell = session();
     shell
         .type_text("e\u{301}山\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}i")
         .expect("typed");
@@ -291,12 +356,12 @@ fn every_caret_a_frame_offers_is_a_character_boundary() {
 
 #[test]
 fn undo_of_a_cut_shows_up_in_the_next_frame() {
-    let mut shell = editor(Segments::with(&[(0, "0123456789")]));
+    let mut shell = session();
     shell.type_text("0123456789").expect("typed");
     shell.flush().expect("flushed");
     shell.reflow().expect("measured");
     assert_eq!(
-        shell.residency().source().loads,
+        shell.residency().source().loads(),
         1,
         "measuring one leaf faulted one segment"
     );
@@ -314,7 +379,7 @@ fn undo_of_a_cut_shows_up_in_the_next_frame() {
 
 #[test]
 fn resizing_the_width_is_a_new_geometry() {
-    let mut shell = editor(Segments::default());
+    let mut shell = session();
     shell.type_text("one two three four").expect("typed");
     shell.reflow().expect("measured");
     assert!(shell.heights().total() > Fixed::ZERO);
@@ -339,13 +404,15 @@ fn resizing_the_width_is_a_new_geometry() {
 
 #[test]
 fn the_view_transform_is_the_one_paint_and_hit_test_share() {
-    let mut shell = editor(Segments::default());
+    let mut shell = session();
     shell.type_text("mimi").expect("typed");
     let device = View::new(2_000, 96).expect("a 200 % view");
     shell.set_view(device);
     let frame = shell.frame().expect("a frame");
     let caret = frame.caret().expect("the caret is on screen");
-    let painted = device.paint_point(frame.layout(), caret.byte).expect("a caret");
+    let painted = device
+        .paint_point(frame.layout(), caret.byte)
+        .expect("a caret");
     assert_eq!(painted.byte, caret.byte);
     assert_eq!(painted.x, Fixed::from_64ths(caret.x.sixtyfourths() * 2));
     assert_eq!(painted.top, Fixed::from_64ths(caret.top.sixtyfourths() * 2));
@@ -358,12 +425,15 @@ fn the_view_transform_is_the_one_paint_and_hit_test_share() {
 
 #[test]
 fn an_empty_document_frames_without_reading_anything() {
-    let mut shell = editor(Segments::default());
+    let mut shell = session();
     let frame = shell.frame().expect("a frame");
     assert!(frame.text().is_empty());
     assert!(frame.leaves().is_empty());
     assert_eq!(frame.shaped(), 0);
-    assert!(!frame.provisional(), "nothing to measure is not provisional");
+    assert!(
+        !frame.provisional(),
+        "nothing to measure is not provisional"
+    );
     assert!(!shell.backspace().expect("nothing to delete"));
     assert!(!shell.delete_forward().expect("nothing to delete"));
     assert!(!shell.undo().expect("nothing to undo"));

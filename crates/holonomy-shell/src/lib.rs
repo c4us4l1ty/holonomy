@@ -42,7 +42,7 @@
 
 use holonomy_eye::{
     byte_window, layout_styled, window_text, Caret, Clusters, Fixed, HeightModel, Layout, Point,
-    Shaper, ShapedWindow, StyledText, View, Window, WindowText, WindowTextError,
+    ShapedWindow, Shaper, StyledText, View, Window, WindowText, WindowTextError,
 };
 use holonomy_text::{
     LiveSpan, ResidentSet, SegmentSink, SegmentSource, Selection, Typing, TypingError,
@@ -152,7 +152,7 @@ impl<'a> Frame<'a> {
 /// One frame is a pure function of those five and the shaper; an intent is the smallest edit to one
 /// of them that the user asked for. Nothing here holds a window's state — the shell's job is to be
 /// the thing a window *calls*, not the thing it *is*.
-pub struct Editor<S, R, H> {
+pub struct Editor<S, R: SegmentSource, H> {
     typing: Typing<S>,
     residency: ResidentSet<R>,
     heights: HeightModel,
@@ -261,7 +261,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// Scrolls so `top` is the viewport's first logical unit, clamped into the document.
     pub fn scroll_to(&mut self, top: Fixed) {
         let max = self.heights.total().sixtyfourths() - self.viewport.sixtyfourths();
-        let max = if max < 0 { Fixed::ZERO } else { Fixed::from_64ths(max) };
+        let max = if max < 0 {
+            Fixed::ZERO
+        } else {
+            Fixed::from_64ths(max)
+        };
         self.scroll = if top < Fixed::ZERO {
             Fixed::ZERO
         } else if top > max {
@@ -494,8 +498,12 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             };
             let (start, end) = (span.offset(), span.offset() + span.len());
             let read = self.read(start, end)?;
-            let layout =
-                layout_styled(StyledText::plain(read.text()), start, self.width, &self.shaper);
+            let layout = layout_styled(
+                StyledText::plain(read.text()),
+                start,
+                self.width,
+                &self.shaper,
+            );
             self.heights.set(leaf as usize, layout.height());
         }
         Ok(())
@@ -527,7 +535,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         }
 
         let reads = self.heights.reads();
-        let shaped = layout.lines().iter().map(|line| line.clusters().len()).sum();
+        let shaped = layout
+            .lines()
+            .iter()
+            .map(|line| line.clusters().len())
+            .sum();
         let caret = layout.paint_point(self.typing.caret());
         Ok(Frame {
             text,
@@ -669,8 +681,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
 
     /// The caret nearest to a device point, through the frame's own layout.
     fn hit_test(&mut self, point: Point) -> Result<Option<Caret>, ShellError> {
+        // The view is read before the frame is built: a frame borrows the editor for as long as it
+        // lives, and the transform is a plain value.
+        let view = self.view;
         let frame = self.frame()?;
-        Ok(self.view.hit_test(frame.layout(), point))
+        Ok(view.hit_test(frame.layout(), point))
     }
 }
 

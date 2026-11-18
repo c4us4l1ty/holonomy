@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn an_appended_leaf_costs_a_log_and_agrees_with_a_rebuild() {
         let mut pushed = model(&[3, 0, 7, 1]);
-        let mut rebuilt = model(&[3, 0, 7, 1, 5]);
+        let rebuilt = model(&[3, 0, 7, 1, 5]);
         pushed.push(Fixed::units(5));
         assert_eq!(pushed.len(), 5);
         assert_eq!(pushed.total(), rebuilt.total());

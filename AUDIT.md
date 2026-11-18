@@ -86,8 +86,9 @@ Listed so they stay dead.
      the line it breaks there. A frame that covers the boundary corrects those leaves.
 
   **What the loop measures, in counts.** On a 4,000-leaf document: reflow faults each leaf exactly
-  once and the resident set never holds more than its budget; a frame halfway down shapes 126
-  clusters and reads the index ≤ 104 times; and a keystroke at the document's end appends one leaf —
+  once and the resident set never holds more than its budget; a frame halfway down shapes 128
+  clusters (two leaves) and reads the index at most a couple of hundred times, for four thousand
+  leaves; and a keystroke at the document's end appends one leaf —
   `HeightModel::push`, O(log n) — instead of rebuilding the index, so no measured height is
   invalidated by typing. A **cut** cannot do that: it moves every offset after it, so the index is
   emptied and the next frame re-measures what it shows. That asymmetry is the honest one.
