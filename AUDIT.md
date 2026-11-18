@@ -83,7 +83,11 @@ Listed so they stay dead.
   2. Measuring a whole document (`reflow`) lays each leaf out **alone**, one faulted leaf at a time
      and never more. That is what keeps the constitutional clause true while measuring 4,000 leaves —
      and it introduces OQ-16: a paragraph that would have continued across a leaf boundary is charged
-     the line it breaks there. A frame that covers the boundary corrects those leaves.
+     the line it breaks there. A frame that *begins* at or before a leaf corrects that leaf; a leaf a
+     line merely **crosses** keeps the height `reflow` gave it, because the frame has no measurement
+     of it and writing back a zero would erase one. (That write-back bug was the last thing the first
+     CI run found: two frames took exactly one viewport of height off a document, and now
+     `a_frame_does_not_zero_a_leaf_it_only_crosses` keeps it honest.)
 
   **What the loop measures, in counts.** On a 4,000-leaf document: reflow faults each leaf exactly
   once and the resident set never holds more than its budget; a frame halfway down shapes 128
