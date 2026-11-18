@@ -69,7 +69,8 @@ Listed so they stay dead.
   covers. Two consumers, one geometry — the Block 5 clause applied to selection instead of to paint.
 
   **The measured claim.** Copying two bytes out of the middle of an eight-byte sealed leaf returns
-  two bytes and faults in one segment. Copying across a seal returns the sealed fragment then the
+  two bytes and faults in one segment — through the register, and re-asserted by a regression test
+  that pins the provisional id to segment `0` before copying anything. Copying across a seal returns the sealed fragment then the
   buffer, faults only the sealed leaf, and faults **nothing** when the selection lies entirely inside
   the open buffer. The residency set is unchanged by a copy that touches no sealed byte, which is the
   only way that test can be written and still mean something.
@@ -80,11 +81,22 @@ Listed so they stay dead.
   selection moves through it. The bound that changes is the clipboard's, not L-2's, and the shell
   owns it.
 
-  **Two refusals instead of two guesses.** A drafted leaf whose bytes are *not* the session's buffer —
-  the shape the commit boundary records against resident text edited in place — returns
-  `DraftNotInTheSession` rather than reading whatever happens to be at that index; and a leaf that
-  claims more bytes than its segment holds returns `SegmentTooShort` rather than truncating. Both are
-  unreachable in a correct session and both would be silent corruption if guessed at.
+  **The bug the tests found — the register is the only authority.** The first version faulted in
+  `span.slab().segment()`, which is a **provisional** id even after a seal, because sealing renames the
+  source and not the leaf (D-7's whole point). Five tests failed at once asking the world-line for
+  segment `9223372036854775808`. The fix is not a guard but a correction: `copy` takes the register
+  and asks `OpenSources::locate`, which is the single place that knows whether an id is a buffer or a
+  segment. This is the crate's **first reader**, so it is the first code that had to know, and the
+  note belongs on the record for the second: the Eye's residency path will face the same question,
+  and faulting a leaf's own segment id will be wrong there for the same reason.
+
+  **Three refusals instead of three guesses.** A drafted leaf whose bytes are *not* the session's
+  buffer — the shape the commit boundary records against resident text edited in place — returns
+  `DraftNotInTheSession` rather than reading whatever happens to be at that index; a leaf that claims
+  more bytes than its segment holds returns `SegmentTooShort` rather than truncating; and a leaf
+  naming a source the register never handed out returns `UnknownSource` rather than reading the
+  buffer or the world-line. All three are unreachable in a correct session and all three would be
+  silent corruption if guessed at.
 
   **What is still not decided.** The operating system's clipboard is per-platform work — flag
   confidential, clear on blur — and stays open as OQ-3. And *typing replaces the selection* composes
