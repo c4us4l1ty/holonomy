@@ -161,6 +161,22 @@ impl OpenSources {
         Ok(())
     }
 
+    /// Abandons `source`: its text was deleted before it was ever sealed.
+    ///
+    /// Nothing is appended and nothing is renamed, so the provisional id stops naming text and
+    /// [`Self::locate`] answers [`Location::Unknown`] for it. That is the honest answer — the id
+    /// *was* handed out, so it is not a stranger, but the text it named is gone, and renaming it to
+    /// a segment that was never written would be worse.
+    ///
+    /// Returns whether the source was open, so closing twice is refused rather than repeated.
+    pub fn close(&mut self, source: SegmentId) -> bool {
+        let Some(index) = self.open.iter().position(|open| *open == source) else {
+            return false;
+        };
+        self.open.remove(index);
+        true
+    }
+
     /// Where the bytes of `address` are, as far as this register knows.
     ///
     /// A non-provisional id is a sealed segment by definition: the world-line only ever mints real
@@ -177,6 +193,24 @@ impl OpenSources {
             return Location::Open { source: address };
         }
         Location::Unknown
+    }
+
+    /// Whether `id` was handed out and then abandoned — closed before its bytes were ever sealed.
+    ///
+    /// [`Self::close`] deliberately keeps no list of abandoned ids, because the register already
+    /// knows enough to derive the answer: provisional ids are minted by counting up from
+    /// [`PROVISIONAL_BASE`], so any id below the counter that is neither open nor sealed was handed
+    /// out and then let go. Deriving it means the answer cannot drift from the counter.
+    ///
+    /// The distinction matters to anything that resurrects an old root: a leaf naming an abandoned
+    /// id refers to text that was **never written** to the world-line, so it is unrecoverable, and
+    /// that is a different fact from a leaf naming an id that was never minted at all.
+    #[must_use]
+    pub fn was_abandoned(&self, id: SegmentId) -> bool {
+        is_provisional(id)
+            && id.get() < PROVISIONAL_BASE + self.handed_out
+            && !self.open.contains(&id)
+            && !self.sealed.contains_key(&id)
     }
 
     /// How many sources are open right now — the number of resident buffers the editor owes.
@@ -281,6 +315,27 @@ mod tests {
         let first = sources.open();
         assert_eq!(first, SegmentId::new(PROVISIONAL_BASE));
         assert!(sources.locate(first).is_open());
+    }
+
+    #[test]
+    fn an_abandoned_source_becomes_unknown_rather_than_staying_open() {
+        let mut sources = OpenSources::new();
+        let source = sources.open();
+        assert!(sources.locate(source).is_open());
+        assert!(sources.close(source));
+        // Not open any more, and not sealed under some invented segment: unknown.
+        assert_eq!(sources.locate(source), Location::Unknown);
+        assert_eq!(sources.open_count(), 0);
+        assert_eq!(sources.sealed_as(source), None);
+        assert!(
+            !sources.close(source),
+            "closing twice is refused, not repeated"
+        );
+        // The evidence survives without being stored: an id below the counter that is neither open
+        // nor sealed was handed out and let go, which is not the same as never having existed.
+        assert!(sources.was_abandoned(source));
+        assert!(!sources.was_abandoned(SegmentId::new(PROVISIONAL_BASE + 1)));
+        assert!(!sources.was_abandoned(SegmentId::new(0)));
     }
 
     #[test]
