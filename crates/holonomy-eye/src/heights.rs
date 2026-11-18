@@ -482,7 +482,8 @@ mod tests {
         // the cell that covers the leaf before it, which is where a cell started at zero loses
         // that leaf from every prefix above it.
         pushed.push(Fixed::ZERO);
-        assert_eq!(pushed.len(), 6);
+        let rebuilt = model(&[3, 0, 7, 1, 5, 0]);
+        assert_eq!(pushed.len(), rebuilt.len());
         assert_eq!(pushed.total(), rebuilt.total());
         assert_eq!(pushed.prefix(6), rebuilt.prefix(6));
 
