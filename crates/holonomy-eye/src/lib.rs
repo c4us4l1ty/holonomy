@@ -26,7 +26,8 @@
 //!   viewport in O(log n) index reads instead of measuring the document to discover where it is.
 //! - `window`: [`byte_window`], the join between that index and the document — leaf positions to a
 //!   contiguous byte range, one [`Spine::slab_span`] descent per edge, so what to shape costs
-//!   O(log n) in the document's length.
+//!   O(log n) in the document's length — and [`window_text`], which reads that range out of the
+//!   resident set and the pending buffer as the [`WindowText`] a layout is handed.
 //!
 //! [`Spine::slab_span`]: holonomy_text::Spine::slab_span
 //! - `view`: [`View`], zoom and DPI as one exact integer transform that **both** consumers call —
@@ -63,7 +64,7 @@ pub use crate::layout::{layout_styled, layout_window, Caret, Layout, Line, Place
 pub use crate::shaper::Shaper;
 pub use crate::style::{Style, StyledRun, StyledText};
 pub use crate::view::View;
-pub use crate::window::{byte_window, ShapedWindow};
+pub use crate::window::{byte_window, window_text, ShapedWindow, WindowText, WindowTextError};
 
 /// The single-geometry law, carried in code so it is compiled, not just quoted.
 pub const SINGLE_GEOMETRY_LAW: &str =

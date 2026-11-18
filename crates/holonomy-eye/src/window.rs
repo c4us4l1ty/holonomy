@@ -17,14 +17,25 @@
 //! prefix or suffix: those leaves are off-window until something measures them, and their scroll
 //! positions are provisional until then.
 //!
-//! # What this does not decide
+//! # The text behind the window
 //!
-//! A pending leaf — text that exists in the resident slab but in no spine yet — has no leaf index
-//! and no `slab_span`, so it is not in any window this module produces. That is OQ-10, and the
-//! decision it needs (commit-and-refault versus split at the caret) belongs to the editor's caret
-//! model, not to this join.
+//! A byte range is not text: the bytes live in the resident set and in the pending buffer, and
+//! which is which is the register's answer, not the leaf's (a seal renames a source without
+//! touching a leaf). [`window_text`] is the other half of the join — it hands the range to the
+//! document's own reader and returns the [`WindowText`] a layout takes, so the Eye never decrypts
+//! anything itself and never holds text that is not on screen. What it costs is the window's
+//! bytes: a three-leaf screen faults three segments whether the document has eight leaves or four
+//! thousand and ninety-six, which is the caller Block 5's second gate names (AUDIT OQ-12). What is
+//! still owed is that gate's clock, and that needs a real shaper (Block 6), not this join.
+//!
+//! Two edges are worth stating. A **pending leaf** is in the window like any other, because it is
+//! a leaf: `window_text` reads it out of the pending buffer, which is what makes typing visible
+//! without the Eye knowing that buffers exist. And a **window edge inside a character** is
+//! refused rather than decoded, because leaf edges are only character boundaries where the cut
+//! that made them was (OQ-15) — the reader is where that asymmetry stops being an assumption.
 
-use holonomy_text::Spine;
+use holonomy_text::select::CopyError;
+use holonomy_text::{copy, Draft, OpenSources, ResidentSet, SegmentSource, Selection, Spine};
 
 use crate::geom::Fixed;
 use crate::heights::{HeightModel, Window};
@@ -121,6 +132,131 @@ pub fn byte_window(
         leaves: window,
         start,
         end,
+    }
+}
+
+/// Why a window's text could not be produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowTextError {
+    /// The bytes behind the window could not be read: a leaf named a source the register does not
+    /// know, the resident set refused a fault-in, or a leaf claims more bytes than its source has.
+    Read(CopyError),
+    /// The window's bytes are not valid UTF-8, because an edge falls inside a character.
+    ///
+    /// This is OQ-15's asymmetry, detected rather than assumed away: the window's edges come from
+    /// leaf edges, and a leaf edge is only guaranteed to be a character boundary where the cut that
+    /// made it happened to be one. `at` is the document offset of the first byte that cannot start
+    /// a character.
+    NotText {
+        /// The document offset of the offending byte.
+        at: u64,
+    },
+}
+
+impl std::fmt::Display for WindowTextError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(error) => write!(formatter, "{error}"),
+            Self::NotText { at } => write!(formatter, "the window's bytes at {at} are not text"),
+        }
+    }
+}
+
+impl std::error::Error for WindowTextError {}
+
+impl From<CopyError> for WindowTextError {
+    fn from(error: CopyError) -> Self {
+        Self::Read(error)
+    }
+}
+
+/// The text behind a [`ShapedWindow`], and the document offset it starts at.
+///
+/// Owned, and deliberately so: a window is contiguous in the document but not in memory — its bytes
+/// are spread over the leaves the viewport covers, in the resident set and in the pending buffer —
+/// so assembling them is a copy whose size is the window's, never the document's. That is the whole
+/// bond: the cost of reading what is on screen is a function of the screen (L-2), which is why this
+/// is the caller Block 5's second gate was missing, rather than a second place text can live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowText {
+    text: String,
+    origin: u64,
+    leaves: Window,
+}
+
+impl WindowText {
+    /// The window's text, to hand to a layout with [`Self::origin`] as its document offset.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The document offset of the first byte — what [`crate::layout_window`] wants as `origin`.
+    #[must_use]
+    pub fn origin(&self) -> u64 {
+        self.origin
+    }
+
+    /// The document offset one past the last byte.
+    #[must_use]
+    pub fn end(&self) -> u64 {
+        self.origin + self.len()
+    }
+
+    /// How many bytes the text holds.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.text.len() as u64
+    }
+
+    /// Whether the window covered no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// The leaves the window covers, so a caller can write their measured heights back.
+    #[must_use]
+    pub fn leaves(&self) -> Window {
+        self.leaves
+    }
+}
+
+/// Reads the text behind `window`, faulting in exactly the leaves the viewport covers.
+///
+/// This is the join the Eye was missing: [`byte_window`] answers *which bytes* are on screen from
+/// the height index and the spine alone, and this answers *what those bytes say*. Both halves are
+/// viewport-sized, so the pair is the caller Block 5's second gate names — though not its clock,
+/// which needs a real shaper (AUDIT OQ-12).
+///
+/// `residency`, `sources` and `open` are the session's: a leaf names a source, only the register
+/// knows whether that source is the pending buffer or a segment in the world-line, and only the
+/// resident set can fault a segment in. A leaf already resident is a hit, so scrolling back over
+/// ground the viewport has covered costs no source call.
+///
+/// # Errors
+///
+/// [`WindowTextError::Read`] for anything [`copy`] refuses, and [`WindowTextError::NotText`] when
+/// the window's bytes are not valid UTF-8 — an edge inside a character (OQ-15).
+pub fn window_text<S: SegmentSource>(
+    residency: &mut ResidentSet<S>,
+    spine: &Spine,
+    draft: &Draft,
+    sources: &OpenSources,
+    window: ShapedWindow,
+    open: &[u8],
+) -> Result<WindowText, WindowTextError> {
+    let selection = Selection::new(window.start(), window.end());
+    let bytes = copy(residency, spine, draft, sources, selection, open)?;
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(WindowText {
+            text,
+            origin: window.start(),
+            leaves: window.leaves(),
+        }),
+        Err(error) => Err(WindowTextError::NotText {
+            at: window.start() + error.utf8_error().valid_up_to() as u64,
+        }),
     }
 }
 
