@@ -19,18 +19,22 @@
 //!
 //! The Eye's height index is *measured*, never known: leaf heights are zero until something lays
 //! the leaf out. A shell is exactly the thing that lays leaves out, so [`Editor::frame`] does what
-//! no earlier layer could — it writes what the layout measured back into the index. Two
+//! no earlier layer could — it writes what the layout measured back into the index. Three
 //! consequences are worth stating rather than discovering:
 //!
 //! * A leaf's height is the height of the **lines that start in it**. That partitions the document
-//!   exactly (every line starts once, so the heights sum to the document's height to the 64th) and
-//!   it is the only attribution that stays exact when a line straddles two leaves. The cost is
-//!   that a line spilling into the next leaf is charged to the leaf it began in, so a scroll
-//!   position resolves to the leaf where its line begins — which is the leaf you need to shape.
-//! * A **width change is a new geometry.** Every measured height is a claim about the old wrap
-//!   width, so [`Editor::resize`] empties the index rather than adjusting it, and the next frame is
-//!   *provisional*: with nothing measured there is nothing to scroll by either, so it starts at the
-//!   top and widens leaf by leaf until the screen is full. [`Frame::provisional`] says so.
+//!   exactly (every line starts once, so the heights sum to the height of one continuous layout of
+//!   the document) which is why the index also stores **where each leaf's first cluster sits in its
+//!   line**. Without that carry a paragraph split across two leaves would break where the leaf
+//!   ends, and the scroll bar would grow a line per boundary (AUDIT OQ-16, D-20).
+//! * Because the carry is stored, a frame can begin at a **line** rather than at a leaf. A screen
+//!   that began at a leaf boundary would re-wrap the paragraph from a point the document never
+//!   breaks at, and every cluster below it would be drawn where the document does not put it.
+//! * A **width change is a new geometry.** Every measured height and every carried offset is a
+//!   claim about the old wrap width, so [`Editor::resize`] empties both rather than adjusting them,
+//!   and the next frame is *provisional*: with nothing measured there is nothing to scroll by
+//!   either, so it starts at the top and widens leaf by leaf until the screen is full.
+//!   [`Frame::provisional`] says so.
 //!
 //! # The caret is the document's, the cluster is the Eye's
 //!
@@ -41,8 +45,9 @@
 //! over every caret a frame offers.
 
 use holonomy_eye::{
-    byte_window, layout_styled, window_text, Caret, Clusters, Fixed, HeightModel, Layout, Point,
-    ShapedWindow, Shaper, StyledText, View, Window, WindowText, WindowTextError,
+    byte_window, layout_styled, layout_styled_from, window_text, Caret, Clusters, Fixed,
+    HeightModel, Layout, Point, ShapedWindow, Shaper, StyledText, View, Window, WindowText,
+    WindowTextError,
 };
 use holonomy_text::{
     LiveSpan, ResidentSet, SegmentSink, SegmentSource, Selection, Typing, TypingError,
@@ -155,7 +160,7 @@ impl<'a> Frame<'a> {
 pub struct Editor<S, R: SegmentSource, H> {
     typing: Typing<S>,
     residency: ResidentSet<R>,
-    heights: HeightModel,
+    measured: Measured,
     shaper: H,
     window: Option<WindowText>,
     width: Fixed,
@@ -178,11 +183,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         width: Fixed,
         viewport: Fixed,
     ) -> Self {
-        let heights = HeightModel::new(typing.spine().slab_count() as usize);
+        let measured = Measured::new(typing.spine().slab_count() as usize);
         Self {
             typing,
             residency,
-            heights,
+            measured,
             shaper,
             window: None,
             width,
@@ -208,7 +213,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// The measured heights, one per leaf.
     #[must_use]
     pub fn heights(&self) -> &HeightModel {
-        &self.heights
+        &self.measured.heights
     }
 
     /// The document's live length, drafts applied.
@@ -260,7 +265,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
 
     /// Scrolls so `top` is the viewport's first logical unit, clamped into the document.
     pub fn scroll_to(&mut self, top: Fixed) {
-        let max = self.heights.total().sixtyfourths() - self.viewport.sixtyfourths();
+        let max = self.measured.total().sixtyfourths() - self.viewport.sixtyfourths();
         let max = if max < 0 {
             Fixed::ZERO
         } else {
@@ -287,7 +292,8 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// until something has been measured. A different height alone measures nothing new.
     pub fn resize(&mut self, width: Fixed, viewport: Fixed) {
         if width != self.width {
-            self.heights = HeightModel::new(self.heights.len());
+            // Every measured height and every carried line offset described the old wrap.
+            self.measured = Measured::new(self.typing.spine().slab_count() as usize);
             self.scroll = Fixed::ZERO;
         }
         self.width = width;
@@ -448,28 +454,93 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// moved.
     ///
     /// This is a policy, and the smallest one that is honest: a window would call it after every
-    /// intent, and a caret off screen is the one scroll the loop must not leave to the user. It
-    /// needs a frame, so it is a call of its own rather than something [`Self::type_text`] hides
-    /// inside — the caller decides whether the caret is worth a repaint.
+    /// intent, and a caret off screen is the one scroll the loop must not leave to the user.
+    ///
+    /// It asks the **document** where the caret is drawn, not the frame. A frame holds the caret
+    /// only when it is already on screen — which is exactly the case a scroll is not needed for —
+    /// and its caret top is measured from the frame's first line, not from the document's top. Both
+    /// mistakes look like a working reveal until the caret is one line above the scroll position or
+    /// far below it: the first scrolls to the document's top to show something already visible, the
+    /// second does nothing at all.
     ///
     /// # Errors
     ///
-    /// A frame the document refused to read.
+    /// A leaf the document could not read, with the same reasons as [`Self::frame`].
     pub fn reveal_caret(&mut self) -> Result<bool, ShellError> {
         let before = self.scroll;
-        let (top, bottom) = {
-            let frame = self.frame()?;
-            match frame.caret() {
-                Some(caret) => (caret.top, caret.top + caret.height),
-                None => return Ok(false),
-            }
+        let Some((top, height)) = self.caret_place()? else {
+            return Ok(false);
         };
+        let bottom = top + height;
         if top < self.scroll {
             self.scroll_to(top);
         } else if bottom > self.scroll + self.viewport {
             self.scroll_to(bottom - self.viewport);
         }
         Ok(self.scroll != before)
+    }
+
+    /// The caret's line box in **document** coordinates, whether or not it is on screen.
+    ///
+    /// The leaf the caret falls in is laid out from the carry its predecessor handed it — the same
+    /// state [`Self::reflow`] carried — so the caret's y is the document's y. A caret at a soft
+    /// wrap belongs to two lines at once; this answers with the line the caret starts on, which is
+    /// the line a paint of the same byte would choose, and falls back to the previous cluster's
+    /// leaf only when the caret's own leaf does not draw it.
+    fn caret_place(&mut self) -> Result<Option<(Fixed, Fixed)>, ShellError> {
+        let caret_at = self.typing.caret();
+        for probe in [caret_at, caret_at.saturating_sub(1)] {
+            let Some(leaf) = self.leaf_of(probe) else {
+                continue;
+            };
+            let Some(span) = self.typing.spine().slab_span(leaf as u32) else {
+                continue;
+            };
+            let (start, end) = (span.offset(), span.offset() + span.len());
+            let carried = self.measured.offset(leaf);
+            let read = self.read(start, end)?;
+            let layout = layout_styled_from(
+                StyledText::plain(read.text()),
+                start,
+                carried,
+                self.width,
+                &self.shaper,
+            );
+            let base = if carried.is_zero() {
+                Fixed::ZERO
+            } else {
+                layout.lines().first().map_or(Fixed::ZERO, |line| line.height())
+            };
+            if let Some(caret) = layout.paint_point(caret_at) {
+                return Ok(Some((
+                    self.measured.heights.prefix(leaf) + (caret.top - base),
+                    caret.height,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The leaf whose bytes contain `at`, or the last leaf when `at` is the document's end.
+    ///
+    /// Leaves are contiguous and ordered, so this is a binary search over the spine, not a scan:
+    /// a reveal on a four-thousand-leaf document must not cost a walk of it.
+    fn leaf_of(&self, at: u64) -> Option<usize> {
+        let count = self.typing.spine().slab_count();
+        if count == 0 {
+            return None;
+        }
+        let mut low = 0u32;
+        let mut high = count;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            match self.typing.spine().slab_span(mid) {
+                Some(span) if span.offset() + span.len() <= at => low = mid + 1,
+                Some(_) => high = mid,
+                None => break,
+            }
+        }
+        Some((low.min(count - 1)) as usize)
     }
 
     /// Measures every leaf, so the whole document can be scrolled before it has been seen.
@@ -481,60 +552,114 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     ///
     /// It does not read the document. Each leaf is faulted in **alone**, laid out at the current
     /// width, and released — so the resident set never holds more than the leaf being measured plus
-    /// whatever the last frame left, and the loop cannot decrypt text it is not shaping. The cost
-    /// is one fault and one layout per leaf, once, and the convention that follows from it: a
-    /// leaf's height is the height of its own layout, so a paragraph that would have continued
-    /// across a leaf boundary is charged the line it breaks there (AUDIT OQ-16). A frame that
-    /// covers the boundary corrects those leaves to the continuous measurement.
+    /// whatever the last frame left, and the loop cannot decrypt text it is not shaping.
+    ///
+    /// The leaves are measured **in order, carrying the line across the boundary**: the x where the
+    /// next leaf's first cluster sits, and whether the line it lands on began in an earlier leaf.
+    /// That carry is the whole difference between a document's geometry and a pile of leaves:
+    /// without it a paragraph split across two leaves breaks where the leaf ends, and the total
+    /// grows a line per boundary. With it, a leaf's height is the height of the lines that start
+    /// in it, the heights sum to the height of one continuous layout of the document, and a frame
+    /// can begin at a line instead of at a leaf (AUDIT D-20).
     ///
     /// # Errors
     ///
     /// A leaf the document could not read, with the same reasons as [`Self::frame`].
     pub fn reflow(&mut self) -> Result<(), ShellError> {
-        self.heights = HeightModel::new(self.typing.spine().slab_count() as usize);
-        for leaf in 0..self.typing.spine().slab_count() {
-            let Some(span) = self.typing.spine().slab_span(leaf) else {
-                continue;
-            };
-            let (start, end) = (span.offset(), span.offset() + span.len());
-            let read = self.read(start, end)?;
-            let layout = layout_styled(
-                StyledText::plain(read.text()),
-                start,
-                self.width,
-                &self.shaper,
-            );
-            self.heights.set(leaf as usize, layout.height());
+        let leaves = self.typing.spine().slab_count();
+        self.measured = Measured::new(leaves as usize);
+        let mut carried = Fixed::ZERO;
+        for leaf in 0..leaves {
+            let (height, next) = self.measure_leaf(leaf, carried)?;
+            self.measured.set(leaf as usize, height, carried);
+            carried = next;
         }
         Ok(())
     }
 
+    /// Measures one leaf, given the carry its predecessor handed it.
+    ///
+    /// Returns the height of the lines that **start** in the leaf, and the carry to hand to the
+    /// next one. This is the whole of the measurement: [`Self::reflow`] calls it for every leaf in
+    /// order, and [`Self::bootstrap`] calls it until the screen is full — both hold one faulted
+    /// leaf at a time, and neither hands the reader more than that.
+    ///
+    /// # Errors
+    ///
+    /// A leaf the document could not read, with the same reasons as [`Self::frame`].
+    fn measure_leaf(&mut self, leaf: u32, carried: Fixed) -> Result<(Fixed, Fixed), ShellError> {
+        let Some(span) = self.typing.spine().slab_span(leaf) else {
+            return Ok((Fixed::ZERO, carried));
+        };
+        let (start, end) = (span.offset(), span.offset() + span.len());
+        let read = self.read(start, end)?;
+        let text = read.text();
+        let layout = layout_styled_from(
+            StyledText::plain(text),
+            start,
+            carried,
+            self.width,
+            &self.shaper,
+        );
+        let lines = layout.lines();
+        // The first line is the tail of a line that began in an earlier leaf: it was charged there,
+        // and it is not a line of this one.
+        let inherited = usize::from(!carried.is_zero());
+        let last = leaf + 1 == self.typing.spine().slab_count();
+        let mut height = Fixed::ZERO;
+        for (index, line) in lines.iter().enumerate() {
+            if index < inherited {
+                continue;
+            }
+            // A line starting exactly at the leaf's end is the empty line after a trailing break:
+            // it belongs to the next leaf — except at the end of the document, where nobody else
+            // can claim it and the total would come up a line short.
+            if line.start_byte() < end || (last && line.start_byte() == end) {
+                height += line.height();
+            }
+        }
+        let broken = text.ends_with('\n') || text.ends_with('\r');
+        let next = match lines.last() {
+            Some(line) if !broken => line.end_x(),
+            _ => Fixed::ZERO,
+        };
+        Ok((height, next))
+    }
+
     /// Builds the frame a window would draw: read the viewport, lay it out, measure it, report it.
+    ///
+    /// The window **begins at a line**, not at a leaf. The height index finds the leaf a scroll
+    /// position falls in, but a line can start inside a leaf — so the leaf is laid out from the
+    /// carry its predecessor handed it, and the frame starts at the byte where the position's line
+    /// begins. A screen that began at a leaf boundary instead would re-wrap the paragraph from a
+    /// point the document never breaks at, and every cluster below it would be drawn somewhere the
+    /// document does not put it.
     ///
     /// # Errors
     ///
     /// A window the document could not read — a source the register does not know, a refused
     /// fault-in, or an edge inside a character (OQ-15).
     pub fn frame(&mut self) -> Result<Frame<'_>, ShellError> {
-        self.sync_heights();
-        self.heights.reset_reads();
-        let (window, provisional) = self.choose_window()?;
+        self.sync_measured();
+        self.measured.heights.reset_reads();
+        let (start, end, leaves, provisional) = self.choose_window()?;
 
-        let text = self.read(window.start(), window.end())?;
+        let text = self.read(start, end)?;
         self.window = Some(text);
-        let origin = window.start();
         let text: &str = self.window.as_ref().map_or("", |text| text.text());
-        let layout = layout_styled(StyledText::plain(text), origin, self.width, &self.shaper);
+        let layout = layout_styled(StyledText::plain(text), start, self.width, &self.shaper);
 
         let spans = self
             .typing
             .draft()
-            .spans_in(self.typing.spine(), window.start(), window.end());
-        for (leaf, height) in leaf_heights(&layout, &spans, window) {
-            self.heights.set(leaf, height);
+            .spans_in(self.typing.spine(), start, end);
+        let document_end = self.typing.document_len();
+        let first = leaves.first();
+        for (index, height, offset) in measure_window(&layout, &spans, start, end, document_end) {
+            self.measured.set(first + index, height, offset);
         }
 
-        let reads = self.heights.reads();
+        let reads = self.measured.heights.reads();
         let shaped = layout
             .lines()
             .iter()
@@ -543,9 +668,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let caret = layout.paint_point(self.typing.caret());
         Ok(Frame {
             text,
-            origin,
+            origin: start,
             layout,
-            leaves: window.leaves(),
+            leaves,
             reads,
             shaped,
             provisional,
@@ -553,7 +678,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         })
     }
 
-    /// Keeps the height index the same size as the document's leaf count.
+    /// Keeps the measured geometry the same size as the document's leaf count.
     ///
     /// Three cases, three costs, and the difference is the whole point of the index. A **seal**
     /// replaces one leaf with one leaf, so nothing here runs and typing into a full buffer costs no
@@ -561,53 +686,107 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// one `push`, O(log n), because every measured height before it is still true. Anything else
     /// (a mid-document split, a cut) moved every offset after it, so the index is emptied: those
     /// heights described a document that no longer exists, and the next frame is provisional.
-    fn sync_heights(&mut self) {
+    fn sync_measured(&mut self) {
         let leaves = self.typing.spine().slab_count() as usize;
-        if self.heights.len() == leaves {
+        if self.measured.len() == leaves {
             return;
         }
-        if leaves == self.heights.len() + 1 {
-            self.heights.push(Fixed::ZERO);
+        if leaves == self.measured.len() + 1 {
+            self.measured.push();
             return;
         }
-        self.heights = HeightModel::new(leaves);
+        self.measured = Measured::new(leaves);
     }
 
-    /// The window to shape, and whether it had to be guessed.
-    fn choose_window(&mut self) -> Result<(ShapedWindow, bool), ShellError> {
-        if self.heights.is_empty() {
-            return Ok((ShapedWindow::unclaimed(0, 0), false));
+    /// The window to shape: its byte range, the leaves the index says are on screen, and whether
+    /// the geometry had to be guessed.
+    fn choose_window(&mut self) -> Result<(u64, u64, Window, bool), ShellError> {
+        if self.measured.is_empty() {
+            return Ok((0, 0, Window::empty(), false));
         }
+        if self.measured.total() <= Fixed::ZERO {
+            return self.bootstrap();
+        }
+        let Some((leaf, into)) = self.measured.heights.leaf_at(self.scroll) else {
+            // Past the end of the document: there is nothing to shape.
+            let end = self.typing.document_len();
+            return Ok((end, end, Window::empty(), false));
+        };
         let window = byte_window(
             self.typing.spine(),
-            &self.heights,
+            &self.measured.heights,
             self.scroll,
             self.viewport,
         );
-        if !window.is_empty() || self.heights.total() > Fixed::ZERO {
-            // Either something is measured and on screen, or the viewport is past the end.
-            return Ok((window, false));
-        }
-        // Nothing measured at all: there is no geometry to scroll by, so the frame starts at the
-        // document's first leaf and widens until the screen is full — "widen the window" is what
-        // an unmeasured window means.
+        let start = self.line_start(leaf, into)?;
+        Ok((start, window.end(), window.leaves(), false))
+    }
+
+    /// Nothing measured at all: measure leaves from the top until the screen is full, and shape
+    /// what that covered.
+    ///
+    /// One faulted leaf at a time, with the carry — so the screen it fills is the document's
+    /// screen, not a leaf-by-leaf guess — and it writes what it measured back, which is what makes
+    /// the *next* frame non-provisional. The `provisional` flag is true because the caller cannot
+    /// know, before this runs, how much of the document is on screen.
+    fn bootstrap(&mut self) -> Result<(u64, u64, Window, bool), ShellError> {
+        let leaves = self.typing.spine().slab_count();
+        let mut carried = Fixed::ZERO;
+        let mut height = Fixed::ZERO;
         let mut leaf = 0u32;
-        loop {
-            let Some(span) = self.typing.spine().slab_span(leaf) else {
-                let count = self.typing.spine().slab_count();
-                let window = ShapedWindow::leaves_of(self.typing.spine(), 0, count);
-                return Ok((window, true));
-            };
-            let end = span.offset() + span.len();
-            let read = self.read(0, end)?;
-            let layout = layout_styled(StyledText::plain(read.text()), 0, self.width, &self.shaper);
-            if layout.height() >= self.viewport {
-                let count = self.typing.spine().slab_count();
-                let window = ShapedWindow::leaves_of(self.typing.spine(), 0, (leaf + 1).min(count));
-                return Ok((window, true));
-            }
+        while leaf < leaves {
+            let (measured, next) = self.measure_leaf(leaf, carried)?;
+            self.measured.set(leaf as usize, measured, carried);
+            height += measured;
+            carried = next;
             leaf += 1;
+            if height >= self.viewport {
+                break;
+            }
         }
+        let window = ShapedWindow::leaves_of(self.typing.spine(), 0, leaf);
+        Ok((window.start(), window.end(), window.leaves(), true))
+    }
+
+    /// The document offset of the line that begins at or before `into` units into `leaf`.
+    ///
+    /// The height index knows which *leaf* a scroll position falls in; only the leaf's text knows
+    /// where its lines begin, because a line can start inside a leaf. So the leaf is laid out from
+    /// the carry its predecessor handed it — the same state [`Self::reflow`] carried — and the line
+    /// the position falls in is the answer.
+    fn line_start(&mut self, leaf: usize, into: Fixed) -> Result<u64, ShellError> {
+        let Some(span) = self.typing.spine().slab_span(leaf as u32) else {
+            return Ok(0);
+        };
+        let (start, end) = (span.offset(), span.offset() + span.len());
+        let carried = self.measured.offset(leaf);
+        let read = self.read(start, end)?;
+        let layout = layout_styled_from(
+            StyledText::plain(read.text()),
+            start,
+            carried,
+            self.width,
+            &self.shaper,
+        );
+        let lines = layout.lines();
+        let inherited = usize::from(!carried.is_zero());
+        let base = if inherited == 1 {
+            lines.first().map_or(Fixed::ZERO, |line| line.height())
+        } else {
+            Fixed::ZERO
+        };
+        let mut at = start;
+        for (index, line) in lines.iter().enumerate() {
+            if index < inherited {
+                continue;
+            }
+            if line.top() - base <= into {
+                at = line.start_byte();
+            } else {
+                break;
+            }
+        }
+        Ok(at)
     }
 
     /// Reads `start..end` out of the session, through the document's own reader.
@@ -689,45 +868,117 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     }
 }
 
-/// Which leaves each line's height belongs to — and only those a line starts in.
+/// The measured geometry of the document: one height per leaf, and where each leaf's first cluster
+/// sits in its line.
 ///
-/// A line is charged to the leaf its first byte falls in, which partitions the layout exactly: every
-/// line starts once, so the heights sum to the layout's height to the 64th. A line straddling two
-/// leaves therefore belongs to the leaf it began in, and the document coordinate of a line's start
-/// is the coordinate a scroll position resolves to.
+/// The two travel together because they are invalidated by the same things — an edit or a width
+/// change makes both describe a document that no longer exists — and because a leaf is measured
+/// with both at once. The height is the height of the **lines that start** in the leaf; the offset
+/// is zero for a leaf that begins one, and it is what lets a frame begin at a line rather than at a
+/// leaf (AUDIT D-20).
+#[derive(Debug)]
+struct Measured {
+    heights: HeightModel,
+    offsets: Vec<Fixed>,
+}
+
+impl Measured {
+    fn new(leaves: usize) -> Self {
+        Self {
+            heights: HeightModel::new(leaves),
+            offsets: vec![Fixed::ZERO; leaves],
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.heights.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.heights.is_empty()
+    }
+
+    fn total(&self) -> Fixed {
+        self.heights.total()
+    }
+
+    /// Where `leaf`'s first cluster sits in its line; zero means it begins one.
+    fn offset(&self, leaf: usize) -> Fixed {
+        self.offsets.get(leaf).copied().unwrap_or(Fixed::ZERO)
+    }
+
+    /// Records what one leaf measured.
+    fn set(&mut self, leaf: usize, height: Fixed, offset: Fixed) {
+        let Some(slot) = self.offsets.get_mut(leaf) else {
+            return;
+        };
+        *slot = offset;
+        self.heights.set(leaf, height);
+    }
+
+    /// Appends a leaf nothing has measured, O(log n).
+    fn push(&mut self) {
+        self.heights.push(Fixed::ZERO);
+        self.offsets.push(Fixed::ZERO);
+    }
+}
+
+/// What one window measured, for the leaves it measured **in full**: their heights and the x each
+/// one's first cluster is drawn at, indexed from the window's first leaf.
 ///
-/// A leaf that a line merely **crosses** is left out, not written as zero. The frame has no
-/// measurement of that leaf — its own layout would break a line somewhere the window did not — and
-/// writing the zero would erase a height `reflow` measured correctly. The index is therefore a
-/// frame's exact partition where a frame began at the leaf, and the leaf's own measurement
-/// everywhere else; a scroll position is exact at both, and the difference between them is one line
-/// per crossed boundary (AUDIT OQ-16).
-///
-/// The last line may start exactly at the window's end — the empty line after a trailing newline —
-/// so the lookup clamps into the window rather than dropping it, or the sum would not be exact.
-fn leaf_heights(
+/// A leaf the window began inside is left out, and its measurement stands: the frame has the lines
+/// from the line it started at, not the leaf's. A leaf the window ended inside was charged only the
+/// lines it could see, so it is left out too. What remains is exact — except that a line continuing
+/// past the window's end is charged the height it has here, which is right while every line is the
+/// same height and is the one thing a styled document would have to revisit.
+fn measure_window(
     layout: &Layout<'_>,
     spans: &[LiveSpan],
-    window: ShapedWindow,
-) -> Vec<(usize, Fixed)> {
-    if window.leaves().is_empty() || spans.len() != window.leaves().len() {
+    start: u64,
+    end: u64,
+    document_end: u64,
+) -> Vec<(usize, Fixed, Fixed)> {
+    if spans.is_empty() {
         return Vec::new();
     }
     let mut heights = vec![Fixed::ZERO; spans.len()];
-    let end = window.end();
+    let mut offsets: Vec<Option<Fixed>> = vec![None; spans.len()];
     for line in layout.lines() {
-        let at = line.start_byte().min(end.saturating_sub(1));
+        let at = line.start_byte();
         let found = spans
             .iter()
-            .position(|span| at >= span.offset() && at < span.offset() + span.len());
+            .position(|span| at >= span.offset() && at < span.offset() + span.len())
+            .or_else(|| {
+                // The empty line after a trailing break starts at the document's end, where no
+                // leaf covers a byte: the last leaf the window shows owns it.
+                (at == document_end && at == end).then(|| spans.len() - 1)
+            });
         if let Some(index) = found {
             heights[index] += line.height();
         }
     }
-    heights
-        .into_iter()
+    for line in layout.lines() {
+        for cluster in line.clusters() {
+            let found = spans.iter().position(|span| {
+                cluster.byte >= span.offset() && cluster.byte < span.offset() + span.len()
+            });
+            if let Some(index) = found {
+                if offsets[index].is_none() {
+                    offsets[index] = Some(cluster.x);
+                }
+            }
+        }
+    }
+    spans
+        .iter()
         .enumerate()
-        .filter(|(_, height)| !height.is_zero())
-        .map(|(index, height)| (window.leaves().first() + index, height))
+        .filter(|(_, span)| span.offset() >= start && span.offset() + span.len() <= end)
+        .map(|(index, _)| {
+            (
+                index,
+                heights[index],
+                offsets[index].unwrap_or(Fixed::ZERO),
+            )
+        })
         .collect()
 }

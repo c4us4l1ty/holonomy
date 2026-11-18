@@ -98,6 +98,22 @@ impl<'a> Line<'a> {
         self.end_byte
     }
 
+    /// Where the line's text ends: the x after its last cluster, or `start_x` for a line this
+    /// window only inherits the tail of.
+    ///
+    /// A caller that lays a document out in pieces carries this value into
+    /// [`layout_styled_from`] for the next piece — it is the line's position, not the window's.
+    #[must_use]
+    pub fn end_x(&self) -> Fixed {
+        self.end_x
+    }
+
+    /// Whether the line ends in a hard break, and so offers a caret at its end.
+    #[must_use]
+    pub fn has_end(&self) -> bool {
+        self.has_end
+    }
+
     /// Every caret position on this line, left to right, as `(x, byte)`.
     ///
     /// This is the one list both directions of the geometry walk. A line has a boundary before
@@ -222,14 +238,44 @@ pub fn layout_styled<'a, S: Shaper + ?Sized>(
     width: Fixed,
     shaper: &S,
 ) -> Layout<'a> {
+    layout_styled_from(styled, origin, Fixed::ZERO, width, shaper)
+}
+
+/// Lays styled `text` out as the **continuation of a line** that is already `start_x` wide.
+///
+/// This is what makes a document's geometry independent of where its leaves happen to fall. A leaf
+/// boundary can land in the middle of a paragraph, and laying the leaf out from zero would wrap its
+/// text somewhere the document does not — so a caller that knows where the previous window's last
+/// line ended hands that position in, and gets the same breaks the document has.
+///
+/// Two things follow, and both are deliberate:
+///
+/// * The first line of the result is the tail of the carried line: `top` is zero, `start_byte` is
+///   `origin`, and it is **not** a line of its own — a caller summing lines per leaf skips it.
+/// * If the first cluster does not fit at `start_x`, the carried line ends there (empty, with no
+///   caret) and the cluster starts a new line. That is the same greedy rule the layout uses
+///   everywhere: a line ends when the next cluster would not fit, and the next line starts at it.
+///
+/// With `start_x == Fixed::ZERO` this is exactly [`layout_styled`], line for line.
+#[must_use]
+pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
+    styled: StyledText<'a>,
+    origin: u64,
+    start_x: Fixed,
+    width: Fixed,
+    shaper: &S,
+) -> Layout<'a> {
     let text = styled.text();
     let mut lines: Vec<Line<'a>> = Vec::new();
     let mut clusters: Vec<Placed<'a>> = Vec::new();
-    let mut x = Fixed::ZERO;
+    let mut x = start_x;
     let mut top = Fixed::ZERO;
     let mut start_byte = origin;
     let mut end_byte = origin;
     let mut line_height = Fixed::ZERO;
+    // Whether the line the next cluster lands on already has content — in this window or, for the
+    // first cluster, in the window before it. A line never ends before its first cluster.
+    let mut continued = !start_x.is_zero();
 
     for (offset, cluster) in Clusters::new(text) {
         let byte = origin + offset as u64;
@@ -248,29 +294,34 @@ pub fn layout_styled<'a, S: Shaper + ?Sized>(
             top += height;
             x = Fixed::ZERO;
             line_height = Fixed::ZERO;
+            continued = false;
             start_byte = byte + cluster.len() as u64;
             end_byte = start_byte;
             continue;
         }
         let style = styled.style_at(offset as u64);
         let advance = shaper.advance(cluster, style);
-        if !clusters.is_empty() && x + advance > width {
+        if continued && x + advance > width {
+            // The carried line is already full: it ends here, in this window, with no clusters of
+            // its own and no caret — its own window already offered the caret that ends it.
+            let height = filled_height(line_height, styled, offset, shaper);
             lines.push(Line {
                 top,
-                height: line_height,
+                height,
                 clusters: core::mem::take(&mut clusters),
                 start_byte,
-                end_byte: byte,
+                end_byte,
                 end_x: x,
-                // A soft wrap has no caret of its own: the next line already starts here.
                 has_end: false,
             });
-            top += line_height;
+            top += height;
             x = Fixed::ZERO;
             line_height = Fixed::ZERO;
             start_byte = byte;
+            continued = false;
         }
         line_height = line_height.max(shaped_line_height(shaper, style));
+        continued = true;
         clusters.push(Placed {
             byte,
             x,
@@ -560,5 +611,103 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_zero_carry_is_the_ordinary_layout() {
+        let long = "x".repeat(64);
+        for text in ["", "a", "one\ntwo\n", "mimi 中 中", long.as_str()] {
+            let plain = layout_styled(StyledText::plain(text), 7, Fixed::units(11), &Fake::new());
+            let carried = layout_styled_from(
+                StyledText::plain(text),
+                7,
+                Fixed::ZERO,
+                Fixed::units(11),
+                &Fake::new(),
+            );
+            assert_eq!(plain, carried, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_continuation_window_breaks_where_the_document_breaks() {
+        // A paragraph wide enough to wrap, cut at every cluster: the tail has to break in the same
+        // places as the whole, because that is the property the shell's measurement streams on.
+        let text = "a paragraph of entirely ordinary words, wrapped";
+        let width = Fixed::units(12);
+        let whole = layout_styled(StyledText::plain(text), 0, width, &Fake::new());
+        for cut in 1..text.len() {
+            let drawn: Vec<(Fixed, u64)> = whole
+                .lines()
+                .iter()
+                .flat_map(|line| line.clusters().iter())
+                .filter(|cluster| cluster.byte >= cut as u64)
+                .map(|cluster| (cluster.x, cluster.byte))
+                .collect();
+            let Some(&(x, start)) = drawn.first() else {
+                continue;
+            };
+            // Only cuts strictly inside a line: a cut at a line start is not a continuation.
+            let inside = whole
+                .lines()
+                .iter()
+                .any(|line| line.start_byte() < start && start < line.end_byte());
+            if !inside {
+                continue;
+            }
+            let tail = layout_styled_from(
+                StyledText::plain(&text[start as usize..]),
+                start,
+                x,
+                width,
+                &Fake::new(),
+            );
+            let first: Vec<(Fixed, u64)> = tail.lines()[0]
+                .clusters()
+                .iter()
+                .map(|cluster| (cluster.x, cluster.byte))
+                .collect();
+            let containing = whole
+                .lines()
+                .iter()
+                .find(|line| line.start_byte() < start && start < line.end_byte())
+                .expect("the cut is inside a line");
+            let expected: Vec<(Fixed, u64)> = containing
+                .clusters()
+                .iter()
+                .filter(|cluster| cluster.byte >= start)
+                .map(|cluster| (cluster.x, cluster.byte))
+                .collect();
+            assert_eq!(first, expected, "the first line of the tail at {start}");
+
+            let tail_starts: Vec<u64> = tail
+                .lines()
+                .iter()
+                .skip(1)
+                .map(|line| line.start_byte())
+                .collect();
+            let whole_starts: Vec<u64> = whole
+                .lines()
+                .iter()
+                .map(|line| line.start_byte())
+                .filter(|byte| *byte > start)
+                .collect();
+            assert_eq!(tail_starts, whole_starts, "the lines after the tail at {start}");
+        }
+    }
+
+    #[test]
+    fn a_carried_line_that_is_full_wraps_before_its_first_cluster() {
+        let width = Fixed::units(10);
+        let laid = layout_styled_from(StyledText::plain("abc"), 40, width, width, &Fake::new());
+        assert_eq!(laid.lines().len(), 2, "the full line, then the cluster's line");
+        let carried = &laid.lines()[0];
+        assert!(carried.clusters().is_empty(), "the tail has no clusters here");
+        assert!(!carried.has_end(), "a soft wrap offers no caret of its own");
+        assert_eq!(carried.end_x(), width);
+        assert_eq!(carried.start_byte(), 40, "the line it inherits ends here");
+        let fresh = &laid.lines()[1];
+        assert_eq!(fresh.start_byte(), 40);
+        assert_eq!(fresh.clusters()[0].x, Fixed::ZERO, "the cluster starts the line");
     }
 }
