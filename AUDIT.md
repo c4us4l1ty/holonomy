@@ -56,6 +56,36 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-18 — D-17 — a history step records a state that can be reproduced, not the state as it
+  stands.** Found by hunting for bugs in the paths the next slice stands on, and it is one family
+  with two members: both directions of the history were recording something that could not be
+  reproduced, and both failures are silent — the document stays structurally valid and reads wrong.
+
+  **The length had no position.** `Mark::Live` recorded how long the open leaf was and not where it
+  was, which is enough while the leaf is open and wrong the moment undo takes it out of the tree.
+  Undo of a mark whose source the *action* had opened removes the leaf and leaves the caret at the
+  mark's offset; redo then re-attached the text at that caret, because `next_at` was carrying two
+  meanings — where the caret goes, and where the leaf goes. Typing `XY` at offset 1 in `abcdef`,
+  undoing and redoing gave `adefXY` instead of `aXYdef`: the same bytes, a different document, no
+  error anywhere. A mark now records `at` as well as `len`, and only the offset is used for
+  placement.
+
+  **The root was recorded over bytes it was about to throw away.** A root step is a pointer, and
+  undo of one discards whatever is open — safely, because a seal ends the epoch, so anything still
+  open was never written (D-15). But the *redo* step was built from the live tree, which still had
+  the open leaf in it. `delete`, type, undo, redo therefore restored a spine whose leaf named a
+  source that undo had abandoned and whose bytes were gone: `document_len` counted two bytes no
+  reader could produce, and the next keystroke would have split that phantom leaf and left it in
+  the document forever. The fix is `settled_spine`: a root step records the tree without the open
+  leaf, which is the state undo can actually come back to. `leave` is now the single place undo and
+  redo compute what they are leaving behind, so the two directions cannot disagree again.
+
+  **Why this class slips through.** Every assertion in the suite asked about lengths, leaf counts
+  and written bytes — all of them true in both failures. What catches it is asking the *register*
+  whether each leaf names a source with text behind it, and asking the spanning geometry whether a
+  re-inserted leaf is where it was. Two tests do exactly that, and neither would have been written
+  from the code's own docs, because the docs described the intent correctly.
+
 - **2026-11-18 — D-16 — segmentation is the rules, and the tables are the residue.** OQ-11 said the
   Eye's cluster segmentation was a hand-written *approximation* — and it was, in the way that matters
   least and in one way that matters most. The old loop joined **anything** after a ZWJ, which is GB9

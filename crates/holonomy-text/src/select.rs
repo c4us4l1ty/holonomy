@@ -221,6 +221,12 @@ impl From<ResidencyError> for CopyError {
 /// A leaf naming a source the register does not know, a fault-in the resident set refuses, a leaf
 /// that claims more bytes than its segment or the open buffer holds, or a drafted leaf whose bytes
 /// are resident text rather than the session's buffer.
+///
+/// `open` is the buffer of the session's **one** open source. The register can hold several — it is
+/// a `Vec`, and nothing in it forbids it — but this function is handed bytes and not an id, so it
+/// cannot tell which open source they belong to. The session keeps at most one open source at a
+/// time (a caret move seals), and debug builds assert it rather than letting a second one silently
+/// read the wrong buffer.
 pub fn copy<R: SegmentSource>(
     residency: &mut ResidentSet<R>,
     spine: &Spine,
@@ -229,6 +235,10 @@ pub fn copy<R: SegmentSource>(
     selection: Selection,
     open: &[u8],
 ) -> Result<Vec<u8>, CopyError> {
+    debug_assert!(
+        sources.open_count() <= 1,
+        "one open buffer can be handed over, and the session holds one open source"
+    );
     let (start, end) = selection.clamped(draft.document_len(spine)).normalised();
     let mut bytes = Vec::new();
     for span in draft.spans_in(spine, start, end) {
