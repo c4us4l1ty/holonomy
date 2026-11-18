@@ -56,6 +56,54 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-17 — D-13 — a selection costs the bytes it covers, and nothing else.**
+  Selection turned out not to be storage at all: two offsets — the anchor where the gesture began and
+  the focus where the caret is — plus a normalisation for the right-to-left case and a clamp to the
+  document. What it *is* is the last consumer the engine was missing, and it wants two different
+  halves of the same range.
+
+  **One resolution, two consumers.** A painter wants the leaves a range covers with live offsets;
+  that is `Selection::spans`, which is `Draft::spans_in` with the clamping done, so a leaf being
+  typed into is reported at the length it has *now*. The clipboard wants the bytes; that is
+  `select::copy`, which walks the same spans and reads exactly the part of each leaf the selection
+  covers. Two consumers, one geometry — the Block 5 clause applied to selection instead of to paint.
+
+  **The measured claim.** Copying two bytes out of the middle of an eight-byte sealed leaf returns
+  two bytes and faults in one segment — through the register, and re-asserted by a regression test
+  that pins the provisional id to segment `0` before copying anything. Copying across a seal returns the sealed fragment then the
+  buffer, faults only the sealed leaf, and faults **nothing** when the selection lies entirely inside
+  the open buffer. The residency set is unchanged by a copy that touches no sealed byte, which is the
+  only way that test can be written and still mean something.
+
+  **What a copy does grow.** The returned buffer — the clipboard's payload — is O(selection); that is
+  inherent, since the bytes have to exist somewhere. What does not grow is residency: leaves are read
+  one at a time and copied out immediately, so the resident set stays at its budget while a large
+  selection moves through it. The bound that changes is the clipboard's, not L-2's, and the shell
+  owns it.
+
+  **The bug the tests found — the register is the only authority.** The first version faulted in
+  `span.slab().segment()`, which is a **provisional** id even after a seal, because sealing renames the
+  source and not the leaf (D-7's whole point). Five tests failed at once asking the world-line for
+  segment `9223372036854775808`. The fix is not a guard but a correction: `copy` takes the register
+  and asks `OpenSources::locate`, which is the single place that knows whether an id is a buffer or a
+  segment. This is the crate's **first reader**, so it is the first code that had to know, and the
+  note belongs on the record for the second: the Eye's residency path will face the same question,
+  and faulting a leaf's own segment id will be wrong there for the same reason.
+
+  **Three refusals instead of three guesses.** A drafted leaf whose bytes are *not* the session's
+  buffer — the shape the commit boundary records against resident text edited in place — returns
+  `DraftNotInTheSession` rather than reading whatever happens to be at that index; a leaf that claims
+  more bytes than its segment holds returns `SegmentTooShort` rather than truncating; and a leaf
+  naming a source the register never handed out returns `UnknownSource` rather than reading the
+  buffer or the world-line. All three are unreachable in a correct session and all three would be
+  silent corruption if guessed at.
+
+  **What is still not decided.** The operating system's clipboard is per-platform work — flag
+  confidential, clear on blur — and stays open as OQ-3. And *typing replaces the selection* composes
+  from what exists (`Typing::delete` then `insert`, caret at the range's start), but the shell has to
+  present it as one user action so that undo sees one entry; that is the next slice, and it is where
+  OQ-8's unbounded history stops being deferrable.
+
 - **2026-11-17 — D-12 — a bug hunt on deletion: two findings, one of them a trap for undo.**
   Deletion is small enough to read in one sitting, so it was re-read as an adversary rather than as
   its author.
