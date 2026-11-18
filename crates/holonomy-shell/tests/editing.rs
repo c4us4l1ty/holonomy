@@ -479,14 +479,22 @@ fn a_taller_viewport_pulls_the_scroll_back_inside_the_document() {
     shell.type_text(&repeat_leaf().repeat(64)).expect("typed");
     shell.flush().expect("sealed");
     shell.reflow().expect("measured");
-    assert_eq!(shell.heights().total(), Fixed::units(420), "twenty-one lines");
+    assert_eq!(
+        shell.heights().total(),
+        Fixed::units(420),
+        "twenty-one lines"
+    );
 
     // The last screen of a 40-unit viewport, and then the window grows: the maximum scroll is a
     // function of the viewport, so 380 is past the end of a 200-unit one.
     shell.scroll_to(Fixed::units(380));
     assert_eq!(shell.scroll(), Fixed::units(380));
     shell.resize(WIDTH, Fixed::units(200));
-    assert_eq!(shell.scroll(), Fixed::units(220), "420 units, less the 200 on screen");
+    assert_eq!(
+        shell.scroll(),
+        Fixed::units(220),
+        "420 units, less the 200 on screen"
+    );
 
     // And the frame it produces is still the document's: 220 is the start of line eleven.
     let origin = shell.frame().expect("framed").origin();
@@ -505,7 +513,11 @@ fn a_crlf_split_across_a_leaf_is_one_break() {
     // unit's break and its LF. Laid out apart, the LF starts a line the document does not have.
     assert_eq!(shell.heights().len(), 2, "two leaves");
     let whole = layout_styled(StyledText::plain(&document), 0, WIDTH, &Fake);
-    assert_eq!(shell.heights().total(), whole.height(), "twenty-one lines, not twenty-two");
+    assert_eq!(
+        shell.heights().total(),
+        whole.height(),
+        "twenty-one lines, not twenty-two"
+    );
     assert_eq!(shell.heights().total(), Fixed::units(21 * 20));
 }
 
@@ -517,11 +529,18 @@ fn a_backspace_crosses_a_leaf_boundary_to_take_its_cluster() {
     shell.type_text(&document).expect("typed");
     shell.flush().expect("sealed");
     shell.reflow().expect("measured");
-    assert_eq!(shell.document_len(), 66, "sixty-three letters, then e and its mark");
+    assert_eq!(
+        shell.document_len(),
+        66,
+        "sixty-three letters, then e and its mark"
+    );
 
     // The caret is after the mark, and the leaf cut fell between the base and the mark — so the
     // cluster the backspace takes begins in the leaf before the caret's.
-    assert!(shell.backspace().expect("a backspace"), "there is a cluster to take");
+    assert!(
+        shell.backspace().expect("a backspace"),
+        "there is a cluster to take"
+    );
     assert_eq!(shell.document_len(), 63, "the base goes with its mark");
     assert_eq!(shell.caret(), 63);
 }
@@ -540,7 +559,11 @@ fn a_delete_crosses_a_leaf_boundary_to_take_its_cluster() {
     let clicked = shell
         .click(Point::new(Fixed::units(63), Fixed::ZERO))
         .expect("clicked");
-    assert_eq!(clicked.map(|caret| caret.byte), Some(63), "the base's boundary");
+    assert_eq!(
+        clicked.map(|caret| caret.byte),
+        Some(63),
+        "the base's boundary"
+    );
     assert!(shell.delete_forward().expect("a delete"));
     assert_eq!(shell.document_len(), 63, "the mark goes with its base");
     assert_eq!(shell.caret(), 63);

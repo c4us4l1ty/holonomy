@@ -842,7 +842,8 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let from = if leaf_start == 0 {
             0
         } else {
-            self.leaf_range(leaf_start - 1).map_or(0, |(start, _)| start)
+            self.leaf_range(leaf_start - 1)
+                .map_or(0, |(start, _)| start)
         };
         let from = from.min(at);
         if from == at {

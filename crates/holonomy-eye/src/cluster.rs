@@ -767,19 +767,13 @@ mod tests {
             clusters("\u{1F468}\u{200D}\u{200D}\u{1F469}"),
             vec!["\u{1F468}\u{200D}\u{200D}", "\u{1F469}"]
         );
-        // One joiner, with Extend* behind it, still joins — the family sequence is untouched.
-        let family = "\u{1F468}\u{1F3FD}\u{200D}\u{1F469}";
+        // One joiner, with Extend* behind it, still joins — the toned sequence is untouched.
+        let toned = "\u{1F468}\u{1F3FD}\u{200D}\u{1F469}";
+        assert_eq!(clusters(toned), vec![toned]);
+        // And a joined pictograph restarts the run, so a chain of them is one cluster: the
+        // standard's own family sequence, which the first implementation also got wrong.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
         assert_eq!(clusters(family), vec![family]);
-        // And the run behind a second joiner may still be entered again from the new cluster: the
-        // mark after it is a fresh `Pictographic` for the next rule, not a continuation.
-        let rejoined = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
-        assert_eq!(
-            clusters(rejoined),
-            vec![
-                "\u{1F468}\u{200D}\u{1F469}",
-                "\u{200D}\u{1F467}"
-            ]
-        );
     }
 
     #[test]
