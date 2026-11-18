@@ -712,6 +712,12 @@ impl ClusterContext {
     }
 }
 
+/// An iterator over the extended grapheme clusters of a text, from the state it was handed.
+///
+/// [`Clusters::new`] starts at the beginning of a text with nothing before it;
+/// [`Clusters::continuing`] starts inside one, told how the text before it ended.
+/// [`Clusters::carry`] is the state at the last cluster emitted: hand it to `continuing` and the
+/// next piece of the same document segments as the whole document does.
 #[derive(Debug, Clone)]
 pub struct Clusters<'a> {
     text: &'a str,

@@ -314,7 +314,10 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
     shaper: &S,
 ) -> Layout<'a> {
     let text = styled.text();
-    let opens_inside_a_cluster = text.chars().next().is_some_and(|first| context.joins(first));
+    let opens_inside_a_cluster = text
+        .chars()
+        .next()
+        .is_some_and(|first| context.joins(first));
     let mut lines: Vec<Line<'a>> = Vec::new();
     let mut clusters: Vec<Placed<'a>> = Vec::new();
     let mut x = start_x;

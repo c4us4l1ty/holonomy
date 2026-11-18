@@ -584,7 +584,11 @@ fn a_backspace_crosses_two_leaf_boundaries_to_take_its_cluster() {
     assert_eq!(shell.document_len(), 144);
 
     assert!(shell.backspace().expect("a backspace"));
-    assert_eq!(shell.document_len(), 63, "the base and all forty marks go together");
+    assert_eq!(
+        shell.document_len(),
+        63,
+        "the base and all forty marks go together"
+    );
     assert_eq!(shell.caret(), 63);
 }
 

@@ -876,7 +876,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let context = self.measured.carry(leaf).cluster;
             let read = self.read(from, at)?;
             let text = read.text();
-            let mut clusters = Clusters::continuing(text, context);
+            let clusters = Clusters::continuing(text, context);
             let Some((offset, _)) = clusters.last() else {
                 return Ok(None);
             };
