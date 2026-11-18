@@ -938,12 +938,60 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     }
 
     /// The caret nearest to a device point, through the frame's own layout.
+    ///
+    /// One boundary a frame offers can be a position the document does not have: the frame ends
+    /// where the window ends, the window ends at a leaf, and a leaf cut is a byte count — so the
+    /// cut can fall inside a cluster, and the eye, which only ever sees the frame's text, has no
+    /// way to know what comes after it (AUDIT D-22, OQ-19). Every *other* boundary is a cluster
+    /// start of the frame's own text, and that text begins at a line start, so the end is the only
+    /// one that needs asking about — and the answer comes from the document, which is this
+    /// editor's to ask.
     fn hit_test(&mut self, point: Point) -> Result<Option<Caret>, ShellError> {
         // The view is read before the frame is built: a frame borrows the editor for as long as it
         // lives, and the transform is a plain value.
         let view = self.view;
+        let (caret, end) = {
+            let frame = self.frame()?;
+            let Some(caret) = view.hit_test(frame.layout(), point) else {
+                return Ok(None);
+            };
+            (caret, frame.origin() + frame.text().len() as u64)
+        };
+        if caret.byte != end {
+            return Ok(Some(caret));
+        }
+        let at = self.legal_caret(end)?;
+        if at == end {
+            return Ok(Some(caret));
+        }
+        // Re-placed in the frame that drew it, so the box a click reports is the box paint draws.
         let frame = self.frame()?;
-        Ok(view.hit_test(frame.layout(), point))
+        Ok(view.paint_point(frame.layout(), at))
+    }
+
+    /// `at` if the document has a caret there, or where the cluster containing it begins.
+    ///
+    /// Only the frame's end needs this (see [`Self::hit_test`]): the window's last cluster can be
+    /// cut in two by the leaf the window stops at. The position the document does have is the one
+    /// before that cluster, which is on the same line, painted, and a boundary a click could have
+    /// landed on had the cut fallen one byte earlier.
+    ///
+    /// # Errors
+    ///
+    /// A leaf the document refused to read.
+    fn legal_caret(&mut self, at: u64) -> Result<u64, ShellError> {
+        if at == 0 || at >= self.typing.document_len() {
+            // The document's own start and end are boundaries of it, whatever a leaf did.
+            return Ok(at);
+        }
+        let Some(start) = self.cluster_before(at)? else {
+            return Ok(at);
+        };
+        match self.cluster_after(start)? {
+            // The cluster that contains `at - 1` also contains `at`: the cut is inside a grapheme.
+            Some(cluster_end) if cluster_end > at => Ok(start),
+            _ => Ok(at),
+        }
     }
 }
 
