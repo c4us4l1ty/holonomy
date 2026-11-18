@@ -5,7 +5,7 @@
 //! numbers are exact rather than approximate — which is what makes the caret check at the end a
 //! proof about every caret a frame offers instead of a sample of them.
 
-use holonomy_eye::{layout_styled, Fixed, Point, Shaper, Style, StyledText, View};
+use holonomy_eye::{layout_styled, Clusters, Fixed, Point, Shaper, Style, StyledText, View};
 use holonomy_shell::Editor;
 use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
 use std::cell::{Cell, RefCell};
@@ -567,6 +567,80 @@ fn a_delete_crosses_a_leaf_boundary_to_take_its_cluster() {
     assert!(shell.delete_forward().expect("a delete"));
     assert_eq!(shell.document_len(), 63, "the mark goes with its base");
     assert_eq!(shell.caret(), 63);
+}
+
+/// Every 64-byte boundary of this text falls inside an `e` + U+0301 cluster.
+///
+/// A block is a mark (finishing the previous block's `e`), sixty-one `a`, and an `e` in the
+/// block's last byte — so whatever leaf a window ends on, its end is inside a grapheme.
+fn a_cluster_straddling_every_leaf() -> String {
+    let mut text = String::new();
+    for _ in 0..7 {
+        text.push('\u{301}');
+        text.push_str(&"a".repeat(61));
+        text.push('e');
+    }
+    text
+}
+
+#[test]
+fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
+    // The frame ends where the window ends, and a window ends at a leaf — a byte count (D-22), so
+    // the cut can fall inside a cluster. The eye cannot tell that from the frame's text alone, so
+    // a click past the last cluster would put the caret inside a grapheme, and typing there would
+    // split it. The document is what knows, and the position it has is the one before the cluster.
+    let mut shell = session();
+    let text = a_cluster_straddling_every_leaf();
+    shell.type_text(&text).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+
+    let starts: Vec<u64> = Clusters::new(&text).map(|(at, _)| at as u64).collect();
+    let mut boundaries = Vec::new();
+    let end = {
+        let frame = shell.frame().expect("a frame");
+        for line in frame.layout().lines() {
+            for (x, byte) in line.boundaries() {
+                boundaries.push((x, line.top(), byte));
+            }
+        }
+        frame.origin() + frame.text().len() as u64
+    };
+    assert!(end > 0 && end < text.len() as u64, "the window is a prefix");
+    assert_eq!(end % 64, 0, "it ends at a leaf");
+    assert!(
+        !starts.contains(&end),
+        "and that leaf cut is inside a grapheme"
+    );
+    let before = starts
+        .iter()
+        .copied()
+        .filter(|at| *at < end)
+        .max()
+        .expect("a cluster before the cut");
+
+    let mut carets = 0;
+    for (x, top, byte) in boundaries {
+        let caret = shell
+            .click(Point::new(x, top))
+            .expect("clicked")
+            .expect("a caret");
+        if byte == end {
+            assert_eq!(
+                caret.byte, before,
+                "the cut is inside the cluster at {before}, and a caret goes there"
+            );
+        } else {
+            assert_eq!(caret.byte, byte, "a legal caret round-trips");
+        }
+        assert!(
+            starts.contains(&caret.byte) || caret.byte == text.len() as u64,
+            "the caret at {} is inside a grapheme",
+            caret.byte
+        );
+        carets += 1;
+    }
+    assert!(carets > 1, "the frame offered more than its own end");
 }
 
 #[test]
