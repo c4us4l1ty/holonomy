@@ -1075,7 +1075,11 @@ mod tests {
         let written = typing.sink.written().len();
         typing.delete(2, 4).expect("deleted");
         assert_eq!(typing.document_len(), 8);
-        assert_eq!(typing.undo_depth(), 1, "the cut recorded the root before it");
+        assert_eq!(
+            typing.undo_depth(),
+            1,
+            "the cut recorded the root before it"
+        );
         assert!(typing.undo().expect("undone"));
         assert_eq!(typing.document_len(), 10, "the text came back");
         assert_eq!(typing.spine().len(), 10);
