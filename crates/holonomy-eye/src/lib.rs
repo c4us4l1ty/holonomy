@@ -13,8 +13,8 @@
 //!
 //! - `geom`: [`Fixed`] coordinates in 64ths of a logical unit (integer, so equality is a
 //!   question about geometry and not about rounding) and [`Point`].
-//! - `cluster`: grapheme-cluster segmentation, so a caret can never land inside an extended
-//!   grapheme cluster.
+//! - `cluster`: grapheme-cluster segmentation by the rules of UAX #29 (GB3–GB13, in their
+//!   numbered order), so a caret can never land inside an extended grapheme cluster.
 //! - `shaper`: the [`Shaper`] trait — the only door through which advances enter the system, and
 //!   it is asked with a [`Style`], because a heading is a geometry change and not a decoration.
 //! - `style`: [`Style`], [`StyledRun`] and [`StyledText`]: style runs as layout data, so Block 7's
@@ -39,11 +39,13 @@
 //! every zoom and DPI — is tested across a corpus of scripts, marks, ZWJ sequences, wide clusters
 //! and line breaks, at eight zoom steps and five DPIs, on a fake shaper so it needs no font.
 //!
-//! L-8 still carries `status: spec`, and the crate says why rather than leaving it to a reader:
-//! segmentation is a hand-written approximation of UAX #29 (a few sequences UAX #29 joins are left
-//! as separate clusters, and BiDi reordering is not attempted at all), and the run tree is built
-//! from a whole window of text, so nothing here yet constrains shaping cost to the viewport. Those
-//! are Block 5's remaining gates, not this crate's footnotes.
+//! L-8 still carries `status: spec`, and the crate says why rather than leaving it to a reader. The
+//! segmentation *rules* are the standard's, applied in order, but their **property tables** are
+//! hand-written: they cover the scripts `docs/UI-SPEC.md` §8 names, general diacritics, variation
+//! selectors, tags, joiners, and the emoji blocks, and a mark outside that coverage splits from its
+//! base — a coverage gap in the tables, not a misread rule. BiDi reordering is still not attempted
+//! at all, and the run tree is built from a whole window of text, so nothing here yet constrains
+//! shaping cost to the viewport. Those are Block 5's remaining gates, not this crate's footnotes.
 
 mod cluster;
 mod geom;
