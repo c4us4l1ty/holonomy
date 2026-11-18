@@ -174,6 +174,11 @@ impl<S: SegmentSink> Typing<S> {
     /// Moving the caret **seals** whatever is open: one append, and the document is fully sealed
     /// while the new source is placed. That is what keeps every offset before the open leaf exact.
     ///
+    /// `at` is a **character boundary of the document**. The session cannot check that on its own:
+    /// it holds a [`SegmentSink`], which appends and never reads, so the bytes on the far side of a
+    /// sealed leaf are not reachable from here. The caret that calls this is a cluster boundary out
+    /// of `holonomy_eye`, which is what discharges the precondition (OQ-15).
+    ///
     /// # Errors
     ///
     /// As [`Self::insert`].
@@ -196,10 +201,16 @@ impl<S: SegmentSink> Typing<S> {
     /// Deleting the whole open buffer takes the leaf with it and abandons the source: the tree may
     /// not carry a leaf that names nothing.
     ///
+    /// `start` and `end` are **character boundaries of the document**, for the same reason as
+    /// [`Self::insert_at`] — and the asymmetry is real: offsets that land inside the open buffer
+    /// are checked by [`SlabText`], and offsets that land in sealed text are not, because this
+    /// session holds no reader (OQ-15). A cut that splits a character leaves a leaf whose bytes are
+    /// not valid UTF-8, which the resident set will refuse when it faults that leaf in.
+    ///
     /// # Errors
     ///
-    /// A range whose ends are not character boundaries, or a spine range the geometry refuses. A
-    /// refused cut changes nothing.
+    /// A range whose ends are not character boundaries **of the bytes in the buffer**, or a spine
+    /// range the geometry refuses. A refused cut changes nothing.
     pub fn delete(&mut self, start: u64, end: u64) -> Result<(), TypingError> {
         let document = self.document_len();
         let (start, end) = (start.min(document), end.min(document));
@@ -651,6 +662,15 @@ mod tests {
         assert_eq!(typing.spine().len(), 10, "the tree and the document agree");
         // Three leaves, not two: the leaves the cut lands in are split, and nothing rejoins them.
         assert_eq!(typing.spine().slab_count(), 3);
+        // And the fragments point at the right bytes: keeping 0..2 of "01234567" and 12..16 of
+        // "89abcdef" means inner offsets 2 and 4, so the document reads "01" + "cdef" + "ghij".
+        let spans: Vec<(u64, u64, u32)> = typing
+            .spine()
+            .spans_in(0, typing.spine().len())
+            .iter()
+            .map(|span| (span.offset(), span.len(), span.slab().start()))
+            .collect();
+        assert_eq!(spans, vec![(0, 2, 2), (2, 4, 4), (6, 4, 0)]);
         // The removed bytes are still in the world-line. That is OQ-14, and it is why this is
         // called deletion and not erasure.
         assert_eq!(typing.sink.written().len(), 20);
@@ -677,6 +697,22 @@ mod tests {
         assert_eq!(typing.document_len(), 6);
         assert_eq!(typing.spine().len(), 6);
         assert_eq!(typing.caret(), 6);
+    }
+
+    #[test]
+    fn a_half_character_is_refused_while_open_and_not_checked_once_sealed() {
+        let mut typing = session(64);
+        typing.insert("aéb".as_bytes()).expect("typed");
+        // In the buffer the bytes are here, so the edit knows where the characters are and refuses.
+        let refused = typing.delete(1, 2).expect_err("half a character");
+        assert!(matches!(refused, TypingError::Text(_)));
+        assert_eq!(typing.pending(), "aéb".as_bytes());
+        typing.flush().expect("flushed");
+        // Sealed, the session has no reader and cannot tell: the cut goes through. That
+        // asymmetry is OQ-15, and it is why the caret that calls this is an Eye cluster boundary.
+        typing.delete(1, 2).expect("the geometry does not check characters");
+        assert_eq!(typing.document_len(), 3);
+        assert_eq!(typing.spine().len(), 3);
     }
 
     #[test]

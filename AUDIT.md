@@ -52,8 +52,39 @@ Listed so they stay dead.
 | OQ-12 | **The window is viewport-sized, and now measured on the size the gate names.** The chain — `HeightModel` (O(log n) counted reads), `Spine::slab_span` (one descent), `holonomy_eye::byte_window` (contiguous, holes impossible since D-7) — is swept over a **180 MB / 44,000-leaf** document, every screen. Bytes handed to layout are bounded by one screen plus two leaves, **with the identical bound at 1/1000 the length**; index reads stay ≤ 64 and grow by at most a logarithm. What is still missing is the timing half: seconds need a real shaper and a font, which is Block 6, and a fake shaper would make the number about the fake. Gate 2 therefore stays unclaimed — its *inputs* are measured, its clock is not. | **open — cost inputs measured 2026-11-17; timing needs Block 6's shaper** |
 | OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
 | OQ-14 | **Deletion does not erase.** `Typing::delete` removes a range from the tree, which is a pointer operation: no bytes written, no segment sealed. The deleted text therefore stays in the world-line as ciphertext, decryptable by anyone holding the passphrase. That is inherent to an authenticated append-only log — the log *is* the history, and the document is a view of it — and it is also why the log is trustworthy. A policy is needed (segment-by-segment re-encryption in a compaction pass, or a per-document epoch the user is expected to rotate), and until one exists "deleted" must not be read as "erased" in any user-facing claim. Found 2026-11-17 while implementing deletion. | **open — found 2026-11-17, no policy yet** |
+| OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8 — which the resident set refuses when it faults that leaf in. The asymmetry is the finding: offsets inside the open buffer are checked (`SlabText` holds the bytes and returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. Fixing it means putting the reader and the edit in the same place, which is Block 6's shell; the intended architecture already discharges the precondition because the caret is a cluster boundary from `holonomy-eye`'s segmentation. What is missing is a check that the two agree — a test that every caret the Eye can produce is a character boundary of the document — and that test needs the reader too. | **open — found 2026-11-17 by the deletion bug hunt; the buffer path refuses, the sealed path cannot** |
 
 ## Audit trail
+
+- **2026-11-17 — D-12 — a bug hunt on deletion: two findings, one of them a trap for undo.**
+  Deletion is small enough to read in one sitting, so it was re-read as an adversary rather than as
+  its author.
+
+  **What held.** Clamping past the end, an empty range, deleting after a caret move with nothing
+  typed, deleting past the open leaf into its sealed tail, and deleting the whole buffer twice in a
+  row all behave as documented, and no path lost text, wrote a byte twice, or left the caret
+  anywhere but `start`. The fragments were the one claim the tests asserted only by *count*, so the
+  sealed-deletion test now reads the leaves back and checks their inner offsets: keeping `0..2` of
+  `01234567` and `12..16` of `89abcdef` must leave inner starts of `2` and `4`. It does.
+
+  **Finding 1 — `close` destroyed the evidence.** `OpenSources::close` removed the provisional id
+  from the open list, so `locate` answered `Unknown` — the same answer a stranger id gets. The two
+  are not the same fact: one id named text that was typed and deleted *before it was ever written*,
+  the other was never minted. Nothing in today's tree can tell them apart because no root holds the
+  abandoned leaf; the moment `History` offers undo across a whole-buffer deletion, a resurrected root
+  does, and it names text that is unrecoverable — never sealed, never in the world-line. Fixed by
+  deriving rather than storing: provisional ids are minted by counting, so
+  `OpenSources::was_abandoned` answers from the counter and cannot drift from it.
+
+  **Finding 2 — the boundary check is asymmetric** (OQ-15). `SlabText::delete` refuses an offset
+  inside a character; the spine path accepts one, because this session holds no reader. The
+  asymmetry is now stated in both methods' documentation and pinned by a test that deletes half of
+  an `é` in the buffer (refused) and half of it sealed (accepted), so a future fix cannot land
+  quietly.
+
+  **What this says about the record.** Neither finding was a crash; both were places where the code
+  was *almost* honest. The hunt did not find a bug in the deletion path — it found that the path
+  leaves two facts unrecorded, and the second one only becomes a bug in the presence of undo.
 
 - **2026-11-17 — D-11 — deletion is a pointer operation, and that word has to be chosen carefully.**
   Removing text turned out to be the smallest structural change in the engine and the largest
