@@ -742,7 +742,10 @@ mod tests {
         let with_mark = "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}";
         assert_eq!(clusters(with_mark), vec![with_mark]);
         // And a pictograph on the right alone is not: `a` is not the rule's left context.
-        assert_eq!(clusters("\u{1F600}\u{200D}a"), vec!["\u{1F600}\u{200D}", "a"]);
+        assert_eq!(
+            clusters("\u{1F600}\u{200D}a"),
+            vec!["\u{1F600}\u{200D}", "a"]
+        );
     }
 
     #[test]
@@ -773,7 +776,10 @@ mod tests {
     fn a_control_breaks_on_both_sides() {
         // GB4/GB5: a tab is a Control, so nothing joins it from either side.
         assert_eq!(clusters("a\tb"), vec!["a", "\t", "b"]);
-        assert_eq!(clusters("e\u{301}\u{0007}\u{301}"), vec!["e\u{301}", "\u{0007}", "\u{301}"]);
+        assert_eq!(
+            clusters("e\u{301}\u{0007}\u{301}"),
+            vec!["e\u{301}", "\u{0007}", "\u{301}"]
+        );
     }
 
     #[test]
