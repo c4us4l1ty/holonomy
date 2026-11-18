@@ -8,7 +8,7 @@
 //! the spine to the new root — proven against a real `holonomy-line` world-line in
 //! `tests/commit_boundary.rs`; the live-length overlay ([`Draft`]) that keeps every position
 //! query correct *between* commits, while the spine is stale by design; the typing session
-//! ([`Typing`]) where open sources are born, typed into, sealed and deleted; and selection
+//! ([`Typing`]) where open sources are born, typed into, sealed, deleted and undone; and selection
 //! ([`Selection`], [`select::copy`]) — a range in the live document, the leaves it covers, and the
 //! bytes behind them. What is still missing is the editor itself and Block 5's Eye, so L-2 as a
 //! whole remains `spec` and the Block 4 gates remain open.
@@ -20,7 +20,7 @@
 //! > it. Undo is a pointer walk, never a plaintext buffer — otherwise the wipe set would grow
 //! > with history.
 //!
-//! Nine structural consequences, each witnessed by a test in this crate:
+//! Ten structural consequences, each witnessed by a test in this crate:
 //!
 //! * A [`Spine`] holds no plaintext at all — only [`Slab`] references — so a sixty-year document
 //!   costs bytes that scale with segment count, not with readable text.
@@ -46,6 +46,10 @@
 //! * A selection costs the bytes it covers: [`select::copy`] faults in exactly the leaves the range
 //!   touches and clips each one, so two bytes out of a 64 KiB leaf return two bytes — the
 //!   eyes-only law at clipboard granularity.
+//! * Undo of typing is a **length**, not a copy: [`Typing::mark`] records how many bytes the open
+//!   source had, and the overlay hides the rest, so undo and redo copy no root, write no byte and
+//!   allocate nothing. The undo stack is bounded at a thousand marks and a seal ends it — history's
+//!   memory does not grow with the number of edits (OQ-8).
 
 pub mod commit;
 pub mod draft;

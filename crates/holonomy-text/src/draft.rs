@@ -156,6 +156,18 @@ impl Draft {
         Ok(())
     }
 
+    /// The live length the overlay records for the leaf at `at`, if it records one.
+    ///
+    /// `None` means the leaf's live length *is* its sealed length — the overlay is not a cache and
+    /// does not restate what the spine already says (D-2).
+    #[must_use]
+    pub fn live_len(&self, at: u64) -> Option<u64> {
+        self.edits
+            .iter()
+            .find(|edit| edit.at == at)
+            .map(|edit| edit.len)
+    }
+
     /// Drops the draft at `at`, returning whether there was one.
     ///
     /// This is what the caller does after a seal: the new leaf's committed length *is* the live
