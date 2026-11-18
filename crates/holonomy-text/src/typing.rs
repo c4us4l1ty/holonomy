@@ -47,6 +47,19 @@
 //! a reader with the passphrase can still decrypt it. An authenticated append-only log cannot do
 //! better without a compaction policy, and this session has none; AUDIT's OQ-14 records that,
 //! rather than letting "deleted" quietly mean two different things.
+//!
+//! # Undo is a length, not a copy
+//!
+//! [`Typing::mark`] records a state and [`Typing::undo`] returns to it, and the record is a
+//! **length**: an undo changes how much of the buffer the document includes, not what is in it.
+//! Undo and redo therefore copy no root, write no byte and allocate nothing, and redo works because
+//! the bytes were never discarded — the tail simply stops being part of the document until
+//! something edits it.
+//!
+//! What undo cannot do is bring back bytes an edit destroyed. A mark promises that the bytes before
+//! its length are unchanged, so a delete inside the buffer pops the marks it invalidates, and a
+//! seal pops all of them because the bytes move to the world-line and the buffer is dropped.
+//! Undoing a deletion needs the root from before the cut — a pointer swap, and the next slice.
 
 use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
@@ -118,6 +131,33 @@ struct Open {
     registered: u32,
 }
 
+/// How many undo states a session keeps.
+///
+/// A mark is a length, so the stack's memory is this many words, not a fraction of the document and
+/// not a fraction of the history — which is OQ-8's answer for typing.
+const UNDO_DEPTH: usize = 1024;
+
+/// A state the session can return to.
+///
+/// A mark is a **length**, never a copy. The bytes it refers to are still in the buffer, because an
+/// undo only changes how much of that buffer the document includes — the overlay is the authority
+/// on the open leaf's length, so lowering it hides the tail without moving a byte. That is why undo
+/// and redo of typing copy no root, write nothing and allocate nothing, and why redo can put the
+/// text back: nothing was thrown away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// Nothing was open: the document was fully sealed and ended at this offset.
+    Sealed {
+        /// The document offset the next byte would have landed at.
+        at: u64,
+    },
+    /// The source that is still open held this many bytes.
+    Live {
+        /// The open source's length at that moment.
+        len: usize,
+    },
+}
+
 /// A document's tail while it is being typed into.
 pub struct Typing<S> {
     spine: Spine,
@@ -130,6 +170,10 @@ pub struct Typing<S> {
     /// Where the next source is placed, when it is not the document's tail.
     next_at: Option<u64>,
     sealed_bytes: u64,
+    /// States the session can return to, oldest first.
+    marks: Vec<Mark>,
+    /// States an undo left behind, oldest first — the redo stack.
+    undone: Vec<Mark>,
 }
 
 impl<S: SegmentSink> Typing<S> {
@@ -155,6 +199,8 @@ impl<S: SegmentSink> Typing<S> {
             open: None,
             next_at: None,
             sealed_bytes: 0,
+            marks: Vec::new(),
+            undone: Vec::new(),
         }
     }
 
@@ -218,11 +264,14 @@ impl<S: SegmentSink> Typing<S> {
             return Ok(());
         }
         if let Some(open) = self.open {
-            let live = u64::try_from(self.buffer.len()).expect("a buffer fits in u64");
+            let live = u64::try_from(self.live_len()).expect("a buffer fits in u64");
             let live_end = open.at + live;
             if start >= open.at && end <= live_end {
                 let from = usize::try_from(start - open.at).expect("a buffer fits in usize");
                 let to = usize::try_from(end - open.at).expect("a buffer fits in usize");
+                // A cut destroys bytes, so it ends redo and every mark that promised them.
+                self.drop_undone_tail()?;
+                self.pop_marks_above(from);
                 self.buffer.delete(from, to)?;
                 if self.buffer.is_empty() {
                     // The leaf carried the only bytes this source had. It leaves the spine, and the
@@ -246,11 +295,185 @@ impl<S: SegmentSink> Typing<S> {
         Ok(())
     }
 
+    /// Records a state the session can undo back to, and drops any redo stack.
+    ///
+    /// Call this before a **user action**, not before every keystroke: what counts as one action (a
+    /// pause, a word, a paste) is knowledge the shell has and this layer does not.
+    pub fn mark(&mut self) {
+        self.undone.clear();
+        let mark = self.current_mark();
+        if self.marks.len() == UNDO_DEPTH {
+            self.marks.remove(0);
+        }
+        self.marks.push(mark);
+    }
+
+    /// Returns to the last mark, reporting whether there was one.
+    ///
+    /// Only the document's length changes: the bytes stay in the buffer, so this copies no root,
+    /// writes no byte and allocates nothing, and [`Self::redo`] can put the text back.
+    ///
+    /// # Errors
+    ///
+    /// A spine range the geometry refuses, when the state being restored had no open source and the
+    /// leaf the action registered has to leave the tree.
+    pub fn undo(&mut self) -> Result<bool, TypingError> {
+        let Some(mark) = self.marks.pop() else {
+            return Ok(false);
+        };
+        let current = self.current_mark();
+        self.restore(mark)?;
+        self.undone.push(current);
+        Ok(true)
+    }
+
+    /// Re-applies what [`Self::undo`] last took back, reporting whether there was anything.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::undo`]: restoring a state with an open source may have to register a leaf.
+    pub fn redo(&mut self) -> Result<bool, TypingError> {
+        let Some(mark) = self.undone.pop() else {
+            return Ok(false);
+        };
+        let current = self.current_mark();
+        self.restore(mark)?;
+        self.marks.push(current);
+        Ok(true)
+    }
+
+    /// How many undo states the session holds.
+    #[must_use]
+    pub fn undo_depth(&self) -> usize {
+        self.marks.len()
+    }
+
+    /// How many states [`Self::redo`] can re-apply.
+    #[must_use]
+    pub fn redo_depth(&self) -> usize {
+        self.undone.len()
+    }
+
+    /// Replaces `start..end` with `bytes` — typing over a selection.
+    ///
+    /// It is [`Self::delete`] then [`Self::insert_at`], which is the whole implementation as well
+    /// as the specification: the caret ends after the inserted text, and a replacement that
+    /// destroys bytes can no more be undone than the deletion inside it can (see the module
+    /// documentation).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::delete`] and [`Self::insert`].
+    pub fn replace(&mut self, start: u64, end: u64, bytes: &[u8]) -> Result<(), TypingError> {
+        self.delete(start, end)?;
+        self.insert_at(start, bytes)
+    }
+
+    /// The state the session is in now, as a mark would record it.
+    fn current_mark(&self) -> Mark {
+        match self.open {
+            Some(_) => Mark::Live {
+                len: self.live_len(),
+            },
+            None => Mark::Sealed { at: self.caret() },
+        }
+    }
+
+    /// Moves the session to `mark`, touching lengths and at most one leaf — never bytes.
+    fn restore(&mut self, mark: Mark) -> Result<(), TypingError> {
+        match (mark, self.open) {
+            (Mark::Live { len }, Some(_)) => self.set_live(len),
+            (Mark::Live { len }, None) => self.attach(len),
+            (Mark::Sealed { at }, Some(open)) => {
+                // The source was opened by the action being undone: its leaf leaves the spine and
+                // the register abandons it. The bytes stay in the buffer, so redo can restore them.
+                let leaf_end = open.at + u64::from(open.registered);
+                self.spine = self.spine.remove_range(open.at, leaf_end)?;
+                self.sources.close(open.source);
+                self.draft.forget(open.at);
+                self.open = None;
+                self.next_at = Some(at.min(self.spine.len()));
+                Ok(())
+            }
+            (Mark::Sealed { at }, None) => {
+                self.next_at = Some(at.min(self.spine.len()));
+                Ok(())
+            }
+        }
+    }
+
+    /// Sets the open leaf's live length, without touching the buffer.
+    fn set_live(&mut self, len: usize) -> Result<(), TypingError> {
+        let Some(open) = self.open else {
+            return Ok(());
+        };
+        if len == usize::try_from(open.registered).expect("capacity fits in usize") {
+            // Back to the sealed length: the overlay has nothing left to say (D-2).
+            self.draft.forget(open.at);
+        } else {
+            let span = SlabSpan::new(open.at, Slab::new(open.source, 0, open.registered));
+            self.draft
+                .record(span, u64::try_from(len).expect("a buffer fits in u64"))?;
+        }
+        Ok(())
+    }
+
+    /// Opens a source over the first `len` bytes of the buffer, at the caret.
+    ///
+    /// This is redo of "there was no source": the text comes back under a *new* provisional id,
+    /// because the abandoned one is never reused.
+    fn attach(&mut self, len: usize) -> Result<(), TypingError> {
+        let registered = u32::try_from(len).expect("capacity fits in u32");
+        let source = self.sources.open();
+        let at = self.next_at.take().unwrap_or_else(|| self.spine.len());
+        self.spine = self.spine.insert_slab(at, Slab::new(source, 0, registered))?;
+        self.open = Some(Open {
+            source,
+            at,
+            registered,
+        });
+        Ok(())
+    }
+
+    /// The open leaf's live length: the overlay's answer, or the registered length when the overlay
+    /// does not disagree with it. Zero when nothing is open — an undone tail is not the document.
+    fn live_len(&self) -> usize {
+        let Some(open) = self.open else {
+            return 0;
+        };
+        let live = self
+            .draft
+            .live_len(open.at)
+            .unwrap_or(u64::from(open.registered));
+        usize::try_from(live).expect("a buffer fits in usize")
+    }
+
+    /// Drops the bytes an undo left in the buffer's tail, so a new edit starts from the live text.
+    fn drop_undone_tail(&mut self) -> Result<(), TypingError> {
+        let live = self.live_len();
+        if self.buffer.len() > live {
+            self.buffer.delete(live, self.buffer.len())?;
+        }
+        self.undone.clear();
+        Ok(())
+    }
+
+    /// Pops every mark whose promise this edit breaks: a mark says the bytes before its length are
+    /// unchanged, and an edit below that length changes them.
+    fn pop_marks_above(&mut self, len: usize) {
+        while let Some(Mark::Live { len: mark }) = self.marks.last().copied() {
+            if mark <= len {
+                break;
+            }
+            self.marks.pop();
+        }
+    }
+
     /// The document offset the next typed byte lands at.
     #[must_use]
     pub fn caret(&self) -> u64 {
         match self.open {
-            Some(open) => open.at + u64::try_from(self.buffer.len()).expect("a buffer fits in u64"),
+            Some(open) => open.at + u64::try_from(self.live_len()).expect("a buffer fits in u64"),
             None => self.next_at.unwrap_or_else(|| self.spine.len()),
         }
     }
@@ -259,8 +482,16 @@ impl<S: SegmentSink> Typing<S> {
     /// byte arrives.
     fn type_bytes(&mut self, bytes: &[u8]) -> Result<(), TypingError> {
         let mut rest = bytes;
+        if rest.is_empty() {
+            return Ok(());
+        }
+        // A new edit from a state an undo left behind: the undone tail is dropped for good, and the
+        // marks it promised are gone with it.
+        self.drop_undone_tail()?;
+        self.pop_marks_above(self.live_len());
         while !rest.is_empty() {
-            let room = self.capacity - self.buffer.len();
+            let live = self.live_len();
+            let room = self.capacity - live;
             if room == 0 {
                 self.seal()?;
                 continue;
@@ -268,7 +499,7 @@ impl<S: SegmentSink> Typing<S> {
             // Take only what fits, so one burst can be many keystrokes and still never hides an
             // allocation inside an edit: the split happens here, at a seal, where it is counted.
             let take = room.min(rest.len());
-            let at = self.buffer.len();
+            let at = live;
             match self.buffer.insert(at, &rest[..take])? {
                 EditOutcome::InPlace => {}
                 EditOutcome::WouldSplit { needed, capacity } => {
@@ -311,7 +542,8 @@ impl<S: SegmentSink> Typing<S> {
     /// The bytes that are in the buffer and in no segment yet.
     #[must_use]
     pub fn pending(&self) -> &[u8] {
-        self.buffer.as_bytes()
+        // An undone tail is in the buffer and not in the document, so it is not pending either.
+        &self.buffer.as_bytes()[..self.live_len()]
     }
 
     /// The document's length, drafts applied — what the user would call "how long is this".
@@ -390,6 +622,10 @@ impl<S: SegmentSink> Typing<S> {
         self.sealed_bytes += u64::try_from(len).expect("a buffer fits in u64");
         self.next_at = Some(open.at + u64::try_from(len).expect("a buffer fits in u64"));
         self.open = None;
+        // A seal is an undo floor: the bytes move to the world-line and the buffer is dropped, so
+        // no mark that promises them can be honoured any more.
+        self.marks.clear();
+        self.undone.clear();
         self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
             .expect("an empty slab is valid UTF-8");
         Ok(())
@@ -604,6 +840,144 @@ mod tests {
             .collect();
         assert_eq!(leaves, vec![(0, 4), (4, 8), (12, 2), (14, 4)]);
         assert_eq!(typing.document_len(), 18);
+    }
+
+    #[test]
+    fn undo_of_later_typing_is_a_length_and_copies_no_root() {
+        let mut typing = session(64);
+        typing.insert(b"hello").expect("typed");
+        typing.mark();
+        typing.insert(b" world").expect("typed");
+        let leaves = typing.spine().slab_count();
+        assert!(typing.undo().expect("undone"));
+        assert_eq!(typing.document_len(), 5);
+        assert_eq!(typing.pending(), b"hello");
+        assert_eq!(typing.caret(), 5);
+        assert_eq!(typing.spine().slab_count(), leaves, "no root changed");
+        assert_eq!(typing.spine().len(), 5, "the tree still says five");
+        assert_eq!(typing.sealed_bytes(), 0, "and nothing was written");
+        assert!(
+            typing.draft().is_empty(),
+            "back at the sealed length, the overlay has nothing to say"
+        );
+    }
+
+    #[test]
+    fn redo_restores_the_text_without_writing_it() {
+        let mut typing = session(64);
+        typing.insert(b"hello").expect("typed");
+        typing.mark();
+        typing.insert(b" world").expect("typed");
+        assert!(typing.undo().expect("undone"));
+        assert!(typing.redo().expect("redone"));
+        assert_eq!(typing.document_len(), 11);
+        assert_eq!(typing.pending(), b"hello world");
+        assert_eq!(typing.sealed_bytes(), 0, "neither direction wrote a byte");
+        assert_eq!(typing.spine().len(), 5, "and the tree never heard about it");
+        assert_eq!(typing.caret(), 11);
+    }
+
+    #[test]
+    fn undoing_the_first_byte_of_a_source_takes_the_leaf_and_redo_brings_it_back() {
+        let mut typing = session(64);
+        typing.mark();
+        typing.insert(b"abc").expect("typed");
+        assert_eq!(typing.spine().slab_count(), 1);
+        assert!(typing.undo().expect("undone"));
+        assert_eq!(
+            typing.spine().slab_count(),
+            0,
+            "a leaf that carries nothing may not stay"
+        );
+        assert_eq!(typing.document_len(), 0);
+        assert!(
+            typing.pending().is_empty(),
+            "the bytes are in the buffer and not in the document"
+        );
+        assert_eq!(typing.sources().open_count(), 0, "the source was abandoned");
+        assert!(typing.redo().expect("redone"));
+        assert_eq!(typing.document_len(), 3);
+        assert_eq!(typing.spine().slab_count(), 1);
+        assert_eq!(typing.pending(), b"abc");
+        assert_eq!(typing.caret(), 3);
+    }
+
+    #[test]
+    fn typing_after_an_undo_drops_the_undone_tail() {
+        let mut typing = session(64);
+        typing.insert(b"hello").expect("typed");
+        typing.mark();
+        typing.insert(b" world").expect("typed");
+        assert!(typing.undo().expect("undone"));
+        typing.insert(b"!").expect("typed");
+        assert_eq!(
+            typing.pending(),
+            b"hello!",
+            "the undone tail is dropped, not typed over in place"
+        );
+        assert_eq!(typing.document_len(), 6);
+        assert_eq!(typing.redo_depth(), 0, "what is gone cannot be redone");
+        assert!(!typing.redo().expect("nothing to redo"));
+    }
+
+    #[test]
+    fn a_delete_pops_the_marks_it_invalidates() {
+        let mut typing = session(64);
+        typing.insert(b"abcdef").expect("typed");
+        typing.mark();
+        typing.insert(b"ghi").expect("typed");
+        assert_eq!(typing.undo_depth(), 1);
+        typing.delete(2, 4).expect("deleted");
+        assert_eq!(
+            typing.undo_depth(),
+            0,
+            "the cut destroyed bytes a mark promised were unchanged"
+        );
+        assert_eq!(typing.document_len(), 7);
+        assert!(!typing.undo().expect("nothing left to undo"));
+    }
+
+    #[test]
+    fn a_seal_is_an_undo_floor() {
+        let mut typing = session(8);
+        typing.mark();
+        // Twelve bytes into an eight-byte buffer: a seal happens inside the action.
+        typing.insert(b"0123456789ab").expect("typed");
+        assert_eq!(typing.sealed_bytes(), 8);
+        assert_eq!(typing.undo_depth(), 0, "the bytes are the world-line's now");
+        assert!(!typing.undo().expect("nothing to undo"));
+        assert_eq!(typing.document_len(), 12);
+    }
+
+    #[test]
+    fn the_undo_stack_is_bounded_and_the_document_is_not() {
+        let mut typing = session(4096);
+        for _ in 0..(UNDO_DEPTH + 50) {
+            typing.mark();
+            typing.insert(b"x").expect("typed");
+        }
+        assert_eq!(
+            typing.undo_depth(),
+            UNDO_DEPTH,
+            "the oldest mark is dropped, not the newest"
+        );
+        assert_eq!(typing.document_len(), (UNDO_DEPTH + 50) as u64);
+    }
+
+    #[test]
+    fn replacing_a_selection_is_a_delete_and_an_insert() {
+        let mut typing = session(64);
+        typing.insert(b"hello world").expect("typed");
+        typing.replace(6, 11, b"there").expect("replaced");
+        assert_eq!(typing.pending(), b"hello there");
+        assert_eq!(typing.document_len(), 11);
+        assert_eq!(typing.caret(), 11, "the caret ends after what was typed");
+        assert_eq!(
+            typing.sealed_bytes(),
+            0,
+            "a replacement inside the buffer writes nothing"
+        );
+        assert_eq!(typing.spine().slab_count(), 1);
     }
 
     #[test]
