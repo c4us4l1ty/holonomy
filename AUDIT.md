@@ -49,12 +49,74 @@ Listed so they stay dead.
 | OQ-10 | A full resident slab has **no continuation policy** — solved by D-7 and built as D-8/D-9: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; a seal appends the bytes once, renames the source, and corrects one leaf's length in the current root — **no history entry**, so undo never steps through a seal; each byte is written once. `Typing::insert_at` handles mid-document typing by cutting the leaf the caret lands in (pure geometry — the halves name adjacent ranges of one segment, so nothing moves). Deletion is D-11 (a pointer operation; the bytes stay in the log — OQ-14). Not yet: selection. | **closed 2026-11-17 — `typing.rs`** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | **Cluster segmentation: the rules are UAX #29's; the tables are ours.** Segmentation now classifies each code point into a property (CR, LF, Control, Extend, ZWJ, Regional_Indicator, Prepend, SpacingMark, Hangul L/V/T/LV/LVT, Extended_Pictographic, Other) and applies **GB3–GB13 in their numbered order**, carrying the cluster's own state (has it seen Extended_Pictographic, how many regional indicators) so GB11 and GB12/13 decide about the cluster and not the pair (D-16). The old code's real error is gone: it joined anything after a ZWJ — GB9 read as GB11 — so `a`+ZWJ+`b` was one cluster instead of two, an unsafe answer rather than a conservative one. What remains is **two** gaps, and they are different: (a) the property **tables** are hand-written and cover the scripts `docs/UI-SPEC.md` §8 names, general diacritics, variation selectors, tags, joiners and the emoji blocks, so an unlisted mark splits from its base — a coverage gap in data, not a misread rule; and (b) **BiDi reordering is not implemented at all**, because it is a paint-order question and belongs beside the run tree, not in the module that decides byte boundaries. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore still **cannot** be claimed: multi-script cluster honesty is now as good as the tables, and direction has no answer. Replacing the tables with generated UAX-29 data stays Block 9 work; the API surface that has to change is still `cluster.rs` alone. | **open — narrowed 2026-11-18: rules done (D-16), tables and BiDi outstanding** |
-| OQ-12 | **The window is viewport-sized, and now measured on the size the gate names.** The chain — `HeightModel` (O(log n) counted reads), `Spine::slab_span` (one descent), `holonomy_eye::byte_window` (contiguous, holes impossible since D-7) — is swept over a **180 MB / 44,000-leaf** document, every screen. Bytes handed to layout are bounded by one screen plus two leaves, **with the identical bound at 1/1000 the length**; index reads stay ≤ 64 and grow by at most a logarithm. What is still missing is the timing half: seconds need a real shaper and a font, which is Block 6, and a fake shaper would make the number about the fake. Gate 2 therefore stays unclaimed — its *inputs* are measured, its clock is not. | **open — cost inputs measured 2026-11-17; timing needs Block 6's shaper** |
+| OQ-12 | **The window is viewport-sized, and now measured on the size the gate names.** The chain — `HeightModel` (O(log n) counted reads), `Spine::slab_span` (one descent), `holonomy_eye::byte_window` (contiguous, holes impossible since D-7) — is swept over a **180 MB / 44,000-leaf** document, every screen. Bytes handed to layout are bounded by one screen plus two leaves, **with the identical bound at 1/1000 the length**; index reads stay ≤ 64 and grow by at most a logarithm. **Narrowed 2026-11-18 by D-18:** the chain now has its missing link — `window_text` reads the window out of the resident set and the pending buffer, so "here is a scroll position" reaches "here is the text to shape" — and it faults the leaves of one screen whether the document has eight leaves or 4,096, and faults nothing on a second look. What is still missing is the timing half: seconds need a real shaper and a font, which is Block 6, and a fake shaper would make the number about the fake. Gate 2 therefore stays unclaimed — its *inputs* are measured end to end, its clock is not. | **open — chain complete and measured 2026-11-18; timing needs Block 6's shaper** |
 | OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
 | OQ-14 | **Deletion does not erase.** `Typing::delete` removes a range from the tree, which is a pointer operation: no bytes written, no segment sealed. The deleted text therefore stays in the world-line as ciphertext, decryptable by anyone holding the passphrase. That is inherent to an authenticated append-only log — the log *is* the history, and the document is a view of it — and it is also why the log is trustworthy. A policy is needed (segment-by-segment re-encryption in a compaction pass, or a per-document epoch the user is expected to rotate), and until one exists "deleted" must not be read as "erased" in any user-facing claim. Found 2026-11-17 while implementing deletion. | **open — found 2026-11-17, no policy yet** |
-| OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8 — which the resident set refuses when it faults that leaf in. The asymmetry is the finding: offsets inside the open buffer are checked (`SlabText` holds the bytes and returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. Fixing it means putting the reader and the edit in the same place, which is Block 6's shell; the intended architecture already discharges the precondition because the caret is a cluster boundary from `holonomy-eye`'s segmentation. What is missing is a check that the two agree — a test that every caret the Eye can produce is a character boundary of the document — and that test needs the reader too. | **open — found 2026-11-17 by the deletion bug hunt; the buffer path refuses, the sealed path cannot** |
+| OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8 — which the resident set refuses when it faults that leaf in. The asymmetry is the finding: offsets inside the open buffer are checked (`SlabText` holds the bytes and returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. **Narrowed 2026-11-18 by D-18:** the asymmetry is now *detected* at the first place that reads sealed bytes — `window_text` refuses a window whose edge falls inside a character, naming the offending offset, instead of handing half a character to a renderer. Preventing the cut is still open: it needs the reader and the edit in the same place, which is Block 6's shell, and the intended architecture already discharges the precondition because the caret is a cluster boundary from `holonomy-eye`'s segmentation. What is missing is the check that the two agree — a test that every caret the Eye can produce is a character boundary of the document — and that test still wants the shell's loop. | **open — detected 2026-11-18; the check still needs Block 6** |
 
 ## Audit trail
+
+- **2026-11-18 — D-18 — the Eye reads its window, and the reader is where OQ-15 stops being an
+  assumption.** Block 5's chain had a hole in the middle: `byte_window` said *which bytes* are on
+  screen and `layout_styled` shaped *some text*, and nothing in the tree joined them — the Eye had
+  no reader, so the window was a number in a test and never text. That hole is now `window_text`.
+
+  **It is a join, not a reader.** The document already had one reader — `select::copy`, D-13 — and
+  it is the only one that resolves a leaf's source through the register. A second reader in the Eye
+  would be a second place that decides whether a leaf is a buffer or a segment, which is exactly
+  the bug D-13 was found by (reading `span.slab().segment()` directly asks the world-line for a
+  provisional id). So `window_text` hands its byte range to that reader as a selection and decodes
+  what comes back. The Eye obeys the constitutional clause by construction: it can only hold text
+  that a window covers.
+
+  **What is measured.** A three-leaf screen faults three segments, on a document of eight leaves
+  and on one of four thousand and ninety-six — the same count at 512× the length, which is the
+  input half of gate 2 stated as a number rather than as a complexity class. Reading the same
+  screen twice faults nothing new (the resident set answers, the world-line is not asked), and an
+  open leaf is read out of the pending buffer, so typing is visible to the Eye without the Eye
+  knowing that buffers exist. What is **not** measured is time: the shaper is still the fake one,
+  and a fake would make the number about the fake. Gate 2 stays unclaimed, with its caller built.
+
+  **Two edges, stated rather than smooth.**
+  1. A window is assembled into an owned `String`, one per frame, because a viewport is contiguous
+     in the document and not in memory. That allocation is the paint path's, not the keystroke
+     path's — the keystroke path is still measured allocation-free — and its size is the window's,
+     which is what keeps the law true while making it a copy.
+  2. A window whose edge falls inside a character is **refused** with the offset of the offending
+     byte. OQ-15 said the sealed side cannot check where a cut lands; the reader cannot prevent
+     the cut, but it is the first place that can *detect* one, and refusing is the only honest
+     answer: half a character is not text, and handing it to a renderer would be mojibake with a
+     caret in it.
+
+- **2026-11-18 — D-17 — a history step records a state that can be reproduced, not the state as it
+  stands.** Found by hunting for bugs in the paths the next slice stands on, and it is one family
+  with two members: both directions of the history were recording something that could not be
+  reproduced, and both failures are silent — the document stays structurally valid and reads wrong.
+
+  **The length had no position.** `Mark::Live` recorded how long the open leaf was and not where it
+  was, which is enough while the leaf is open and wrong the moment undo takes it out of the tree.
+  Undo of a mark whose source the *action* had opened removes the leaf and leaves the caret at the
+  mark's offset; redo then re-attached the text at that caret, because `next_at` was carrying two
+  meanings — where the caret goes, and where the leaf goes. Typing `XY` at offset 1 in `abcdef`,
+  undoing and redoing gave `adefXY` instead of `aXYdef`: the same bytes, a different document, no
+  error anywhere. A mark now records `at` as well as `len`, and only the offset is used for
+  placement.
+
+  **The root was recorded over bytes it was about to throw away.** A root step is a pointer, and
+  undo of one discards whatever is open — safely, because a seal ends the epoch, so anything still
+  open was never written (D-15). But the *redo* step was built from the live tree, which still had
+  the open leaf in it. `delete`, type, undo, redo therefore restored a spine whose leaf named a
+  source that undo had abandoned and whose bytes were gone: `document_len` counted two bytes no
+  reader could produce, and the next keystroke would have split that phantom leaf and left it in
+  the document forever. The fix is `settled_spine`: a root step records the tree without the open
+  leaf, which is the state undo can actually come back to. `leave` is now the single place undo and
+  redo compute what they are leaving behind, so the two directions cannot disagree again.
+
+  **Why this class slips through.** Every assertion in the suite asked about lengths, leaf counts
+  and written bytes — all of them true in both failures. What catches it is asking the *register*
+  whether each leaf names a source with text behind it, and asking the spanning geometry whether a
+  re-inserted leaf is where it was. Two tests do exactly that, and neither would have been written
+  from the code's own docs, because the docs described the intent correctly.
 
 - **2026-11-18 — D-16 — segmentation is the rules, and the tables are the residue.** OQ-11 said the
   Eye's cluster segmentation was a hand-written *approximation* — and it was, in the way that matters

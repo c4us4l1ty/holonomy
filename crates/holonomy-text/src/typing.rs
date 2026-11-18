@@ -66,6 +66,12 @@
 //! Both halves are rings: a thousand lengths and sixty-four roots, so the history's memory is
 //! bounded by the tree's depth and not by the number of edits. A seal ends the epoch, because a
 //! root recorded before an append would orphan the segment it names (OQ-8).
+//!
+//! **A step records a state that can be reproduced, not the state as it stands.** That is the rule
+//! `leave` exists for, and both halves pay it: a length alone does not say *where* the open leaf
+//! was, so a mark carries the offset too, or redo re-appends the text at the caret; and a root
+//! recorded over pending typing would name a leaf whose bytes undo discards, so a root step records
+//! the **settled** tree — the one without the open leaf (D-17).
 
 use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
@@ -164,8 +170,14 @@ enum Mark {
         /// The document offset the next byte would have landed at.
         at: u64,
     },
-    /// The source that is still open held this many bytes.
+    /// The source that is still open held this many bytes, at this document offset.
+    ///
+    /// The offset is part of the state, not a convenience: undo can take the leaf out of the tree
+    /// and leave the caret somewhere else, so redo that put the text back at the **caret** would
+    /// move it — the bytes would be the same and the document would read differently.
     Live {
+        /// The document offset the open leaf sits at — where redo must put it back.
+        at: u64,
         /// The open source's length at that moment.
         len: usize,
     },
@@ -355,21 +367,7 @@ impl<S: SegmentSink> Typing<S> {
         let Some(step) = self.steps.pop() else {
             return Ok(false);
         };
-        let current = match step {
-            Step::Mark(mark) => {
-                let current = Step::Mark(self.current_mark());
-                self.restore_mark(mark)?;
-                current
-            }
-            Step::Root { spine, at } => {
-                let current = Step::Root {
-                    spine: self.spine.clone(),
-                    at: self.caret(),
-                };
-                self.restore_root(spine, at)?;
-                current
-            }
-        };
+        let current = self.leave(step)?;
         self.undone.push(current);
         Ok(true)
     }
@@ -383,21 +381,7 @@ impl<S: SegmentSink> Typing<S> {
         let Some(step) = self.undone.pop() else {
             return Ok(false);
         };
-        let current = match step {
-            Step::Mark(mark) => {
-                let current = Step::Mark(self.current_mark());
-                self.restore_mark(mark)?;
-                current
-            }
-            Step::Root { spine, at } => {
-                let current = Step::Root {
-                    spine: self.spine.clone(),
-                    at: self.caret(),
-                };
-                self.restore_root(spine, at)?;
-                current
-            }
-        };
+        let current = self.leave(step)?;
         self.steps.push(current);
         Ok(true)
     }
@@ -429,10 +413,52 @@ impl<S: SegmentSink> Typing<S> {
         self.insert_at(start, bytes)
     }
 
+    /// Leaves `step`'s state, returning the state it left *from*.
+    ///
+    /// Undo and redo are the same move in opposite directions, and both have to answer the same
+    /// question: what state am I about to be able to come back to? That answer is not always the
+    /// session as it stands, and saying so in one place is what keeps the two directions from
+    /// disagreeing.
+    ///
+    /// For a root the answer is the tree **without** whatever is open. Undo of a root drops the
+    /// pending bytes — a root recorded before an append would orphan the segment that append wrote
+    /// (OQ-8), so a seal ends the epoch and anything still open was never written — and a step
+    /// recorded from the live tree would name a leaf over bytes that undo threw away. Redo would
+    /// then restore a document claiming text nobody can produce. `settled_spine` is the state that
+    /// can actually be come back to.
+    fn leave(&mut self, step: Step) -> Result<Step, TypingError> {
+        let current = match &step {
+            Step::Mark(_) => Step::Mark(self.current_mark()),
+            Step::Root { .. } => Step::Root {
+                spine: self.settled_spine()?,
+                at: self.open.map_or_else(|| self.caret(), |open| open.at),
+            },
+        };
+        match step {
+            Step::Mark(mark) => self.restore_mark(mark)?,
+            Step::Root { spine, at } => self.restore_root(spine, at)?,
+        }
+        Ok(current)
+    }
+
+    /// The tree as it would be if the pending bytes were dropped: the open leaf's registered bytes
+    /// taken out.
+    ///
+    /// This is the sealed shape of the session, and it is what a root step records so that redo
+    /// cannot resurrect a leaf whose source undo abandoned.
+    fn settled_spine(&self) -> Result<Spine, TypingError> {
+        let Some(open) = self.open else {
+            return Ok(self.spine.clone());
+        };
+        let end = open.at + u64::from(open.registered);
+        Ok(self.spine.remove_range(open.at, end)?)
+    }
+
     /// The state the session is in now, as a mark would record it.
     fn current_mark(&self) -> Mark {
         match self.open {
-            Some(_) => Mark::Live {
+            Some(open) => Mark::Live {
+                at: open.at,
                 len: self.live_len(),
             },
             None => Mark::Sealed { at: self.caret() },
@@ -442,8 +468,13 @@ impl<S: SegmentSink> Typing<S> {
     /// Moves the session to a length, touching at most one leaf — never bytes.
     fn restore_mark(&mut self, mark: Mark) -> Result<(), TypingError> {
         match (mark, self.open) {
-            (Mark::Live { len }, Some(_)) => self.set_live(len),
-            (Mark::Live { len }, None) => self.attach(len),
+            (Mark::Live { len, .. }, Some(_)) => self.set_live(len),
+            (Mark::Live { at, len }, None) => {
+                // Redo of "there was no source": the leaf comes back where it was, which is the
+                // mark's offset and not `next_at`, because undo left the caret at the mark's.
+                self.next_at = Some(at.min(self.spine.len()));
+                self.attach(len)
+            }
             (Mark::Sealed { at }, Some(open)) => {
                 // The source was opened by the action being undone: its leaf leaves the spine and
                 // the register abandons it. The bytes stay in the buffer, so redo can restore them.
@@ -589,7 +620,7 @@ impl<S: SegmentSink> Typing<S> {
     /// Pops every mark whose promise this edit breaks: a mark says the bytes before its length are
     /// unchanged, and an edit below that length changes them.
     fn pop_marks_above(&mut self, len: usize) {
-        while let Some(Step::Mark(Mark::Live { len: mark })) = self.steps.last() {
+        while let Some(Step::Mark(Mark::Live { len: mark, .. })) = self.steps.last() {
             if *mark <= len {
                 break;
             }
@@ -1140,6 +1171,67 @@ mod tests {
         assert!(typing.pending().is_empty(), "nothing is open");
         assert_eq!(typing.sources().open_count(), 0);
         assert_eq!(typing.caret(), 2);
+    }
+
+    #[test]
+    fn redo_of_a_cut_does_not_resurrect_typing_that_undo_discarded() {
+        let mut typing = session(64);
+        typing.insert(b"0123456789").expect("typed");
+        typing.flush().expect("flushed");
+        typing.delete(2, 4).expect("deleted");
+        typing.insert(b"xy").expect("typed");
+        assert!(typing.undo().expect("undone"));
+        assert_eq!(typing.document_len(), 10, "the cut text came back");
+        assert!(typing.redo().expect("redone"));
+        // Undo discarded the pending `xy`: a seal would have ended the root's epoch, so those
+        // bytes were never in the world-line. Redo must therefore re-apply the cut **without**
+        // them — a step recorded from the live tree would name a leaf over bytes undo threw away,
+        // and the document would claim two bytes nobody can produce.
+        assert_eq!(typing.document_len(), 8);
+        assert_eq!(typing.spine().len(), 8);
+        assert!(typing.pending().is_empty(), "nothing is open after a redo");
+        for span in typing.spine().spans_in(0, 8) {
+            assert!(
+                typing
+                    .sources()
+                    .locate(span.slab().segment())
+                    .segment()
+                    .is_some(),
+                "every leaf names a sealed segment, not an abandoned source"
+            );
+        }
+        // And what redo restored is still a document: the cut can be taken back again.
+        assert!(typing.undo().expect("undone again"));
+        assert_eq!(typing.document_len(), 10);
+    }
+
+    #[test]
+    fn redo_of_a_mid_document_insert_puts_the_text_back_where_it_was() {
+        let mut typing = session(64);
+        typing.insert(b"abcdef").expect("typed");
+        typing.flush().expect("flushed");
+        typing.mark();
+        typing.insert_at(1, b"XY").expect("typed");
+        assert_eq!(typing.document_len(), 8);
+        assert!(typing.undo().expect("undone"));
+        assert_eq!(typing.document_len(), 6, "the text is out of the document");
+        assert!(typing.redo().expect("redone"));
+        // Undo took the leaf out of the tree and left the caret at the end; the mark remembers
+        // where the leaf was, so redo puts it back there instead of appending it — the bytes are
+        // the same either way, and the document reads differently.
+        assert_eq!(typing.document_len(), 8);
+        assert_eq!(typing.pending(), b"XY");
+        assert_eq!(
+            typing.caret(),
+            3,
+            "the caret sits after the re-inserted text"
+        );
+        let spans = typing.spine().spans_in(0, 8);
+        assert_eq!(spans.len(), 3, "a character, the open leaf, then the rest");
+        assert_eq!(spans[1].offset(), 1, "the open leaf is back at offset one");
+        assert_eq!(spans[1].len(), 2);
+        assert!(typing.sources().locate(spans[1].slab().segment()).is_open());
+        assert_eq!(spans[2].offset(), 3);
     }
 
     #[test]

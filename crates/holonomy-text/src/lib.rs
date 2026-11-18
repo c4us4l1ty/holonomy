@@ -67,7 +67,7 @@ pub mod typing;
 pub use commit::{commit_slab, Appended, CommitError, Committed, SegmentSink, Witness};
 pub use draft::{Draft, DraftError, LiveHit, LiveSpan};
 pub use residency::{ResidencyError, ResidentSet, SegmentSource};
-pub use select::{CopyError, Selection};
+pub use select::{copy, CopyError, Selection};
 pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
 pub use source::{is_provisional, Location, OpenSources, SealError};
 pub use spine::{History, Spine, SpineError};
