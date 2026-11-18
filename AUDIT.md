@@ -55,7 +55,54 @@ Listed so they stay dead.
 | OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8. The asymmetry was the finding: offsets inside the open buffer are checked (`SlabText` returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. **Narrowed by D-18:** the reader refuses a window whose edge falls inside a character, naming the offset. **Closed for the session by D-19:** the check OQ-15 asked for exists — `holonomy-shell` holds the reader and the edit in one place, and its test asserts over every caret every frame offers that the byte is a character boundary of the frame's text and hit-tests back to itself. What remains is not a missing check but a missing *type*: the offset is still a `u64` a caller can get wrong, and a caller that bypasses the Eye still asks for a mid-character cut — which is now refused at read time instead of silently rendered. Making it impossible would need an offset type the Eye alone can mint, which is a Block 6 API decision, not a hole in this one. | **closed 2026-11-18 — the caret check passes; a bypassing caller is refused at read** |
 
 | OQ-16 | **A leaf's height is measured apart from the line it is in, so the scroll bar counts a line the document does not have.** `reflow` laid each leaf out alone — necessarily, because measuring the continuous document would mean decrypting it — so a paragraph continuing across a boundary broke there in the measurement, and the per-leaf sum exceeded the continuous layout's height by up to one line per crossed boundary. **Closed by D-20**: the line is carried across the boundary as two words (the x the next cluster sits at, and whether the line began earlier), `layout_styled_from` lays a piece out as the continuation of a line, and `reflow`'s total now equals one continuous layout of the same text — proven by a test that lays the whole document out once. The fix also closed a bug that had not been written down: a frame used to begin at a leaf, which re-wrapped the paragraph from a point the document never breaks at. | **closed 2026-11-18 — the partition is exact, and frames begin at lines** |
+| OQ-17 | **A window that begins at a leaf decides its first cluster without the text before it.** Coverage (OQ-11) says segmentation is a pure function of the text; it is a function of the text *from the window's start*, and a leaf cut can fall inside a cluster, so the first cluster of such a window is segmented as if the cluster began there. `reflow`/`measure_leaf` and `line_start`/`caret_place` lay leaves out alone, so a leaf whose first cluster is a continuation can pay the wrong advance (a height a line off, in either direction, depending on the shaper) and can then wrap where the document does not — while a frame cannot: a frame begins at a line, and a line break is between clusters (D-20). D-21 fixed the two *editing* symptoms with one leaf of context and stated the residual bound (a cluster crossing two boundaries is still split). The design is D-20's shape: the carry gains the UAX #29 state beside the `x` (`previous` property, the pictographic run, the regional-indicator count), `Clusters` gains `continuing(text, state)` and `carry()`, and `layout_styled_from` gains the state, so `Measured` stores exactly what places a leaf's first cluster *and* what segments it. It changes the Eye's API and the shell's carry together, and a half-done version (state without the boundary filter, or the filter without the state) is worse than the stated bound, so it is a slice of its own. Nothing here is a cryptographic or durability claim. | **open — design is D-20's shape** |
 ## Audit trail
+
+- **2026-11-18 — D-21 — a hunt across the tree: four defects, three fixed, one filed.** The sweep
+  was over boundary arithmetic — every `+ 1`, every `- 1`, every "and then the next leaf" — because
+  that is where this codebase's bugs have all been, and it found four. Three are fixed here with a
+  test that fails without the fix; the fourth is OQ-17, filed with its design rather than
+  half-built.
+
+  **1. GB11 let a second ZWJ reach across itself** (`holonomy-eye/src/cluster.rs`). The rule is
+  `Pictographic Extend* ZWJ × Pictographic`, and the implementation kept the pictographic flag alive
+  *through* the joiner — which is what makes `👨‍👩‍👧` one cluster, and also what made `👨‍‍👩` one when
+  the standard says two: a second ZWJ's left context is a ZWJ, which is not `Extend*`. The flag now
+  remembers the run *behind* the joiner and the joiner ends it.
+  `a_second_zwj_ends_the_pictographic_run` pins both directions — the family sequence still joins,
+  the double joiner does not.
+
+  **2. A `\r\n` split by a leaf cut was charged two lines** (`holonomy-shell`). The Eye treats CRLF
+  as **one** break, and a leaf cut is a byte count — so a hundred-byte paste of `abc\r\n` into
+  sixty-four-byte leaves puts the twenty-first break's CR at the last byte of one leaf and its LF at
+  the first byte of the next. Laid out apart, the LF started a line the document does not have: a
+  phantom blank line, and twenty units of scroll for a twenty-one-line document. The carry now says
+  whether the predecessor ended on a bare CR, and a leaf that did drops that LF before it is laid
+  out. `a_crlf_split_across_a_leaf_is_one_break` compares the measured total against one continuous
+  layout rather than against arithmetic.
+
+  **3. `resize` left the scroll past the end** (`holonomy-shell`). The maximum scroll is
+  `total − viewport`, a function of the viewport — so making the window *taller* could leave the
+  position past the end, with the document's last line at the top of an empty screen and no way back
+  except scrolling up. A width change already emptied the geometry; a viewport change did nothing.
+  The clamp lives in one place, so the fix asks that place again.
+  `a_taller_viewport_pulls_the_scroll_back_inside_the_document` fails with the old `resize`.
+
+  **4. Backspace and delete stopped at the leaf boundary** (`holonomy-shell`). Same cause as (2):
+  a leaf is cut on a byte count, so a combining mark or a joiner can be the *first* byte of a leaf
+  with its base at the *last* byte of the one before. `cluster_before` read only the caret's leaf and
+  asked the segmentation where the last cluster began — which was the mark, so backspace deleted half
+  a grapheme and left a bare base behind; `cluster_after` had the mirror bug on delete. Both now read
+  one leaf of left (respectively right) context, and the statement of the bound is in OQ-17: a
+  cluster that crosses **two** boundaries is still split.
+
+  **What the sweep checked and did not fault.** The Fenwick index (`set`, `push`, `prefix`,
+  `leaf_at`, `window`) against its rebuild-comparison tests; the resident set's budget arithmetic
+  (`retain`, `ensure`, admission against allocated capacity); `select::copy`'s offset derivation,
+  which is the one place a leaf's segment offset and its document offset are mixed; the MMR's peak
+  carry and its `from_peak_bytes` round trip; the seal's nonce draw (one `getrandom` per seal, no
+  counter to reuse) and its CMT-4 commitment. Each of those has a test that can fail for the reason
+  it exists, which is why "no finding" is worth writing down rather than silence.
 
 - **2026-11-18 — D-20 — a leaf boundary is not a line boundary.** D-19 said the geometry was a
   document's, and it was not: it was the leaves'. Two bugs had the same cause — the wrap state at a

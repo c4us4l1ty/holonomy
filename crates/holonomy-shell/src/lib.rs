@@ -25,8 +25,10 @@
 //! * A leaf's height is the height of the **lines that start in it**. That partitions the document
 //!   exactly (every line starts once, so the heights sum to the height of one continuous layout of
 //!   the document) which is why the index also stores **where each leaf's first cluster sits in its
-//!   line**. Without that carry a paragraph split across two leaves would break where the leaf
-//!   ends, and the scroll bar would grow a line per boundary (AUDIT OQ-16, D-20).
+//!   line, and whether the leaf ended on a bare CR**. Without the first, a paragraph split across
+//!   two leaves would break where the leaf ends and the scroll bar would grow a line per boundary
+//!   (AUDIT OQ-16, D-20); without the second, a `\r\n` whose two bytes fall either side of a leaf
+//!   cut would be charged two lines instead of one (AUDIT D-21).
 //! * Because the carry is stored, a frame can begin at a **line** rather than at a leaf. A screen
 //!   that began at a leaf boundary would re-wrap the paragraph from a point the document never
 //!   breaks at, and every cluster below it would be drawn where the document does not put it.
@@ -298,6 +300,10 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         }
         self.width = width;
         self.viewport = viewport;
+        // The maximum scroll is a function of the viewport, not of the document: a taller window
+        // can leave the current position past the end, showing the document's last line at the top
+        // of an empty screen. `scroll_to` is the one place that clamp lives, so it is asked again.
+        self.scroll_to(self.scroll);
     }
 
     /// Types `text` at the caret, replacing the selection first if there is one.
@@ -497,16 +503,17 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
                 continue;
             };
             let (start, end) = (span.offset(), span.offset() + span.len());
-            let carried = self.measured.offset(leaf);
+            let carried = self.measured.carry(leaf);
             let read = self.read(start, end)?;
+            let (text, from) = leaf_text(read.text(), start, carried);
             let layout = layout_styled_from(
-                StyledText::plain(read.text()),
-                start,
-                carried,
+                StyledText::plain(text),
+                from,
+                carried.x,
                 self.width,
                 &self.shaper,
             );
-            let base = if carried.is_zero() {
+            let base = if carried.x.is_zero() {
                 Fixed::ZERO
             } else {
                 layout
@@ -571,7 +578,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     pub fn reflow(&mut self) -> Result<(), ShellError> {
         let leaves = self.typing.spine().slab_count();
         self.measured = Measured::new(leaves as usize);
-        let mut carried = Fixed::ZERO;
+        let mut carried = Carry::default();
         for leaf in 0..leaves {
             let (height, next) = self.measure_leaf(leaf, carried)?;
             self.measured.set(leaf as usize, height, carried);
@@ -590,24 +597,24 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// # Errors
     ///
     /// A leaf the document could not read, with the same reasons as [`Self::frame`].
-    fn measure_leaf(&mut self, leaf: u32, carried: Fixed) -> Result<(Fixed, Fixed), ShellError> {
+    fn measure_leaf(&mut self, leaf: u32, carried: Carry) -> Result<(Fixed, Carry), ShellError> {
         let Some(span) = self.typing.spine().slab_span(leaf) else {
             return Ok((Fixed::ZERO, carried));
         };
         let (start, end) = (span.offset(), span.offset() + span.len());
         let read = self.read(start, end)?;
-        let text = read.text();
+        let (text, from) = leaf_text(read.text(), start, carried);
         let layout = layout_styled_from(
             StyledText::plain(text),
-            start,
-            carried,
+            from,
+            carried.x,
             self.width,
             &self.shaper,
         );
         let lines = layout.lines();
         // The first line is the tail of a line that began in an earlier leaf: it was charged there,
         // and it is not a line of this one.
-        let inherited = usize::from(!carried.is_zero());
+        let inherited = usize::from(!carried.x.is_zero());
         let last = leaf + 1 == self.typing.spine().slab_count();
         let mut height = Fixed::ZERO;
         for (index, line) in lines.iter().enumerate() {
@@ -622,9 +629,12 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             }
         }
         let broken = text.ends_with('\n') || text.ends_with('\r');
-        let next = match lines.last() {
-            Some(line) if !broken => line.end_x(),
-            _ => Fixed::ZERO,
+        let next = Carry {
+            x: match lines.last() {
+                Some(line) if !broken => line.end_x(),
+                _ => Fixed::ZERO,
+            },
+            after_cr: text.ends_with('\r'),
         };
         Ok((height, next))
     }
@@ -658,8 +668,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             .spans_in(self.typing.spine(), start, end);
         let document_end = self.typing.document_len();
         let first = leaves.first();
-        for (index, height, offset) in measure_window(&layout, &spans, start, end, document_end) {
-            self.measured.set(first + index, height, offset);
+        let measured = measure_window(&layout, text, &spans, start, end, document_end);
+        for (index, height, carry) in measured {
+            self.measured.set(first + index, height, carry);
         }
 
         let reads = self.measured.heights.reads();
@@ -734,7 +745,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// know, before this runs, how much of the document is on screen.
     fn bootstrap(&mut self) -> Result<(u64, u64, Window, bool), ShellError> {
         let leaves = self.typing.spine().slab_count();
-        let mut carried = Fixed::ZERO;
+        let mut carried = Carry::default();
         let mut height = Fixed::ZERO;
         let mut leaf = 0u32;
         while leaf < leaves {
@@ -762,17 +773,18 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             return Ok(0);
         };
         let (start, end) = (span.offset(), span.offset() + span.len());
-        let carried = self.measured.offset(leaf);
+        let carried = self.measured.carry(leaf);
         let read = self.read(start, end)?;
+        let (text, from) = leaf_text(read.text(), start, carried);
         let layout = layout_styled_from(
-            StyledText::plain(read.text()),
-            start,
-            carried,
+            StyledText::plain(text),
+            from,
+            carried.x,
             self.width,
             &self.shaper,
         );
         let lines = layout.lines();
-        let inherited = usize::from(!carried.is_zero());
+        let inherited = usize::from(!carried.x.is_zero());
         let base = if inherited == 1 {
             lines.first().map_or(Fixed::ZERO, |line| line.height())
         } else {
@@ -818,9 +830,20 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         if at == 0 {
             return Ok(None);
         }
-        let (from, _) = match self.leaf_range(at - 1) {
+        // A leaf is cut on a byte count, not on a cluster boundary: a mark or a joiner can be the
+        // first byte of the leaf holding the caret, with its base at the last byte of the leaf
+        // before. The grapheme a backspace removes starts where its *cluster* starts, so one leaf
+        // of left context is read with the caret's own. The bound is stated: a cluster that
+        // crosses two leaf boundaries is not joined up (AUDIT OQ-17).
+        let (leaf_start, _) = match self.leaf_range(at - 1) {
             Some(range) => range,
             None => (0, at),
+        };
+        let from = if leaf_start == 0 {
+            0
+        } else {
+            self.leaf_range(leaf_start - 1)
+                .map_or(0, |(start, _)| start)
         };
         let from = from.min(at);
         if from == at {
@@ -839,9 +862,18 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         if at >= document {
             return Ok(None);
         }
-        let (start, end) = match self.leaf_range(at) {
+        // The mirror of `cluster_before`: the cluster that starts at the caret can end in the leaf
+        // after the caret's, so one leaf of right context is read too.
+        let (start, leaf_end) = match self.leaf_range(at) {
             Some((start, end)) => (start, end.min(document)),
             None => (at, document),
+        };
+        let end = if leaf_end < document {
+            self.leaf_range(leaf_end)
+                .map_or(document, |(_, end)| end)
+                .min(document)
+        } else {
+            leaf_end
         };
         let from = at.max(start);
         if from >= end {
@@ -871,25 +903,39 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     }
 }
 
-/// The measured geometry of the document: one height per leaf, and where each leaf's first cluster
-/// sits in its line.
+/// What one leaf hands the next when the document is measured leaf by leaf.
+///
+/// A leaf cut is a byte count, not a line boundary, so a leaf's layout is only meaningful together
+/// with this: where its predecessor's last line had got to, and whether that line ended on a bare
+/// carriage return.
+#[derive(Debug, Clone, Copy, Default)]
+struct Carry {
+    /// How wide the predecessor's last line was when it ended; zero means the leaf begins a line.
+    x: Fixed,
+    /// The predecessor's last byte is a CR, so a LF at the first byte of this leaf is the second
+    /// half of **one** break rather than a line of its own.
+    after_cr: bool,
+}
+
+/// The measured geometry of the document: one height per leaf, and the carry each leaf was measured
+/// with.
 ///
 /// The two travel together because they are invalidated by the same things — an edit or a width
 /// change makes both describe a document that no longer exists — and because a leaf is measured
-/// with both at once. The height is the height of the **lines that start** in the leaf; the offset
-/// is zero for a leaf that begins one, and it is what lets a frame begin at a line rather than at a
-/// leaf (AUDIT D-20).
+/// with both at once. The height is the height of the **lines that start** in the leaf; the carry
+/// is what lets a leaf be laid out as the continuation of the line before it, which is what makes a
+/// frame begin at a line rather than at a leaf (AUDIT D-20).
 #[derive(Debug)]
 struct Measured {
     heights: HeightModel,
-    offsets: Vec<Fixed>,
+    carries: Vec<Carry>,
 }
 
 impl Measured {
     fn new(leaves: usize) -> Self {
         Self {
             heights: HeightModel::new(leaves),
-            offsets: vec![Fixed::ZERO; leaves],
+            carries: vec![Carry::default(); leaves],
         }
     }
 
@@ -905,29 +951,42 @@ impl Measured {
         self.heights.total()
     }
 
-    /// Where `leaf`'s first cluster sits in its line; zero means it begins one.
-    fn offset(&self, leaf: usize) -> Fixed {
-        self.offsets.get(leaf).copied().unwrap_or(Fixed::ZERO)
+    /// The carry `leaf` was measured with; the document's own start for an unmeasured leaf.
+    fn carry(&self, leaf: usize) -> Carry {
+        self.carries.get(leaf).copied().unwrap_or_default()
     }
 
     /// Records what one leaf measured.
-    fn set(&mut self, leaf: usize, height: Fixed, offset: Fixed) {
-        let Some(slot) = self.offsets.get_mut(leaf) else {
+    fn set(&mut self, leaf: usize, height: Fixed, carry: Carry) {
+        let Some(slot) = self.carries.get_mut(leaf) else {
             return;
         };
-        *slot = offset;
+        *slot = carry;
         self.heights.set(leaf, height);
     }
 
     /// Appends a leaf nothing has measured, O(log n).
     fn push(&mut self) {
         self.heights.push(Fixed::ZERO);
-        self.offsets.push(Fixed::ZERO);
+        self.carries.push(Carry::default());
     }
 }
 
-/// What one window measured, for the leaves it measured **in full**: their heights and the x each
-/// one's first cluster is drawn at, indexed from the window's first leaf.
+/// A leaf's text as its layout must see it, and the document offset that text starts at.
+///
+/// One thing is trimmed: a LF at the start of a leaf whose predecessor ended on a CR. The eye
+/// treats `\r\n` as one break, and a leaf cut can fall between the two bytes — a cut is on byte
+/// counts, not on line boundaries. Laid out on its own the LF starts a line the document does not
+/// have, which is a phantom line in the scroll geometry and a blank line on screen.
+fn leaf_text(text: &str, start: u64, carry: Carry) -> (&str, u64) {
+    match text.strip_prefix('\n') {
+        Some(rest) if carry.after_cr => (rest, start + 1),
+        _ => (text, start),
+    }
+}
+
+/// What one window measured, for the leaves it measured **in full**: their heights and the carry
+/// each one hands the next, indexed from the window's first leaf.
 ///
 /// A leaf the window began inside is left out, and its measurement stands: the frame has the lines
 /// from the line it started at, not the leaf's. A leaf the window ended inside was charged only the
@@ -936,11 +995,12 @@ impl Measured {
 /// same height and is the one thing a styled document would have to revisit.
 fn measure_window(
     layout: &Layout<'_>,
+    text: &str,
     spans: &[LiveSpan],
     start: u64,
     end: u64,
     document_end: u64,
-) -> Vec<(usize, Fixed, Fixed)> {
+) -> Vec<(usize, Fixed, Carry)> {
     if spans.is_empty() {
         return Vec::new();
     }
@@ -976,6 +1036,21 @@ fn measure_window(
         .iter()
         .enumerate()
         .filter(|(_, span)| span.offset() >= start && span.offset() + span.len() <= end)
-        .map(|(index, _)| (index, heights[index], offsets[index].unwrap_or(Fixed::ZERO)))
+        .map(|(index, span)| {
+            // The leaf's last byte, read out of the window the frame already holds: a CR there is
+            // what the leaf hands the next one.
+            let within = usize::try_from(span.offset() + span.len() - start).ok();
+            let last = within
+                .and_then(|at| at.checked_sub(1))
+                .and_then(|at| text.as_bytes().get(at));
+            (
+                index,
+                heights[index],
+                Carry {
+                    x: offsets[index].unwrap_or(Fixed::ZERO),
+                    after_cr: last == Some(&b'\r'),
+                },
+            )
+        })
         .collect()
 }
