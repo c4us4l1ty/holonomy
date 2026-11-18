@@ -246,12 +246,9 @@ pub fn copy<R: SegmentSource>(
         let named = span.slab().segment();
         match sources.locate(named) {
             Location::Open { .. } => {
-                if span.slab().start() != 0 {
-                    return Err(CopyError::DraftNotInTheSession {
-                        segment: named,
-                        start: span.slab().start(),
-                    });
-                }
+                // A span clipped to the selection inside an open leaf starts at that offset *in the
+                // buffer*, so a non-zero inner start is normal here and `from` already accounts for
+                // it. What would not be normal is the buffer ending before the span does.
                 let have = open.len();
                 let slice = open
                     .get(from..to)
@@ -456,8 +453,9 @@ mod tests {
         draft
             .record(SlabSpan::new(0, slab), 5)
             .expect("the only draft");
-        let mut sources = OpenSources::new();
-        sources.open();
+        // A register that knows no provisional source: the draft names sealed geometry, so it is
+        // refused before the register is ever consulted about a buffer.
+        let sources = OpenSources::new();
         let mut residents = residency(&[]);
         assert_eq!(
             copy(
@@ -489,7 +487,9 @@ mod tests {
                 Selection::new(0, 3),
                 b"abc",
             ),
-            Err(CopyError::UnknownSource { segment: provisional })
+            Err(CopyError::UnknownSource {
+                segment: provisional
+            })
         );
     }
 
