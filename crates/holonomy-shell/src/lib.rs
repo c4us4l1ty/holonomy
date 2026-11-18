@@ -689,12 +689,19 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     }
 }
 
-/// Which leaves each line's height belongs to.
+/// Which leaves each line's height belongs to — and only those a line starts in.
 ///
-/// A line is charged to the leaf its first byte falls in, which partitions the layout exactly:
-/// every line starts once, so the heights sum to the layout's height to the 64th. A line straddling
-/// two leaves therefore belongs to the leaf it began in, and the document coordinate of a line's
-/// start is the coordinate a scroll position resolves to.
+/// A line is charged to the leaf its first byte falls in, which partitions the layout exactly: every
+/// line starts once, so the heights sum to the layout's height to the 64th. A line straddling two
+/// leaves therefore belongs to the leaf it began in, and the document coordinate of a line's start
+/// is the coordinate a scroll position resolves to.
+///
+/// A leaf that a line merely **crosses** is left out, not written as zero. The frame has no
+/// measurement of that leaf — its own layout would break a line somewhere the window did not — and
+/// writing the zero would erase a height `reflow` measured correctly. The index is therefore a
+/// frame's exact partition where a frame began at the leaf, and the leaf's own measurement
+/// everywhere else; a scroll position is exact at both, and the difference between them is one line
+/// per crossed boundary (AUDIT OQ-16).
 ///
 /// The last line may start exactly at the window's end — the empty line after a trailing newline —
 /// so the lookup clamps into the window rather than dropping it, or the sum would not be exact.
@@ -720,6 +727,7 @@ fn leaf_heights(
     heights
         .into_iter()
         .enumerate()
+        .filter(|(_, height)| !height.is_zero())
         .map(|(index, height)| (window.leaves().first() + index, height))
         .collect()
 }

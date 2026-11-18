@@ -235,6 +235,32 @@ fn reflow_measures_every_leaf_one_at_a_time() {
 }
 
 #[test]
+fn a_frame_does_not_zero_a_leaf_it_only_crosses() {
+    let mut shell = editor(Repeated::new(64));
+    shell.type_text(&repeat_leaf().repeat(64)).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    let measured = shell.heights().total();
+    assert_eq!(measured, Fixed::units(64 * 20));
+
+    // A two-leaf screen filled by **one** line: every leaf measured 20 units on its own, and the
+    // only line in the window starts in the first of them. Writing a zero back for the second
+    // would erase a measurement this frame never made, and the document would silently lose a line
+    // of scroll for as long as the leaf was off screen.
+    let (leaves, lines) = {
+        let frame = shell.frame().expect("a frame");
+        (frame.leaves().len(), frame.layout().lines().len())
+    };
+    assert_eq!(leaves, 2, "two leaves on screen");
+    assert_eq!(lines, 1, "one line across both, so the second is crossed");
+    assert_eq!(
+        shell.heights().total(),
+        measured,
+        "a crossed leaf keeps the height it was measured at"
+    );
+}
+
+#[test]
 fn a_keystroke_on_a_long_document_shapes_only_the_screen() {
     let mut shell = editor(Repeated::new(64));
     shell
