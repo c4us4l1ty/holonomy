@@ -96,6 +96,34 @@ impl Window {
     pub fn contains(&self, leaf: usize) -> bool {
         self.leaves().contains(&leaf)
     }
+
+    /// Exactly `first..end` leaves, with no vertical position.
+    ///
+    /// For a caller whose geometry is not measured yet and that has chosen leaves instead of a
+    /// scroll position — the shell's bootstrap, which knows only that a screen starts at the top.
+    #[must_use]
+    pub const fn of_leaves(first: usize, end: usize) -> Self {
+        Self {
+            first,
+            end,
+            top: Fixed::ZERO,
+            bottom: Fixed::ZERO,
+        }
+    }
+
+    /// No leaves at all: a window that claims none.
+    ///
+    /// For callers that hold bytes but not leaves — the shell's bootstrap before any height has
+    /// been measured, and its scans for the cluster boundary beside the caret.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            first: 0,
+            end: 0,
+            top: Fixed::ZERO,
+            bottom: Fixed::ZERO,
+        }
+    }
 }
 
 /// One measured height per leaf, with a Fenwick tree over them.
@@ -182,6 +210,44 @@ impl HeightModel {
             self.tree[cell] += delta;
             cell += cell & cell.wrapping_neg();
         }
+    }
+
+    /// Appends a leaf at the end, O(log n).
+    ///
+    /// The shell's tail-append case: typing at the document's end adds one leaf, and rebuilding the
+    /// index for it would throw away every measured height in the document to learn one number. A
+    /// zero height is the honest value for a leaf nothing has laid out yet.
+    ///
+    /// The cell an append creates is **built**, not started at zero: it covers the leaves in
+    /// `(i - lowbit(i), i]`, and a cell left at zero would drop the leaf below it from every prefix
+    /// above. The test compares appends against a rebuild rather than against arithmetic, because
+    /// that mistake is invisible until an index reaches a power of two.
+    pub fn push(&mut self, height: Fixed) {
+        debug_assert!(
+            !height.sixtyfourths().is_negative(),
+            "heights are not negative"
+        );
+        self.heights.push(height);
+        // The new leaf's cell covers the `block` leaves that end at it, and it is created **here**
+        // — not by an update loop, which can only reach cells that already exist. Cell `i` covers
+        // `i - lowbit(i) < leaf <= i`, so the leaves below the new one that already have cells are
+        // summed in as it is built; a cell started at zero would drop them from every prefix above
+        // it, which is a total that silently under-counts until something appends past a power of
+        // two.
+        let index = self.heights.len();
+        let block = index & index.wrapping_neg();
+        let mut value = height;
+        let mut below = index - 1;
+        while below > index - block {
+            value += self.tree[below];
+            below -= below & below.wrapping_neg();
+        }
+        debug_assert_eq!(
+            self.tree.len(),
+            index,
+            "one cell per leaf plus the unused cell zero"
+        );
+        self.tree.push(value);
     }
 
     /// The total height of the document, O(log n).
@@ -392,6 +458,55 @@ mod tests {
         assert_eq!(model.total(), Fixed::ZERO);
         assert_eq!(model.len(), 4);
         assert!(!model.is_empty());
+    }
+
+    #[test]
+    fn an_appended_leaf_costs_a_log_and_agrees_with_a_rebuild() {
+        let mut pushed = model(&[3, 0, 7, 1]);
+        let rebuilt = model(&[3, 0, 7, 1, 5]);
+        pushed.push(Fixed::units(5));
+        assert_eq!(pushed.len(), 5);
+        assert_eq!(pushed.total(), rebuilt.total());
+        assert_eq!(pushed.height(4), Fixed::units(5));
+        for leaf in 0..=5 {
+            assert_eq!(pushed.prefix(leaf), rebuilt.prefix(leaf), "prefix {leaf}");
+        }
+        for y in 0..13 {
+            assert_eq!(
+                pushed.leaf_at(Fixed::units(y)).map(|(leaf, _)| leaf),
+                rebuilt.leaf_at(Fixed::units(y)).map(|(leaf, _)| leaf),
+                "at {y}"
+            );
+        }
+        // An appended zero is a leaf nothing has measured, and it changes no sum — but it creates
+        // the cell that covers the leaf before it, which is where a cell started at zero loses
+        // that leaf from every prefix above it.
+        pushed.push(Fixed::ZERO);
+        let rebuilt = model(&[3, 0, 7, 1, 5, 0]);
+        assert_eq!(pushed.len(), rebuilt.len());
+        assert_eq!(pushed.total(), rebuilt.total());
+        assert_eq!(pushed.prefix(6), rebuilt.prefix(6));
+
+        // Cells cover two leaves, then four, then eight: every append that reaches a power of two
+        // has to absorb the leaves inside the cell it creates.
+        let mut heights = vec![3, 0, 7, 1, 5, 0];
+        for added in [2, 0, 9, 4, 6, 1] {
+            heights.push(added);
+            pushed.push(Fixed::units(added));
+            let rebuilt = model(&heights);
+            assert_eq!(pushed.len(), rebuilt.len());
+            assert_eq!(pushed.total(), rebuilt.total(), "after appending {added}");
+            for leaf in 0..=pushed.len() {
+                assert_eq!(pushed.prefix(leaf), rebuilt.prefix(leaf), "prefix {leaf}");
+            }
+            for y in 0..32 {
+                assert_eq!(
+                    pushed.leaf_at(Fixed::units(y)).map(|(leaf, _)| leaf),
+                    rebuilt.leaf_at(Fixed::units(y)).map(|(leaf, _)| leaf),
+                    "at {y} after appending {added}"
+                );
+            }
+        }
     }
 
     #[test]

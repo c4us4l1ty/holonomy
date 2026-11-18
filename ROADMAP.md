@@ -245,9 +245,13 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
   scripts at 8 zooms × 5 DPIs, on a fake shaper.
 - A Fenwick height model over leaf heights exists, and its cost is *counted* rather than asserted
   (a viewport over 2^18 leaves costs < 160 index reads; 16× the leaves costs < 2× the reads).
-- Not yet: the Spine wiring that turns a leaf range into windowed text (so gate 2 has an index but
-  no caller — OQ-12), real UAX-29 segmentation and BiDi reordering (gate 3), and a real shaper
-  (Block 8), without which L-8 stays `spec` rather than `enforced`.
+- The Spine wiring exists: `byte_window` turns a leaf range into a byte range, `window_text` reads it
+  out of the resident set and the pending buffer, and `holonomy-shell` runs the loop that turns a
+  scroll position into a laid-out frame and writes the measured heights back (D-18, D-19). Gate 2's
+  *inputs* are therefore measured end to end on a 4,000-leaf document.
+- Not yet: BiDi reordering (gate 3), real UAX-29 **property tables** (the rules are the standard's as
+  of D-16), a real shaper (Block 8), and seconds rather than counts for gate 2 — without those, L-8
+  stays `spec` rather than `enforced`.
 
 **GATES**
 - [ ] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
@@ -264,6 +268,14 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
 Everything before this block is plumbing. This is the first thing a user can hold, and it
 already obeys every constitutional law: viewport plaintext, one file, password-only,
 world-line history internal (no history UI yet), smooth at any size.
+
+**Status (2026-11-18) — none of this block's gates claimed, and no pixel drawn.** Its *headless
+half* exists as `holonomy-shell` (D-19): intents (type, backspace, delete, select, click, drag,
+undo, redo, scroll, resize, zoom) produce frames, the frames measure the heights the Eye indexes,
+and the caret-boundary check OQ-15 asked for passes over every caret a frame offers. What is not
+here: GPUI, quiet-md's page, a font, a palette, IME, autosave, the unlock screen, and every gate
+in this block — which are about a shipped app on reference hardware and cannot be faked by a
+headless loop.
 
 **Deliverables**
 - GPUI shell built on **quiet-md** ([s1dashu/quiet-md](https://github.com/s1dashu/quiet-md), MIT):
