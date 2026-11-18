@@ -96,6 +96,34 @@ impl Window {
     pub fn contains(&self, leaf: usize) -> bool {
         self.leaves().contains(&leaf)
     }
+
+    /// Exactly `first..end` leaves, with no vertical position.
+    ///
+    /// For a caller whose geometry is not measured yet and that has chosen leaves instead of a
+    /// scroll position — the shell's bootstrap, which knows only that a screen starts at the top.
+    #[must_use]
+    pub const fn of_leaves(first: usize, end: usize) -> Self {
+        Self {
+            first,
+            end,
+            top: Fixed::ZERO,
+            bottom: Fixed::ZERO,
+        }
+    }
+
+    /// No leaves at all: a window that claims none.
+    ///
+    /// For callers that hold bytes but not leaves — the shell's bootstrap before any height has
+    /// been measured, and its scans for the cluster boundary beside the caret.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            first: 0,
+            end: 0,
+            top: Fixed::ZERO,
+            bottom: Fixed::ZERO,
+        }
+    }
 }
 
 /// One measured height per leaf, with a Fenwick tree over them.
@@ -180,6 +208,25 @@ impl HeightModel {
         let mut cell = leaf + 1;
         while cell < self.tree.len() {
             self.tree[cell] += delta;
+            cell += cell & cell.wrapping_neg();
+        }
+    }
+
+    /// Appends a leaf at the end, O(log n).
+    ///
+    /// The shell's tail-append case: typing at the document's end adds one leaf, and rebuilding the
+    /// index for it would throw away every measured height in the document to learn one number. A
+    /// zero height is the honest value for a leaf nothing has laid out yet.
+    pub fn push(&mut self, height: Fixed) {
+        debug_assert!(
+            !height.sixtyfourths().is_negative(),
+            "heights are not negative"
+        );
+        self.heights.push(height);
+        self.tree.push(Fixed::ZERO);
+        let mut cell = self.heights.len();
+        while cell < self.tree.len() {
+            self.tree[cell] += height;
             cell += cell & cell.wrapping_neg();
         }
     }
@@ -392,6 +439,30 @@ mod tests {
         assert_eq!(model.total(), Fixed::ZERO);
         assert_eq!(model.len(), 4);
         assert!(!model.is_empty());
+    }
+
+    #[test]
+    fn an_appended_leaf_costs_a_log_and_agrees_with_a_rebuild() {
+        let mut pushed = model(&[3, 0, 7, 1]);
+        let mut rebuilt = model(&[3, 0, 7, 1, 5]);
+        pushed.push(Fixed::units(5));
+        assert_eq!(pushed.len(), 5);
+        assert_eq!(pushed.total(), rebuilt.total());
+        assert_eq!(pushed.height(4), Fixed::units(5));
+        for leaf in 0..=5 {
+            assert_eq!(pushed.prefix(leaf), rebuilt.prefix(leaf), "prefix {leaf}");
+        }
+        for y in 0..13 {
+            assert_eq!(
+                pushed.leaf_at(Fixed::units(y)).map(|(leaf, _)| leaf),
+                rebuilt.leaf_at(Fixed::units(y)).map(|(leaf, _)| leaf),
+                "at {y}"
+            );
+        }
+        // An appended zero is a leaf nothing has measured, and it changes no sum.
+        pushed.push(Fixed::ZERO);
+        assert_eq!(pushed.total(), rebuilt.total());
+        assert_eq!(pushed.len(), 6);
     }
 
     #[test]

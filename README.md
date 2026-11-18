@@ -29,7 +29,9 @@ the Spine's first three slices (`holonomy-text`: immutable slab tree, history, c
 resident set, an in-place keystroke path whose zero-allocation claim is measured by a counting
 allocator in CI, the commit boundary that seals an edited slab into the world-line and path-copies
 the spine onto it — proven against the real container — and the live-length overlay that keeps
-positions correct while the spine is stale, but with no editor above them yet) and a law-carrying
-stub for the Eye, plus `xtask`. Every unmeasured law reads
+positions correct while the spine is stale), the Eye's headless geometry (`holonomy-eye`: clusters,
+one run tree, zoom/DPI, a counted height index, and the window join and reader D-18 added), the
+editor loop above them (`holonomy-shell`: intents in, measured frames out — no window and no font),
+plus `xtask`. Every unmeasured law reads
 `spec` in `GATES.md`; that column is the honest one and nothing is promoted to `gated` without a
 measurement in CI.

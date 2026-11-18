@@ -52,6 +52,51 @@ pub struct ShapedWindow {
 }
 
 impl ShapedWindow {
+    /// A window over `start..end` that claims **no** leaves.
+    ///
+    /// For a caller that derived the byte range itself: a bootstrap before any height has been
+    /// measured, or a scan for the cluster boundary beside the caret. [`Self::leaves`] is then
+    /// empty, so nothing should write heights back from it.
+    #[must_use]
+    pub fn unclaimed(start: u64, end: u64) -> Self {
+        Self {
+            leaves: Window::empty(),
+            start,
+            end,
+        }
+    }
+
+    /// A window over the leaves `first..end`, and the bytes they hold.
+    ///
+    /// For a caller that has chosen leaves rather than a scroll position: the shell's bootstrap,
+    /// before any height has been measured, knows only that a screen starts at the document's first
+    /// leaf. The vertical edges are zero because nothing has measured them yet — which is the same
+    /// thing the height index says about those leaves.
+    #[must_use]
+    pub fn leaves_of(spine: &Spine, first: u32, end: u32) -> Self {
+        let leaves = Window::of_leaves(first as usize, end as usize);
+        let Some(head) = spine.slab_span(first) else {
+            return Self {
+                leaves,
+                start: spine.len(),
+                end: spine.len(),
+            };
+        };
+        let start = head.offset();
+        let end_byte = if end > first {
+            spine
+                .slab_span(end - 1)
+                .map_or(start, |span| span.offset() + span.len())
+        } else {
+            start
+        };
+        Self {
+            leaves,
+            start,
+            end: end_byte.min(spine.len()),
+        }
+    }
+
     /// The height index's window of leaves.
     #[must_use]
     pub fn leaves(&self) -> Window {

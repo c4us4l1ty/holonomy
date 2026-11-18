@@ -12,6 +12,7 @@ members = [
     "crates/holonomy-ledger",
     "crates/holonomy-line",
     "crates/holonomy-seal",
+    "crates/holonomy-shell",
     "crates/holonomy-text",
     "crates/xtask",
 ]

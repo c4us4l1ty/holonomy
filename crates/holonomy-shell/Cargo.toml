@@ -1,0 +1,18 @@
+[package]
+name = "holonomy-shell"
+description = "The editor loop: intents in, a frame out — the headless half of Block 6's shell."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The document engine: the typing session, the resident set, and the reader that turns a byte
+# range into text. This crate adds no plaintext of its own — it is the loop, not a cache.
+holonomy-text = { path = "../holonomy-text" }
+# The geometry: the height index, the window join, the run tree. No window, no font, no GPU.
+holonomy-eye = { path = "../holonomy-eye" }
