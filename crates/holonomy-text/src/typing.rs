@@ -1221,7 +1221,11 @@ mod tests {
         // the same either way, and the document reads differently.
         assert_eq!(typing.document_len(), 8);
         assert_eq!(typing.pending(), b"XY");
-        assert_eq!(typing.caret(), 3, "the caret sits after the re-inserted text");
+        assert_eq!(
+            typing.caret(),
+            3,
+            "the caret sits after the re-inserted text"
+        );
         let spans = typing.spine().spans_in(0, 8);
         assert_eq!(spans.len(), 3, "a character, the open leaf, then the rest");
         assert_eq!(spans[1].offset(), 1, "the open leaf is back at offset one");
