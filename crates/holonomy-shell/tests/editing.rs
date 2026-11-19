@@ -584,11 +584,43 @@ fn a_cluster_straddling_every_leaf() -> String {
 }
 
 #[test]
-fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
-    // The frame ends where the window ends, and a window ends at a leaf — a byte count (D-22), so
-    // the cut can fall inside a cluster. The eye cannot tell that from the frame's text alone, so
-    // a click past the last cluster would put the caret inside a grapheme, and typing there would
-    // split it. The document is what knows, and the position it has is the one before the cluster.
+fn a_frame_hands_each_leaf_the_state_from_before_it() {
+    // A frame writes back the carries it measured, and every later question about a leaf is
+    // answered with the carry *into* it. Recording the state at a leaf's end as that leaf's own
+    // carry made the leaf after a mid-cluster cut segment as though the cut were a boundary, so the
+    // backspace below stopped at 64 instead of taking the `e` and its marks from 63 (AUDIT D-24).
+    let mut document = "a".repeat(63);
+    document.push('e');
+    document.push_str("\u{301}\u{301}\n");
+    document.push_str(&"a".repeat(58));
+    document.push('\n');
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    assert_eq!(shell.document_len(), 128, "two leaves exactly");
+
+    // Line 0 is `a`×63 and the `e` with its two marks, sixty-four units of text, so byte 68 is the
+    // boundary at x = 64 — the cluster's end, never a byte inside it.
+    let caret = shell
+        .click(Point::new(Fixed::units(64), Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(caret.map(|caret| caret.byte), Some(68));
+
+    assert!(shell.backspace().expect("a backspace"));
+    assert_eq!(
+        shell.document_len(),
+        123,
+        "the `e` and its marks go together"
+    );
+}
+
+#[test]
+fn a_frame_ends_where_the_document_has_a_position() {
+    // The window ends at a leaf and a leaf cut is a byte count, so the window's own end can fall
+    // inside a cluster. A frame draws *and* hit tests, so it reads the cluster's tail with the
+    // window and ends on it: no boundary it offers is a byte the document does not have, and no
+    // click has to be corrected afterwards (AUDIT D-26, OQ-19).
     let mut shell = session();
     let text = a_cluster_straddling_every_leaf();
     shell.type_text(&text).expect("typed");
@@ -607,17 +639,11 @@ fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
         frame.origin() + frame.text().len() as u64
     };
     assert!(end > 0 && end < text.len() as u64, "the window is a prefix");
-    assert_eq!(end % 64, 0, "it ends at a leaf");
+    assert_ne!(end % 64, 0, "the frame did not stop at the cut");
     assert!(
-        !starts.contains(&end),
-        "and that leaf cut is inside a grapheme"
+        starts.contains(&end) || end == text.len() as u64,
+        "the frame ends where a cluster begins"
     );
-    let before = starts
-        .iter()
-        .copied()
-        .filter(|at| *at < end)
-        .max()
-        .expect("a cluster before the cut");
 
     let mut carets = 0;
     for (x, top, byte) in boundaries {
@@ -625,14 +651,10 @@ fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
             .click(Point::new(x, top))
             .expect("clicked")
             .expect("a caret");
-        if byte == end {
-            assert_eq!(
-                caret.byte, before,
-                "the cut is inside the cluster at {before}, and a caret goes there"
-            );
-        } else {
-            assert_eq!(caret.byte, byte, "a legal caret round-trips");
-        }
+        assert_eq!(
+            caret.byte, byte,
+            "every boundary round-trips, the end included"
+        );
         assert!(
             starts.contains(&caret.byte) || caret.byte == text.len() as u64,
             "the caret at {} is inside a grapheme",
@@ -641,6 +663,52 @@ fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
         carets += 1;
     }
     assert!(carets > 1, "the frame offered more than its own end");
+}
+
+#[test]
+fn a_cluster_too_long_for_the_look_is_still_not_a_caret() {
+    // D-25's residual, kept honest for the caret: a cluster longer than the leaf after the cut
+    // cannot be finished by the frame, so the frame ends inside it — and the click is corrected to
+    // where the cluster begins rather than landing in the middle of a grapheme (AUDIT D-26).
+    let mut document = "a".repeat(255);
+    document.push('e');
+    document.push_str(&"\u{301}".repeat(400));
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+
+    let starts: Vec<u64> = Clusters::new(&document).map(|(at, _)| at as u64).collect();
+    let (x, top, byte, end) = {
+        let frame = shell.frame().expect("a frame");
+        let mut last = None;
+        for line in frame.layout().lines() {
+            for (x, at) in line.boundaries() {
+                last = Some((x, line.top(), at));
+            }
+        }
+        let end = frame.origin() + frame.text().len() as u64;
+        let (x, top, byte) = last.expect("a boundary");
+        (x, top, byte, end)
+    };
+    assert_eq!(
+        byte, end,
+        "the frame's last boundary is the frame's own end"
+    );
+    assert_eq!(
+        end, 320,
+        "the look reached the leaf after the cut and stopped"
+    );
+    assert!(
+        !starts.contains(&end),
+        "and that byte is inside the cluster"
+    );
+
+    let caret = shell
+        .click(Point::new(x, top))
+        .expect("clicked")
+        .expect("a caret");
+    assert_eq!(caret.byte, 255, "the cluster begins at the `e`");
 }
 
 #[test]
@@ -667,12 +735,10 @@ fn a_backspace_crosses_two_leaf_boundaries_to_take_its_cluster() {
 }
 
 #[test]
-fn a_cluster_split_by_a_leaf_costs_its_advance_twice() {
-    // OQ-18's residual, measured rather than asserted as right. A cluster's advance is exact only
-    // when the cluster is shaped whole, and the shell lays leaves out one at a time: `e` + U+0301
-    // is one unit wide in the document and two when a leaf cut falls between them at a 64-unit
-    // wrap, so the scroll bar here is a line long. Segmentation is exact (OQ-17); this is what is
-    // left, and fixing it needs the two leaves shaped together.
+fn a_cluster_split_by_a_leaf_costs_its_advance_once() {
+    // OQ-18's residual, now the behaviour: the leaf a cluster *starts* in places it whole and the
+    // leaf after it skips the tail, so `e` + U+0301 is one unit wide whether or not a leaf cut fell
+    // between the two — and the scroll bar is not a line long (AUDIT D-25).
     let mut document = "a".repeat(63);
     document.push_str("e\u{301}");
     let mut shell = session();
@@ -685,8 +751,22 @@ fn a_cluster_split_by_a_leaf_costs_its_advance_twice() {
     assert_eq!(whole.height(), Fixed::units(20), "one line in the document");
     assert_eq!(
         shell.heights().total(),
-        Fixed::units(40),
-        "two leaves, and one glyph of advance counted at each side of the cut"
+        whole.height(),
+        "a leaf walk agrees"
+    );
+    assert_eq!(
+        shell.heights().len(),
+        2,
+        "and there are two leaves to disagree in"
+    );
+
+    // A frame measures the same leaves again, out of the window's own text rather than leaf by
+    // leaf: the two paths have to reach the same geometry, or a frame would move the scroll bar.
+    shell.frame().expect("a frame");
+    assert_eq!(
+        shell.heights().total(),
+        whole.height(),
+        "and a frame agrees"
     );
 }
 
