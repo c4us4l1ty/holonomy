@@ -1,11 +1,17 @@
 //! A million random keystrokes, and the three things that must not drift apart.
 //!
 //! Block 4's third gate is a count, not a claim about speed: *1 M random keystrokes — zero leaks,
-//! zero residency blowups, undo past every point in the log.* This file is that run — and the gate
-//! is **not claimed yet**, because the third clause does not hold: unwinding the retained stack
-//! found that a redo after an undo of a root comes back one byte short (AUDIT OQ-21, with the seed
-//! and the step that reproduce it). The first two clauses are exercised on every push by the short
-//! slice; the million is `#[ignore]`d and is run by the `test` job in release, without undo.
+//! zero residency blowups, undo past every point in the log.* This file is that run, and it found
+//! three real bugs on its way to passing: a seal that wrote the bytes an undo had taken back
+//! (D-31), a burst that filled the buffer inside a character and lost the keystroke (D-32), and a
+//! redo after an undo of a root that came back one byte short (OQ-21 — the third clause's own
+//! failure, fixed by keeping the bytes a root undo drops so the redo can re-attach them).
+//!
+//! The short slice runs on every push in a debug build with every action checked, undo and redo
+//! included. The million is `#[ignore]`d and runs in release in the `test` job — **without** undo
+//! and redo, because the third clause does not hold yet: D-33 made undo-then-redo exact for its own
+//! reproduction (OQ-21), and the walk then found the next one, OQ-22, with a hard invariant break
+//! beside it (OQ-23).
 //!
 //! It types into a real [`Typing`] session over a real [`ResidentSet`], and after every step it
 //! asks three questions:
@@ -18,12 +24,13 @@
 //!    bytes must be within the configured budget, and a wipe must leave nothing resident.
 //! 3. **Does undo walk the session's own history?** Every undo must land on a document length the
 //!    session has actually been in, and at the end of the run the whole stack is unwound and
-//!    rewound, each redo matched against the state it undid. That is the model-free half — it does
-//!    not trust this file's idea of what an undo means — and it is exact except for one thing the
-//!    design *says* it cannot do: a root recorded before a cut is the tree without whatever was
-//!    open (pending bytes are in no segment, so no root can name them), so the walk compares
-//!    against the settled document and the pending span is dropped before it starts. That check is
-//!    a test of its own, `#[ignore]`d with its reason, because it is the check that fails today.
+//!    rewound, each redo matched against the state it undid, byte for byte. That is the model-free
+//!    half — it does not trust this file's idea of what an undo means — and it is a test of its
+//!    own, for six seeds, `#[ignore]`d with its reason (OQ-22). One thing it accounts
+//!    for, in the design's own words: a root recorded before a cut names **written** bytes only, so
+//!    the bytes open at that moment are not in it. The walk starts from the settled document, and
+//!    the step that undoes the root keeps a copy of those bytes so its redo puts them back — which
+//!    is what makes undo-then-redo a no-op instead of a silent deletion.
 //!
 //! Where the claims stop, said plainly, because a gate is evidence only for what it measures:
 //!
@@ -611,9 +618,11 @@ impl Session {
     /// Says where a rewound state and the state it had to re-apply part company.
     fn report_rewind(&self, want: &str, got: &str, redone: usize) -> ! {
         let first = first_difference(want, got);
-        let from = first.saturating_sub(12);
-        let a = want.get(from..first + 12).unwrap_or("");
-        let b = got.get(from..first + 12).unwrap_or("");
+        // Windows for a human, so they have to be character-aligned: a byte range that starts or
+        // ends inside a combining sequence reads back as `None` and printed two empty strings.
+        let (from, until) = windows(want, got, first);
+        let a = &want[from..until.min(want.len())];
+        let b = &got[from..until.min(got.len())];
         let pending = self.typing.pending().len();
         let open = self.typing.sources().open_count();
         let spine = self.typing.spine().len();
@@ -643,8 +652,7 @@ impl Session {
             "HOLONOMY_KEYSTROKE_FUZZ seed={seed} actions={steps} keystrokes={inserted} \
              deleted={deleted} replaced={replaced} marked={marked} sealed={sealed} \
              undone={undone} redone={redone} faults={faults} wipes={wipes} reads={reads} \
-             segments={segments} document_bytes={document} peak_resident_bytes={peak} \
-             undo={undone} redo={redone}"
+             segments={segments} document_bytes={document} peak_resident_bytes={peak}"
         )
     }
 }
@@ -660,6 +668,20 @@ fn settled(text: &str, caret: u64, pending: usize) -> String {
     let start = end.saturating_sub(pending);
     settled.replace_range(start..end, "");
     settled
+}
+
+/// A character-aligned window around `first` that both documents actually have.
+fn windows(want: &str, got: &str, first: usize) -> (usize, usize) {
+    let shortest = want.len().min(got.len());
+    let mut from = first.saturating_sub(12).min(shortest);
+    while from < shortest && !want.is_char_boundary(from) {
+        from += 1;
+    }
+    let mut until = (first + 12).min(shortest);
+    while until > from && !want.is_char_boundary(until) {
+        until -= 1;
+    }
+    (from, until)
 }
 
 /// The first byte two documents disagree about, or the first one past their common prefix.
@@ -681,8 +703,8 @@ fn run(seed: u64, steps: u64) -> Session {
             assert_eq!(text, session.model, "seed {seed}: differ at {step}");
         }
     }
-    // End on a mark, so the walk below always has a state to unwind: a seal is an undo floor, and
-    // a run that stopped on one would prove nothing about undo.
+    // End on a mark, so the walk always has a state to unwind: a seal is an undo floor, and a run
+    // that stopped on one would prove nothing about undo.
     session.mark();
     session
 }
@@ -690,6 +712,9 @@ fn run(seed: u64, steps: u64) -> Session {
 /// Runs until `keystrokes` inserts have happened, so the gate's count is keystrokes and the
 /// interleaved cuts, marks, undos and wipes are extra rather than instead.
 fn run_keystrokes(seed: u64, keystrokes: u64) -> Session {
+    // Undo and redo stay out of this run until OQ-22 and OQ-23 are fixed: with them in, the million
+    // trips an invariant in `Typing::pending` (`live_len()` eight, buffer three) at about a hundred
+    // and sixty seconds in. The short slice still exercises undo and redo on every push.
     let mut session = Session::new(seed, false, false);
     // Inserts always make progress, so the cap only ever catches a harness bug — as a failure,
     // not a hang.
@@ -727,16 +752,20 @@ fn a_random_session_keeps_the_view_the_leaves_and_the_budget_in_agreement() {
 }
 
 /// The third clause of the gate, and the reason it is unclaimed.
+///
+/// This walk is what caught OQ-21 (a redo after an undo of a root, one byte short, seed 2 at byte
+/// 260 of 409), and D-33 fixed that reproduction: a root step's inverse now keeps the bytes that
+/// were open, so its redo re-attaches them instead of losing them. The walk then moved on to the
+/// next one, which is OQ-22 and still open: seed 0, redo five, a document 276 bytes wide where 275
+/// was expected, with one pending byte and the leaf at the wrong offset.
 #[test]
-#[ignore = "blocked on OQ-21: a redo after an undo of a root comes back one byte short (seed 2)"]
+#[ignore = "blocked on OQ-22: a redo re-attaches pending bytes at the wrong offset (seed 0)"]
 fn unwinding_the_retained_undo_stack_comes_back_to_the_same_document() {
-    // Seed 2, twenty thousand actions: the run reaches a state whose stack holds a root recorded
-    // before a cut, and the redo that should re-apply it returns a document one byte shorter,
-    // differing at byte 260 of 409. That is a fidelity bug in `Typing`'s undo/redo, and it is
-    // filed rather than papered over — this test is the reproducer.
-    let mut session = run(2, 20_000);
-    let walked = session.walk_history();
-    assert!(walked > 0, "the run recorded nothing to unwind");
+    for seed in 0..6 {
+        let mut session = run(seed, 20_000);
+        let walked = session.walk_history();
+        assert!(walked > 0, "seed {seed}: nothing to undo, nothing proved");
+    }
 }
 
 #[test]

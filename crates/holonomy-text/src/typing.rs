@@ -183,6 +183,22 @@ enum Mark {
     },
 }
 
+/// The bytes that were open when a root step's inverse was taken.
+///
+/// A root names **written** bytes only, so restoring one drops whatever was open over the buffer.
+/// That is right for the undo — the bytes were typed after the cut, and the state before the cut
+/// did not have them — but it must not be right for the redo as well: undo then redo of a cut would
+/// silently lose the last thing typed, one byte at a time if that is how it was typed. Keeping a
+/// copy here is what makes the redo exact; it is a copy because the buffer itself is about to be
+/// cleared, and it is at most one capacity, taken on an undo, never on a keystroke.
+#[derive(Debug, Clone)]
+struct Pending {
+    /// The document offset the open bytes sat at.
+    at: u64,
+    /// The open bytes themselves, in document order.
+    bytes: Vec<u8>,
+}
+
 /// One state the session can return to.
 #[derive(Debug, Clone)]
 enum Step {
@@ -199,6 +215,10 @@ enum Step {
         spine: Spine,
         /// The document offset the cut started at — where the caret goes back to.
         at: u64,
+        /// The bytes that were open when this state was *left*, so the redo can re-attach them.
+        /// `None` for a root recorded before a cut: at a cut nothing is open, and an undo of it
+        /// restores the root rather than leaving it.
+        pending: Option<Pending>,
     },
 }
 
@@ -432,11 +452,12 @@ impl<S: SegmentSink> Typing<S> {
             Step::Root { .. } => Step::Root {
                 spine: self.settled_spine()?,
                 at: self.open.map_or_else(|| self.caret(), |open| open.at),
+                pending: self.pending_step(),
             },
         };
         match step {
             Step::Mark(mark) => self.restore_mark(mark)?,
-            Step::Root { spine, at } => self.restore_root(spine, at)?,
+            Step::Root { spine, at, pending } => self.restore_root(spine, at, pending)?,
         }
         Ok(current)
     }
@@ -493,11 +514,20 @@ impl<S: SegmentSink> Typing<S> {
         }
     }
 
-    /// Moves the session to a sealed state: this root, and this caret.
-    fn restore_root(&mut self, spine: Spine, at: u64) -> Result<(), TypingError> {
-        // Anything open here is *pending*: a seal would have dropped this step, so the bytes were
-        // never written and discarding them loses nothing the world-line has. The text a cut
-        // removed is the other way round — it is in the log, and the root names it again.
+    /// Moves the session to a sealed state: this root, this caret, and — when a redo is coming
+    /// back to it — the bytes that were open.
+    ///
+    /// Anything open here is *pending*: a seal would have dropped this step, so the bytes were
+    /// never written and discarding them loses nothing the world-line has. The text a cut removed
+    /// is the other way round — it is in the log, and the root names it again. The pending bytes
+    /// are the third case: dropped by the undo, and put back by the redo (`Step::Root::pending`),
+    /// so that undo then redo reads as a no-op instead of losing them (OQ-21).
+    fn restore_root(
+        &mut self,
+        spine: Spine,
+        at: u64,
+        pending: Option<Pending>,
+    ) -> Result<(), TypingError> {
         if let Some(open) = self.open {
             self.sources.close(open.source);
             self.open = None;
@@ -507,7 +537,37 @@ impl<S: SegmentSink> Typing<S> {
             .expect("an empty slab is valid UTF-8");
         self.spine = spine;
         self.next_at = Some(at.min(self.spine.len()));
+        if let Some(pending) = pending {
+            self.re_attach(pending)?;
+        }
         Ok(())
+    }
+
+    /// The bytes that are open now, as a redo can put them back.
+    ///
+    /// `None` when nothing is open, and also when the open leaf's live length is zero — the settled
+    /// tree already says everything the document says in that case.
+    fn pending_step(&self) -> Option<Pending> {
+        let open = self.open?;
+        let live = self.live_len();
+        if live == 0 {
+            return None;
+        }
+        Some(Pending {
+            at: open.at,
+            bytes: self.buffer.as_bytes()[..live].to_vec(),
+        })
+    }
+
+    /// Puts bytes that were open back over the buffer, under a new provisional id.
+    ///
+    /// The leaf is registered at its full length, so the tree names the bytes and the document
+    /// reads as it did — the bytes stay *open*, exactly as they were before the undo dropped them.
+    fn re_attach(&mut self, pending: Pending) -> Result<(), TypingError> {
+        self.buffer = SlabText::from_plaintext(pending.bytes, self.capacity)?;
+        let len = self.buffer.len();
+        self.next_at = Some(pending.at.min(self.spine.len()));
+        self.attach(len)
     }
 
     /// Records the tree as it is now, so a cut about to happen can be taken back.
@@ -516,6 +576,8 @@ impl<S: SegmentSink> Typing<S> {
         self.steps.push(Step::Root {
             spine: self.spine.clone(),
             at,
+            // Nothing is open at a cut — `delete` seals first, so every offset is the tree's own.
+            pending: None,
         });
     }
 
@@ -1238,33 +1300,46 @@ mod tests {
     }
 
     #[test]
-    fn redo_of_a_cut_does_not_resurrect_typing_that_undo_discarded() {
+    fn redo_of_a_cut_puts_back_the_bytes_that_were_open() {
         let mut typing = session(64);
         typing.insert(b"0123456789").expect("typed");
         typing.flush().expect("flushed");
         typing.delete(2, 4).expect("deleted");
         typing.insert(b"xy").expect("typed");
+        assert_eq!(
+            typing.document_len(),
+            10,
+            "the cut document and two open bytes"
+        );
         assert!(typing.undo().expect("undone"));
-        assert_eq!(typing.document_len(), 10, "the cut text came back");
+        // The undo goes to the root, and a root names written bytes only: the open `xy` is dropped,
+        // because it was typed after the cut and the state before the cut did not have it.
+        assert_eq!(
+            typing.document_len(),
+            10,
+            "the cut text came back, `xy` did not"
+        );
+        assert!(
+            typing.pending().is_empty(),
+            "nothing is open after an undo of a root"
+        );
+        assert_eq!(typing.spine().len(), 10);
         assert!(typing.redo().expect("redone"));
-        // Undo discarded the pending `xy`: a seal would have ended the root's epoch, so those
-        // bytes were never in the world-line. Redo must therefore re-apply the cut **without**
-        // them — a step recorded from the live tree would name a leaf over bytes undo threw away,
-        // and the document would claim two bytes nobody can produce.
-        assert_eq!(typing.document_len(), 8);
-        assert_eq!(typing.spine().len(), 8);
-        assert!(typing.pending().is_empty(), "nothing is open after a redo");
-        for span in typing.spine().spans_in(0, 8) {
-            assert!(
-                typing
-                    .sources()
-                    .locate(span.slab().segment())
-                    .segment()
-                    .is_some(),
-                "every leaf names a sealed segment, not an abandoned source"
-            );
-        }
-        // And what redo restored is still a document: the cut can be taken back again.
+        // The redo re-applies the cut **and** puts `xy` back where it was, under a new provisional
+        // id — from the copy the step kept, because the buffer the bytes lived in went with the
+        // undo. Undo then redo is a no-op; without that copy it would silently delete what the user
+        // last typed, one byte at a time if that is how it was typed (OQ-21).
+        assert_eq!(typing.document_len(), 10);
+        assert_eq!(typing.pending(), b"xy");
+        assert_eq!(typing.spine().len(), 10);
+        let spans = typing.spine().spans_in(0, 10);
+        let open = spans
+            .iter()
+            .find(|span| typing.sources().locate(span.slab().segment()).is_open())
+            .expect("the pending bytes are a leaf of their own");
+        assert_eq!(open.offset(), 2, "back where the caret was, not appended");
+        assert_eq!(open.len(), 2);
+        // And what the redo produced is still a document: the cut can be taken back again.
         assert!(typing.undo().expect("undone again"));
         assert_eq!(typing.document_len(), 10);
     }
