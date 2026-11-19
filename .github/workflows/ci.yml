@@ -152,11 +152,11 @@ jobs:
             fi
           done
       - run: cargo test --locked --workspace
-      # Block 4's third gate is a *count*, so it is rehearsed instead of remembered. The step above
-      # runs the short slice of the same harness in a debug build; this runs its million keystrokes in
-      # release and prints HOLONOMY_KEYSTROKE_FUZZ as the measurement. The gate is NOT claimed: its
-      # undo clause is blocked on OQ-21, which is why undo and redo stay out of this run and why the
-      # walk is a separate, `#[ignore]`d reproducer (AUDIT D-30, D-31, OQ-21).
+      # Block 4's third gate is a *count*, so it is run instead of remembered. The step above runs the
+      # short slice of the same harness in a debug build; this runs the gate's million keystrokes in
+      # release and prints HOLONOMY_KEYSTROKE_FUZZ as the measurement. Undo and redo are out of this
+      # run until OQ-22 and OQ-23 are fixed, so this is the evidence for the leak and residency
+      # clauses and not for the undo one (AUDIT D-30, D-31, D-32, D-33, OQ-22, OQ-23).
       - name: Rehearse Block 4's third gate (1 M random keystrokes)
         run: |
           set -o pipefail
