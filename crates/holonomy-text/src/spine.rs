@@ -106,7 +106,11 @@ impl Spine {
             }
             open = match open {
                 Some(tail) if tail.segment() == slab.segment() && tail.end() == slab.start() => {
-                    Some(Slab::new(tail.segment(), tail.start(), tail.len() + slab.len()))
+                    Some(Slab::new(
+                        tail.segment(),
+                        tail.start(),
+                        tail.len() + slab.len(),
+                    ))
                 }
                 Some(tail) => {
                     coalesced.push(tail);
@@ -487,11 +491,19 @@ mod tests {
         let (before, after) = spine.split_at(10).expect("a split inside the document");
         let rejoined = before.concat(&after);
         assert_eq!(rejoined.slab_count(), 2);
-        let geometry: Vec<Slab> = rejoined.spans_in(0, 20).iter().map(|span| span.slab()).collect();
+        let geometry: Vec<Slab> = rejoined
+            .spans_in(0, 20)
+            .iter()
+            .map(|span| span.slab())
+            .collect();
         let rebuilt = Spine::from_slabs(geometry);
         assert_eq!(rebuilt.slab_count(), 1);
         assert_eq!(rebuilt.len(), 20);
-        assert_eq!(rebuilt.locate(15).map(|hit| hit.slab().start()), Some(15));
+        // The geometry is coarser and the bytes are where they were: byte 15 of segment 0 is byte
+        // 15 of segment 0, whichever slab names it.
+        let byte = |spine: &Spine| spine.locate(15).map(|hit| hit.segment_offset());
+        assert_eq!(byte(&rebuilt), byte(&rejoined));
+        assert_eq!(byte(&rebuilt), Some(15));
     }
 
     #[test]
