@@ -651,7 +651,10 @@ fn a_frame_ends_where_the_document_has_a_position() {
             .click(Point::new(x, top))
             .expect("clicked")
             .expect("a caret");
-        assert_eq!(caret.byte, byte, "every boundary round-trips, the end included");
+        assert_eq!(
+            caret.byte, byte,
+            "every boundary round-trips, the end included"
+        );
         assert!(
             starts.contains(&caret.byte) || caret.byte == text.len() as u64,
             "the caret at {} is inside a grapheme",
@@ -688,9 +691,18 @@ fn a_cluster_too_long_for_the_look_is_still_not_a_caret() {
         let (x, top, byte) = last.expect("a boundary");
         (x, top, byte, end)
     };
-    assert_eq!(byte, end, "the frame's last boundary is the frame's own end");
-    assert_eq!(end, 320, "the look reached the leaf after the cut and stopped");
-    assert!(!starts.contains(&end), "and that byte is inside the cluster");
+    assert_eq!(
+        byte, end,
+        "the frame's last boundary is the frame's own end"
+    );
+    assert_eq!(
+        end, 320,
+        "the look reached the leaf after the cut and stopped"
+    );
+    assert!(
+        !starts.contains(&end),
+        "and that byte is inside the cluster"
+    );
 
     let caret = shell
         .click(Point::new(x, top))
