@@ -18,7 +18,7 @@
 //! cluster logic: char boundaries are the cheapest correct unit here, and the Eye (Block 5) owns
 //! cluster-aware caret movement above it.
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// What an in-place edit did, or why it could not be done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,9 +218,32 @@ impl SlabText {
         if !is_char_boundary(self.bytes.as_slice(), end) {
             return Err(TextError::NotACharBoundary { offset: end });
         }
+        let new_len = len - (end - start);
         self.bytes.copy_within(end..len, start);
-        self.bytes.truncate(len - (end - start));
+        // The bytes the cut moved out of the document are still inside the allocation, and the
+        // guard only wipes the range the length covers — so a cut wipes what it vacates. Without
+        // this, deleting a password leaves it in the slab's spare capacity, and in freed memory
+        // once the slab is replaced.
+        self.bytes[new_len..len].zeroize();
+        debug_assert!(
+            self.bytes[new_len..len].iter().all(|&byte| byte == 0),
+            "a cut must leave the bytes it vacated zeroed"
+        );
+        self.bytes.truncate(new_len);
         Ok(())
+    }
+}
+
+impl Drop for SlabText {
+    fn drop(&mut self) {
+        // `Zeroizing<Vec<u8>>` wipes what the length covers, and the length is the *document's*:
+        // spare capacity an earlier, longer slab filled would be freed un-wiped. Extending to the
+        // whole allocation puts every byte of it inside the guard's reach, and `resize` within the
+        // capacity allocates nothing.
+        let capacity = self.bytes.capacity();
+        if self.bytes.len() < capacity {
+            self.bytes.resize(capacity, 0);
+        }
     }
 }
 
@@ -251,6 +274,24 @@ mod tests {
         assert_eq!(slab.insert(0, b"a ").expect("fits"), EditOutcome::InPlace);
         assert_eq!(slab.insert(8, b" end").expect("fits"), EditOutcome::InPlace);
         assert_eq!(slab.as_str(), "a middle end");
+    }
+
+    #[test]
+    fn a_cut_shrinks_the_document_and_leaves_the_allocation_for_the_guard() {
+        // `delete` wipes the bytes it vacates while they are still inside the length, and
+        // `SlabText`'s drop extends to the whole allocation so the guard wipes the spare too.
+        // Neither half can be *read* from safe code — the vacated range is outside the length the
+        // moment the cut returns, and the spare is outside it always — so what this test pins is
+        // the part that is observable: the cut cuts, and the allocation is never re-grown to hide
+        // the hole. The wipe itself is a `debug_assert` in `delete`, so a regression that removes
+        // it fails every debug test that cuts.
+        let mut slab = SlabText::from_text("hunter2 and a username", 32);
+        let capacity = slab.capacity();
+        slab.delete(0, 8).expect("in range");
+        assert_eq!(slab.as_str(), "and a username");
+        assert_eq!(slab.len(), 14);
+        assert_eq!(slab.capacity(), capacity, "a cut must not reallocate");
+        assert!(slab.spare() >= 8, "the cut did not shrink the allocation");
     }
 
     #[test]

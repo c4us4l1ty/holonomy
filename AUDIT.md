@@ -80,6 +80,20 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-19 — D-35 — a cut wipes what it vacates, and a slab wipes its whole allocation.**
+  Found by review while hunting (not by a failing test, because nothing in safe code can read the
+  region involved). `SlabText::delete` shifts the surviving bytes left and truncates, which leaves
+  the bytes it removed — a cut password among them — inside the allocation but outside the length.
+  `SlabText` holds a `Zeroizing<Vec<u8>>`, and `Zeroize for Vec<u8>` wipes what the **length**
+  covers, so the vacated bytes were freed un-wiped, and so was any spare capacity an earlier, longer
+  slab had filled. Two changes: `delete` zeroizes the range it vacates before the length stops
+  covering it (pinned by a `debug_assert` that the range reads zero, so any regression fails every
+  debug test that cuts), and `SlabText`'s drop extends the vector to its capacity first, which puts
+  every byte of the allocation inside the guard's reach — `resize` within the capacity allocates
+  nothing. The leak is invisible to a test: after the cut the vacated range is outside the length,
+  and the spare is outside it always. What is stated here is the argument, not a measurement, and
+  the unit test pins the observable half (a cut shrinks the length, keeps the capacity, and does not
+  reallocate).
 - **2026-11-19 — D-34 — a root restore keeps the buffer, and a mark that names another leaf moves
   it.** D-33 made undo-then-redo exact for the case it was written for and left two things behind:
   OQ-22 (a redo that put its open bytes back in the wrong place) and OQ-23 (`Typing::pending`
