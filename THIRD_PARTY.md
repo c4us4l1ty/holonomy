@@ -10,6 +10,8 @@ attribution trail.
 | origin | licence | version / commit | what was taken | files |
 | --- | --- | --- | --- | --- |
 | [s1dashu/quiet-md](https://github.com/s1dashu/quiet-md) | MIT, © 2026 s1dashu | v0.1.13, `main` read on 2026-11-17 | **Nothing yet.** Read as prior art for the Block 6 shell and the Block 7 ribbon: the quiet page, the paper feel, the ribbon menus. **OQ-13 in `AUDIT.md` records why it is not a dependency, and what that costs us.** | — |
+| [Unicode Character Database](https://www.unicode.org/reports/tr29/) | Unicode License V3 (SPDX: Unicode-3.0), © 1991-2026 Unicode, Inc. | UCD 18.0.0 | the grapheme cluster break class and Extended_Pictographic assignments, as a range table | `crates/holonomy-eye/src/cluster/tables.rs`, `LICENSES/unicode-data.txt` |
+| [unicode-rs/unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation) | MIT OR Apache-2.0, © The Rust Project Developers | `master`, read 2026-11-19 | **the input, not the output**: `scripts/gen-cluster-tables.py` reads its generated `src/tables.rs` instead of the UCD files, so the extraction is that project's and the layout is ours. No code is copied | `scripts/gen-cluster-tables.py`, `LICENSES/unicode-segmentation-MIT.txt` |
 
 ### The rules for an entry appearing above
 

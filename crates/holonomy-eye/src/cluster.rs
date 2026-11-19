@@ -6,10 +6,12 @@
 //!
 //! # The rules, not just a table
 //!
-//! This is a hand-written implementation of UAX #29's extended grapheme clusters, because the crate
-//! has no Unicode dependency and must not grow one for this. The structure follows the standard:
-//! every code point gets a [`Property`], and [`joins`] applies the rules **in their numbered
-//! order**, so each rule's comment can be checked against the specification line by line.
+//! This is an implementation of UAX #29's extended grapheme clusters with no Unicode dependency:
+//! the *properties* are data ([`tables`], generated from the database) and the *rules* are code.
+//! The structure follows the standard: every code point gets a [`Property`], and [`joins`] applies
+//! the rules **in their numbered order**, so each rule's comment can be checked against the
+//! specification line by line. The split matters, because the two fail differently: a rule that is
+//! wrong is a bug with a test, and a table that is wrong is a hole nobody sees.
 //!
 //! | rule | what it says |
 //! | ---- | ------------ |
@@ -32,17 +34,25 @@
 //!
 //! # Coverage, stated exactly
 //!
-//! The property tables cover the scripts `docs/UI-SPEC.md` names — Latin, Greek, Cyrillic, Hebrew,
-//! Arabic, Devanagari, Thai, Hangul, Han, and emoji — plus the general combining-diacritic blocks,
-//! variation selectors, tag characters, ZWJ and ZWNJ. They are **not** the whole Unicode database:
-//! a combining mark from an unlisted script is classified `Other` and splits from its base, and
-//! Extended_Pictographic is approximated by the emoji blocks rather than by the standard's full
-//! sparse list, which can only split a pictograph sequence that a renderer would join.
+//! Which code point has which property is **not written here**. [`tables`] is generated from the
+//! Unicode Character Database (18.0.0) by `scripts/gen-cluster-tables.py`, so every script's marks
+//! join their base, not only the ones this UI's spec names by hand. The previous table was typed
+//! out a script at a time, and its holes were the quiet kind: a combining mark from a script nobody
+//! listed was `Other`, so it split from its base and the split became a caret position. That was
+//! AUDIT OQ-11; `a_mark_from_a_script_the_table_never_listed_joins_its_base` pins the difference.
 //!
-//! Both of those are *coverage* gaps and are stated as such (AUDIT OQ-11), not hidden behind a
-//! claim of completeness. What the crate does own is that segmentation is a pure function of the
-//! text **and of the state carried into it**: the same point answers the same way however the text
-//! was split into windows, which is what L-8 requires.
+//! Two things remain **outside** the implementation, and are named rather than implied:
+//!
+//! * **BiDi reordering** — the other half of the RFC's caret claim. It decides paint order rather
+//!   than segmentation, so it belongs beside the run tree, not here.
+//! * **GB9c**, Unicode 15.1's Indic conjunct rule (`InCB=Consonant [InCB=Extend InCB=Linker]*
+//!   × InCB=Consonant`). The database carries the property and the generator drops it, because a
+//!   rule that is not written must not have data pretending it is: a Devanagari conjunct is two
+//!   clusters here and one to a renderer. That is AUDIT OQ-20 — a rule gap, with its own row.
+//!
+//! What the crate does own is that segmentation is a pure function of the text **and of the state
+//! carried into it**: the same point answers the same way however the text was split into windows,
+//! which is what L-8 requires.
 //!
 //! # A window is a piece, and a piece can begin inside a cluster
 //!
@@ -57,7 +67,7 @@
 //! BiDi reordering is **not** here — the other half of the RFC's caret claim — and it changes paint
 //! order rather than segmentation, so it belongs beside the run tree.
 
-/// The grapheme-cluster and word properties UAX #29 needs, for the scripts this crate covers.
+/// The properties UAX #29's rules read, named as the standard names their classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Property {
     /// Carriage return: GB3 pairs it with a following LF, GB4 breaks after it.
@@ -99,498 +109,25 @@ impl Property {
     }
 }
 
-/// The property of `character`, for the scripts this crate covers.
+/// The property of `character`.
+///
+/// The table decides every class but the precomposed Hangul syllables, which are arithmetic: LV
+/// has a trailing-consonant index of zero and LVT is everything else, so two lines replace the 798
+/// ranges the database spells out. The order the old classifier used is gone with the old table —
+/// there is nothing left to order, because the classes are disjoint by construction.
 fn property(character: char) -> Property {
-    if character == '\r' {
-        return Property::Cr;
+    if let '\u{AC00}'..='\u{D7A3}' = character {
+        let index = u32::from(character) - 0xAC00;
+        return if index % 28 == 0 {
+            Property::HangulLv
+        } else {
+            Property::HangulLvt
+        };
     }
-    if character == '\n' {
-        return Property::Lf;
-    }
-    if character == '\u{200D}' {
-        return Property::Zwj;
-    }
-    if is_control(character) {
-        return Property::Control;
-    }
-    if is_regional_indicator(character) {
-        return Property::RegionalIndicator;
-    }
-    let hangul = is_hangul(character);
-    if hangul != Property::Other {
-        return hangul;
-    }
-    if is_prepend(character) {
-        return Property::Prepend;
-    }
-    if is_extend(character) {
-        return Property::Extend;
-    }
-    if is_spacing_mark(character) {
-        return Property::SpacingMark;
-    }
-    if is_pictographic(character) {
-        return Property::Pictographic;
-    }
-    Property::Other
+    tables::break_class(character).unwrap_or(Property::Other)
 }
 
-/// C0 and C1 controls, the bidi controls that are not Extend, and the line/paragraph separators.
-///
-/// UAX #29's Control class is `Cc`, `Cf` (minus the ones the standard lists as Extend or Prepend),
-/// `Zl` and `Zp`. Classifying an unlisted `Cf` as Control splits it from its neighbours, which is
-/// the safe direction, and CR/LF/ZWJ are decided before this is asked.
-fn is_control(character: char) -> bool {
-    matches!(character,
-        '\u{0000}'..='\u{001F}'
-        | '\u{007F}'..='\u{009F}'
-        | '\u{200E}'..='\u{200F}'
-        | '\u{2028}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{206F}'
-        | '\u{FEFF}'
-    )
-}
-
-/// A regional indicator: two of them are a flag.
-fn is_regional_indicator(character: char) -> bool {
-    matches!(character, '\u{1F1E6}'..='\u{1F1FF}')
-}
-
-/// The Hangul properties: the conjoining jamo blocks (GB6–GB8) and the syllable arithmetic.
-fn is_hangul(character: char) -> Property {
-    match character {
-        '\u{1100}'..='\u{115F}' | '\u{A960}'..='\u{A97C}' => Property::HangulL,
-        '\u{1160}'..='\u{11A7}' | '\u{D7B0}'..='\u{D7C6}' => Property::HangulV,
-        '\u{11A8}'..='\u{11FF}' | '\u{D7CB}'..='\u{D7FB}' => Property::HangulT,
-        '\u{AC00}'..='\u{D7A3}' => {
-            // A precomposed syllable: LV when the trailing-consonant index is zero, LVT otherwise.
-            let index = u32::from(character) - 0xAC00;
-            if index % 28 == 0 {
-                Property::HangulLv
-            } else {
-                Property::HangulLvt
-            }
-        }
-        _ => Property::Other,
-    }
-}
-
-/// Prepend characters: Arabic number signs, the Indic and historic signs the standard lists, and
-/// the interlinear annotation anchors. GB9b attaches each to whatever follows it.
-fn is_prepend(character: char) -> bool {
-    matches!(character,
-        '\u{0600}'..='\u{0605}'
-        | '\u{06DD}'
-        | '\u{070F}'
-        | '\u{0890}'..='\u{0891}'
-        | '\u{08E2}'
-        | '\u{0D4E}'
-        | '\u{110BD}'
-        | '\u{110CD}'
-        | '\u{111C2}'..='\u{111C3}'
-        | '\u{1193F}'
-        | '\u{11941}'
-        | '\u{11A3A}'
-        | '\u{11D46}'
-        | '\u{11F02}'
-    )
-}
-
-/// Non-spacing and enclosing marks, and the other characters GB9 attaches to what precedes them.
-///
-/// Grouped by script so a reader can check the ranges against the code charts: the general
-/// diacritic blocks first, then Latin/Greek/Cyrillic, Hebrew, Arabic, the Indic scripts this UI
-/// claims (Devanagari first), Thai and Lao, Tibetan, the historic scripts, the emoji modifiers, and
-/// finally the format characters the standard treats as Extend (`ZWNJ`, variation selectors, tags).
-fn is_extend(character: char) -> bool {
-    matches!(character,
-        // General diacritics, and the combining half marks.
-        '\u{0300}'..='\u{036F}'
-        | '\u{0483}'..='\u{0489}'
-        | '\u{1AB0}'..='\u{1AFF}'
-        | '\u{1DC0}'..='\u{1DFF}'
-        | '\u{20D0}'..='\u{20F0}'
-        | '\u{FE20}'..='\u{FE2F}'
-        // Greek and Cyrillic.
-        | '\u{1FBD}'
-        | '\u{1FBF}'..='\u{1FC1}'
-        // Hebrew.
-        | '\u{0591}'..='\u{05BD}'
-        | '\u{05BF}'
-        | '\u{05C1}'..='\u{05C2}'
-        | '\u{05C4}'..='\u{05C5}'
-        | '\u{05C7}'
-        // Arabic and Syriac.
-        | '\u{0610}'..='\u{061A}'
-        | '\u{064B}'..='\u{065F}'
-        | '\u{0670}'
-        | '\u{06D6}'..='\u{06DC}'
-        | '\u{06DF}'..='\u{06E4}'
-        | '\u{06E7}'..='\u{06E8}'
-        | '\u{06EA}'..='\u{06ED}'
-        | '\u{0711}'
-        | '\u{0730}'..='\u{074A}'
-        | '\u{07A6}'..='\u{07B0}'
-        | '\u{07EB}'..='\u{07F3}'
-        | '\u{0816}'..='\u{0819}'
-        | '\u{081B}'..='\u{0823}'
-        | '\u{0825}'..='\u{0827}'
-        | '\u{0829}'..='\u{082D}'
-        | '\u{0859}'..='\u{085B}'
-        | '\u{08D3}'..='\u{08E1}'
-        | '\u{08E3}'..='\u{0902}'
-        // Devanagari: the marks that take no space, and the virama.
-        | '\u{093A}'
-        | '\u{093C}'
-        | '\u{0941}'..='\u{0948}'
-        | '\u{094D}'
-        | '\u{0951}'..='\u{0957}'
-        | '\u{0962}'..='\u{0963}'
-        // Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam: the non-spacing
-        // marks of the scripts a Bengali or Dravidian user is likely to type.
-        | '\u{0981}'
-        | '\u{09BC}'
-        | '\u{09C1}'..='\u{09C4}'
-        | '\u{09CD}'
-        | '\u{09E2}'..='\u{09E3}'
-        | '\u{0A01}'..='\u{0A02}'
-        | '\u{0A3C}'
-        | '\u{0A41}'..='\u{0A42}'
-        | '\u{0A47}'..='\u{0A48}'
-        | '\u{0A4B}'..='\u{0A4D}'
-        | '\u{0A51}'
-        | '\u{0A70}'..='\u{0A71}'
-        | '\u{0A75}'
-        | '\u{0A81}'..='\u{0A82}'
-        | '\u{0ABC}'
-        | '\u{0AC1}'..='\u{0AC5}'
-        | '\u{0AC7}'..='\u{0AC8}'
-        | '\u{0ACD}'
-        | '\u{0AE2}'..='\u{0AE3}'
-        | '\u{0B01}'
-        | '\u{0B3C}'
-        | '\u{0B3F}'
-        | '\u{0B41}'..='\u{0B44}'
-        | '\u{0B4D}'
-        | '\u{0B55}'..='\u{0B56}'
-        | '\u{0B62}'..='\u{0B63}'
-        | '\u{0B82}'
-        | '\u{0BC0}'
-        | '\u{0BCD}'
-        | '\u{0C00}'
-        | '\u{0C04}'
-        | '\u{0C3E}'..='\u{0C40}'
-        | '\u{0C46}'..='\u{0C48}'
-        | '\u{0C4A}'..='\u{0C4D}'
-        | '\u{0C55}'..='\u{0C56}'
-        | '\u{0C62}'..='\u{0C63}'
-        | '\u{0C81}'
-        | '\u{0CBC}'
-        | '\u{0CBF}'
-        | '\u{0CC6}'
-        | '\u{0CCC}'..='\u{0CCD}'
-        | '\u{0CE2}'..='\u{0CE3}'
-        | '\u{0D00}'..='\u{0D01}'
-        | '\u{0D3B}'..='\u{0D3C}'
-        | '\u{0D41}'..='\u{0D44}'
-        | '\u{0D4D}'
-        | '\u{0D62}'..='\u{0D63}'
-        | '\u{0DCA}'
-        | '\u{0DD2}'..='\u{0DD4}'
-        | '\u{0DD6}'
-        // Thai and Lao.
-        | '\u{0E31}'
-        | '\u{0E34}'..='\u{0E3A}'
-        | '\u{0E47}'..='\u{0E4E}'
-        | '\u{0EB1}'
-        | '\u{0EB4}'..='\u{0EBC}'
-        | '\u{0EC8}'..='\u{0ECD}'
-        // Tibetan.
-        | '\u{0F18}'..='\u{0F19}'
-        | '\u{0F35}'
-        | '\u{0F37}'
-        | '\u{0F39}'
-        | '\u{0F71}'..='\u{0F7E}'
-        | '\u{0F80}'..='\u{0F84}'
-        | '\u{0F86}'..='\u{0F87}'
-        | '\u{0F8D}'..='\u{0F97}'
-        | '\u{0F99}'..='\u{0FBC}'
-        | '\u{0FC6}'
-        // Myanmar, Khmer, Mongolian and the historic scripts' vowel signs.
-        | '\u{102D}'..='\u{1030}'
-        | '\u{1032}'..='\u{1037}'
-        | '\u{1039}'..='\u{103A}'
-        | '\u{103D}'..='\u{103E}'
-        | '\u{1058}'..='\u{1059}'
-        | '\u{105E}'..='\u{1060}'
-        | '\u{1071}'..='\u{1074}'
-        | '\u{135D}'..='\u{135F}'
-        | '\u{1712}'..='\u{1714}'
-        | '\u{1732}'..='\u{1734}'
-        | '\u{1752}'..='\u{1753}'
-        | '\u{1772}'..='\u{1773}'
-        | '\u{17B4}'..='\u{17B5}'
-        | '\u{17B7}'..='\u{17BD}'
-        | '\u{17C6}'
-        | '\u{17C9}'..='\u{17D3}'
-        | '\u{17DD}'
-        | '\u{180B}'..='\u{180D}'
-        | '\u{1885}'..='\u{1886}'
-        | '\u{18A9}'
-        | '\u{1920}'..='\u{1922}'
-        | '\u{1927}'..='\u{1928}'
-        | '\u{1932}'
-        | '\u{1939}'..='\u{193B}'
-        | '\u{1A17}'..='\u{1A18}'
-        | '\u{1A1B}'
-        | '\u{1A56}'
-        | '\u{1A58}'..='\u{1A5E}'
-        | '\u{1A60}'
-        | '\u{1A62}'
-        | '\u{1A65}'..='\u{1A6C}'
-        | '\u{1A73}'..='\u{1A7C}'
-        | '\u{1A7F}'
-        | '\u{1B00}'..='\u{1B03}'
-        | '\u{1B34}'
-        | '\u{1B36}'..='\u{1B3A}'
-        | '\u{1B3C}'
-        | '\u{1B42}'
-        | '\u{1B6B}'..='\u{1B73}'
-        | '\u{1B80}'..='\u{1B81}'
-        | '\u{1BA2}'..='\u{1BA5}'
-        | '\u{1BA8}'..='\u{1BA9}'
-        | '\u{1BAB}'..='\u{1BAD}'
-        | '\u{1BE6}'
-        | '\u{1BE8}'..='\u{1BE9}'
-        | '\u{1BED}'
-        | '\u{1BEF}'..='\u{1BF1}'
-        | '\u{1C2C}'..='\u{1C33}'
-        | '\u{1C36}'..='\u{1C37}'
-        | '\u{1CD0}'..='\u{1CD2}'
-        | '\u{1CD4}'..='\u{1CE0}'
-        | '\u{1CE2}'..='\u{1CE8}'
-        | '\u{1CED}'
-        | '\u{1CF4}'
-        | '\u{1CF8}'..='\u{1CF9}'
-        | '\u{2D7F}'
-        | '\u{2DE0}'..='\u{2DFF}'
-        | '\u{302A}'..='\u{302F}'
-        | '\u{3099}'..='\u{309A}'
-        // Arabic presentation forms and the historic Arabic-script supplements.
-        | '\u{A66F}'..='\u{A672}'
-        | '\u{A674}'..='\u{A67D}'
-        | '\u{A69E}'..='\u{A69F}'
-        | '\u{A6F0}'..='\u{A6F1}'
-        | '\u{A802}'
-        | '\u{A806}'
-        | '\u{A80B}'
-        | '\u{A825}'..='\u{A826}'
-        | '\u{A8C4}'..='\u{A8C5}'
-        | '\u{A8E0}'..='\u{A8F1}'
-        | '\u{A926}'..='\u{A92D}'
-        | '\u{A947}'..='\u{A951}'
-        | '\u{A980}'..='\u{A982}'
-        | '\u{A9B3}'
-        | '\u{A9B6}'..='\u{A9B9}'
-        | '\u{A9BC}'..='\u{A9BD}'
-        | '\u{A9E5}'
-        | '\u{AA29}'..='\u{AA2E}'
-        | '\u{AA31}'..='\u{AA32}'
-        | '\u{AA35}'..='\u{AA36}'
-        | '\u{AA43}'
-        | '\u{AA4C}'
-        | '\u{AA7C}'
-        | '\u{AAB0}'
-        | '\u{AAB2}'..='\u{AAB4}'
-        | '\u{AAB7}'..='\u{AAB8}'
-        | '\u{AABE}'..='\u{AABF}'
-        | '\u{AAC1}'
-        | '\u{AAEC}'..='\u{AAED}'
-        | '\u{AAF6}'
-        | '\u{ABE5}'
-        | '\u{ABE8}'
-        | '\u{ABED}'
-        | '\u{FB1E}'
-        // Format characters the standard classifies as Extend: ZWNJ, variation selectors and tags.
-        | '\u{200C}'
-        | '\u{FE00}'..='\u{FE0F}'
-        | '\u{E0020}'..='\u{E007F}'
-        | '\u{E0100}'..='\u{E01EF}'
-        // Emoji skin-tone modifiers.
-        | '\u{1F3FB}'..='\u{1F3FF}'
-    )
-}
-
-/// Spacing marks (Unicode `Mc`): they take space, and GB9a still attaches them to their base.
-///
-/// Only the scripts this UI claims are listed; an unlisted spacing mark splits from its base, which
-/// is a coverage gap of OQ-11 and not a rule error.
-fn is_spacing_mark(character: char) -> bool {
-    matches!(character,
-        // Devanagari, the script this UI's own text is most likely to mix in.
-        '\u{0903}'
-        | '\u{093B}'
-        | '\u{093E}'..='\u{0940}'
-        | '\u{0949}'..='\u{094C}'
-        | '\u{094E}'..='\u{094F}'
-        // Bengali, Tamil, Telugu, Kannada, Malayalam: the vowel signs that take space.
-        | '\u{0982}'..='\u{0983}'
-        | '\u{09BE}'..='\u{09C0}'
-        | '\u{09C7}'..='\u{09C8}'
-        | '\u{09CB}'..='\u{09CC}'
-        | '\u{09D7}'
-        | '\u{0BBE}'..='\u{0BBF}'
-        | '\u{0BC1}'..='\u{0BC2}'
-        | '\u{0BC6}'..='\u{0BC8}'
-        | '\u{0BCA}'..='\u{0BCC}'
-        | '\u{0BD7}'
-        | '\u{0C01}'..='\u{0C03}'
-        | '\u{0C41}'..='\u{0C44}'
-        | '\u{0C82}'..='\u{0C83}'
-        | '\u{0CBE}'
-        | '\u{0CC0}'..='\u{0CC4}'
-        | '\u{0CC7}'..='\u{0CC8}'
-        | '\u{0CCA}'..='\u{0CCB}'
-        | '\u{0CD5}'..='\u{0CD6}'
-        | '\u{0D02}'..='\u{0D03}'
-        | '\u{0D3E}'..='\u{0D40}'
-        | '\u{0D46}'..='\u{0D48}'
-        | '\u{0D4A}'..='\u{0D4C}'
-        | '\u{0D57}'
-        | '\u{0D82}'..='\u{0D83}'
-        | '\u{0DCF}'..='\u{0DD1}'
-        | '\u{0DD8}'..='\u{0DDF}'
-        | '\u{0DF2}'..='\u{0DF3}'
-    )
-}
-
-/// Extended_Pictographic, approximated by the emoji blocks plus the BMP symbols that carry emoji
-/// presentation. GB11 needs this on **both** sides of a joining ZWJ.
-///
-/// The standard's list also contains sparse non-emoji code points (U+1F10D…, U+1FC00…), which are
-/// left out on purpose: leaving them out splits a sequence a renderer would join, while adding
-/// wrong ones would join sequences it would not.
-fn is_pictographic(character: char) -> bool {
-    matches!(character,
-        '\u{00A9}'
-        | '\u{00AE}'
-        | '\u{203C}'
-        | '\u{2049}'
-        | '\u{2122}'
-        | '\u{2139}'
-        | '\u{2194}'..='\u{2199}'
-        | '\u{21A9}'..='\u{21AA}'
-        | '\u{231A}'..='\u{231B}'
-        | '\u{2328}'
-        | '\u{23CF}'
-        | '\u{23E9}'..='\u{23F3}'
-        | '\u{23F8}'..='\u{23FA}'
-        | '\u{24C2}'
-        | '\u{25AA}'..='\u{25AB}'
-        | '\u{25B6}'
-        | '\u{25C0}'
-        | '\u{25FB}'..='\u{25FE}'
-        | '\u{2600}'..='\u{2604}'
-        | '\u{260E}'
-        | '\u{2611}'
-        | '\u{2614}'..='\u{2615}'
-        | '\u{2618}'
-        | '\u{261D}'
-        | '\u{2620}'
-        | '\u{2622}'..='\u{2623}'
-        | '\u{2626}'
-        | '\u{262A}'
-        | '\u{262E}'..='\u{262F}'
-        | '\u{2638}'..='\u{263A}'
-        | '\u{2640}'
-        | '\u{2642}'
-        | '\u{2648}'..='\u{2653}'
-        | '\u{265F}'..='\u{2660}'
-        | '\u{2663}'
-        | '\u{2665}'..='\u{2666}'
-        | '\u{2668}'
-        | '\u{267B}'
-        | '\u{267E}'..='\u{267F}'
-        | '\u{2692}'..='\u{2697}'
-        | '\u{2699}'
-        | '\u{269B}'..='\u{269C}'
-        | '\u{26A0}'..='\u{26A1}'
-        | '\u{26A7}'
-        | '\u{26AA}'..='\u{26AB}'
-        | '\u{26B0}'..='\u{26B1}'
-        | '\u{26BD}'..='\u{26BE}'
-        | '\u{26C4}'..='\u{26C5}'
-        | '\u{26C8}'
-        | '\u{26CE}'..='\u{26CF}'
-        | '\u{26D1}'
-        | '\u{26D3}'..='\u{26D4}'
-        | '\u{26E9}'..='\u{26EA}'
-        | '\u{26F0}'..='\u{26F5}'
-        | '\u{26F7}'..='\u{26FA}'
-        | '\u{26FD}'
-        | '\u{2702}'
-        | '\u{2705}'
-        | '\u{2708}'..='\u{270D}'
-        | '\u{270F}'
-        | '\u{2712}'
-        | '\u{2714}'
-        | '\u{2716}'
-        | '\u{271D}'
-        | '\u{2721}'
-        | '\u{2728}'
-        | '\u{2733}'..='\u{2734}'
-        | '\u{2744}'
-        | '\u{2747}'
-        | '\u{274C}'
-        | '\u{274E}'
-        | '\u{2753}'..='\u{2755}'
-        | '\u{2757}'
-        | '\u{2763}'..='\u{2764}'
-        | '\u{2795}'..='\u{2797}'
-        | '\u{27A1}'
-        | '\u{27B0}'
-        | '\u{27BF}'
-        | '\u{2934}'..='\u{2935}'
-        | '\u{2B05}'..='\u{2B07}'
-        | '\u{2B1B}'..='\u{2B1C}'
-        | '\u{2B50}'
-        | '\u{2B55}'
-        | '\u{3030}'
-        | '\u{303D}'
-        | '\u{3297}'
-        | '\u{3299}'
-        // The emoji blocks themselves.
-        | '\u{1F004}'
-        | '\u{1F0CF}'
-        | '\u{1F170}'..='\u{1F171}'
-        | '\u{1F17E}'..='\u{1F17F}'
-        | '\u{1F18E}'
-        | '\u{1F191}'..='\u{1F19A}'
-        | '\u{1F1E6}'..='\u{1F1FF}'
-        | '\u{1F201}'..='\u{1F202}'
-        | '\u{1F21A}'
-        | '\u{1F22F}'
-        | '\u{1F232}'..='\u{1F23A}'
-        | '\u{1F250}'..='\u{1F251}'
-        | '\u{1F300}'..='\u{1F321}'
-        | '\u{1F324}'..='\u{1F393}'
-        | '\u{1F396}'..='\u{1F397}'
-        | '\u{1F399}'..='\u{1F39B}'
-        | '\u{1F39E}'..='\u{1F3F0}'
-        | '\u{1F3F3}'..='\u{1F3F5}'
-        | '\u{1F3F7}'..='\u{1F3FA}'
-        | '\u{1F400}'..='\u{1F4FD}'
-        | '\u{1F4FF}'..='\u{1F53D}'
-        | '\u{1F546}'..='\u{1F64F}'
-        | '\u{1F680}'..='\u{1F6FF}'
-        | '\u{1F7E0}'..='\u{1F7EB}'
-        | '\u{1F90C}'..='\u{1F93A}'
-        | '\u{1F93C}'..='\u{1F945}'
-        | '\u{1F947}'..='\u{1F9FF}'
-        | '\u{1FA70}'..='\u{1FAFF}'
-    )
-}
+mod tables;
 
 /// What GB11 needs to know about the characters already in the cluster.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -805,6 +342,11 @@ mod tests {
         Clusters::new(text).map(|(offset, _)| offset).collect()
     }
 
+    /// How many ranges of the generated table carry `property`.
+    fn ranges(property: Property) -> usize {
+        tables::BREAK.iter().filter(|r| r.2 == property).count()
+    }
+
     #[test]
     fn ascii_is_one_cluster_per_character() {
         assert_eq!(clusters("abc"), vec!["a", "b", "c"]);
@@ -965,11 +507,98 @@ mod tests {
     }
 
     #[test]
-    fn an_unlisted_code_point_is_other_and_joins_nothing() {
-        // Coverage, not rules: a mark from a script the tables do not list starts its own cluster.
+    fn an_unassigned_code_point_is_other_and_joins_nothing() {
+        // No longer a coverage claim: the table *is* the database. A code point Unicode does not
+        // assign has no property, so it is `Other` and stands alone.
         assert_eq!(property('\u{10FFFF}'), Property::Other);
-        // And a leading mark is a cluster of its own rather than a continuation.
+        // A leading mark is still one cluster with the mark after it: GB9 forbids the break, not
+        // the start.
         assert_eq!(clusters("\u{301}\u{301}"), vec!["\u{301}\u{301}"]);
+    }
+
+    #[test]
+    fn a_mark_from_a_script_the_table_never_listed_joins_its_base() {
+        // OQ-11's actual failure. The old table was typed out a script at a time, so a combining
+        // mark whose script nobody listed was `Other`: it split from its base, and the seam became
+        // a caret position the renderer does not have. Kharoshthi and Mende Kikakui are scripts the
+        // old list could not have known about.
+        assert_eq!(clusters("\u{10A00}\u{10A38}"), vec!["\u{10A00}\u{10A38}"]);
+        assert_eq!(clusters("\u{1E900}\u{1E8D0}"), vec!["\u{1E900}\u{1E8D0}"]);
+        // Two classes the old approximation got wrong outright: the soft hyphen and the Arabic
+        // letter mark are `Cf`, which UAX #29 classes as Control, so they break on both sides
+        // instead of joining a neighbour.
+        assert_eq!(clusters("a\u{AD}b"), vec!["a", "\u{AD}", "b"]);
+        assert_eq!(clusters("a\u{61C}b"), vec!["a", "\u{61C}", "b"]);
+    }
+
+    #[test]
+    fn the_table_is_sorted_and_disjoint() {
+        // The lookup is a binary search, so the table's shape is load-bearing: a regenerated table
+        // that overlapped or was out of order would not fail to compile, it would answer wrong.
+        let mut previous: Option<char> = None;
+        for &(first, last, _) in tables::BREAK {
+            assert!(first <= last, "{first:?} > {last:?}");
+            if let Some(end) = previous {
+                assert!(end < first, "out of order at {first:?}");
+            }
+            previous = Some(last);
+        }
+    }
+
+    #[test]
+    fn the_table_is_the_database_and_not_a_sample_of_it() {
+        // The counts are Unicode 18.0.0's, minus what the generator drops on purpose: the 798
+        // precomposed-syllable ranges (arithmetic here) and the 78 `InCB` code points (whose rule
+        // is OQ-20). Regenerating against another Unicode version moves these numbers with it —
+        // which is the point: an upgrade is a decision with a diff, not a side effect.
+        assert_eq!(ranges(Property::Cr), 1);
+        assert_eq!(ranges(Property::Lf), 1);
+        assert_eq!(ranges(Property::Control), 19);
+        assert_eq!(ranges(Property::Extend), 390);
+        assert_eq!(ranges(Property::Zwj), 1);
+        assert_eq!(ranges(Property::RegionalIndicator), 1);
+        assert_eq!(ranges(Property::Prepend), 15);
+        assert_eq!(ranges(Property::SpacingMark), 158);
+        assert_eq!(ranges(Property::HangulL), 2);
+        assert_eq!(ranges(Property::HangulV), 4);
+        assert_eq!(ranges(Property::HangulT), 2);
+        assert_eq!(ranges(Property::Pictographic), 156);
+        assert_eq!(tables::BREAK.len(), 750);
+    }
+
+    #[test]
+    fn every_class_the_rules_read_has_code_points_in_it() {
+        // A class no character reaches is a rule arm that no text can test. Each one is pinned to a
+        // representative here, so the table and the `joins` match arms stay the same set.
+        let representatives = [
+            ('\r', Property::Cr),
+            ('\n', Property::Lf),
+            ('\u{0}', Property::Control),
+            ('\u{301}', Property::Extend),
+            ('\u{200D}', Property::Zwj),
+            ('\u{1F1E6}', Property::RegionalIndicator),
+            ('\u{600}', Property::Prepend),
+            ('\u{903}', Property::SpacingMark),
+            ('\u{1100}', Property::HangulL),
+            ('\u{1160}', Property::HangulV),
+            ('\u{11A8}', Property::HangulT),
+            ('\u{AC00}', Property::HangulLv),
+            ('\u{AC01}', Property::HangulLvt),
+            ('\u{1F600}', Property::Pictographic),
+            ('a', Property::Other),
+        ];
+        for (character, wanted) in representatives {
+            assert_eq!(property(character), wanted, "{character:?}");
+        }
+    }
+
+    #[test]
+    fn an_indic_conjunct_is_two_clusters_until_gb9c_is_written() {
+        // OQ-20, pinned rather than hidden: KA + VIRAMA + SSA is one conjunct to a renderer and two
+        // clusters here, because GB9c is not implemented. Whichever way OQ-20 is decided, this test
+        // changes with the decision — which is why it is written down.
+        let conjunct = vec!["\u{0915}\u{094D}", "\u{0937}"];
+        assert_eq!(clusters("\u{0915}\u{094D}\u{0937}"), conjunct);
     }
 
     #[test]
