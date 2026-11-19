@@ -57,8 +57,44 @@ Listed so they stay dead.
 | OQ-16 | **A leaf's height is measured apart from the line it is in, so the scroll bar counts a line the document does not have.** `reflow` laid each leaf out alone — necessarily, because measuring the continuous document would mean decrypting it — so a paragraph continuing across a boundary broke there in the measurement, and the per-leaf sum exceeded the continuous layout's height by up to one line per crossed boundary. **Closed by D-20**: the line is carried across the boundary as two words (the x the next cluster sits at, and whether the line began earlier), `layout_styled_from` lays a piece out as the continuation of a line, and `reflow`'s total now equals one continuous layout of the same text — proven by a test that lays the whole document out once. The fix also closed a bug that had not been written down: a frame used to begin at a leaf, which re-wrapped the paragraph from a point the document never breaks at. | **closed 2026-11-18 — the partition is exact, and frames begin at lines** |
 | OQ-17 | **A window that begins at a leaf decided its first cluster without the text before it.** It made a boundary the document does not have into a caret position, and stopped backspace/delete at the leaf edge. **Closed by D-22:** the UAX #29 state (last property, GB11 run, regional-indicator count) is carried beside the line position — `Clusters::continuing`/`carry`, `Layout::carry`, `layout_styled_continuing` — so a piece that opens inside a cluster segments as the document does, and its first line offers no boundary there. A frame was never affected: it begins at a line, and a line break is between clusters (D-20). The *advance* of a split cluster is OQ-18, measured, not assumed away. | **closed 2026-11-18 — segmentation is a function of the text and the state carried into it** |
 | OQ-18 | **A cluster split by a leaf cut pays its advance twice.** The eye shapes one cluster at a time, so a cluster whose bytes fall either side of a leaf cut was advanced on both sides: `e` + U+0301 is one unit wide in the document and two when a 64-unit wrap and a 64-byte leaf put the cut between them, which is one extra line in the scroll bar. **Closed by D-25:** the leaf the cluster starts in places it whole — a tail read of the leaf after the cut, a `skip` in the carry, and the next leaf's geometry beginning after the bytes it did not place — so one cluster costs one advance. The frame path computes the same skips from its own window, so the two measurements agree. | **closed 2026-11-18 — residual: a cluster longer than the leaf after the cut keeps the double advance, stated not hidden** |
-| OQ-19 | **A piece laid out without knowing what follows it offers its end as a caret, and shapes its last cluster short.** The eye sees text, not a document: a window's last byte can be inside a cluster, and `Line::boundaries` offers it while `Shaper::advance` was handed only the cluster's first part. The shell closes the caret half by asking the document (`legal_caret`, D-23); the advance half is OQ-18. | **open — needs the piece API to carry a second fact** | `layout_styled_continuing` would take, besides the state *before* the piece, whether the document **continues inside the piece's last cluster** — the same value a `Line` flag already has at the front, applied at the end. The caller's cost is the one thing that keeps this a row: knowing the answer means reading the character after the window, which is a leaf outside the window and a read on every frame, against OQ-12's "one screen plus two leaves" and L-2's habit of not faulting what it does not paint. Two honest ways to pay it: widen the window by the cluster's tail so the frame ends where the document has a position (faults nothing extra and paints the tail), or pass the flag and let the eye stop offering the boundary while still shaping the short cluster — the first is the better rectangle, and neither is worth guessing at without a shaper to measure it on. |
+| OQ-19 | **A piece laid out without knowing what follows it offers its end as a caret, and shapes its last cluster short.** The eye sees text, not a document: a window's last byte can be inside a cluster, and `Line::boundaries` offers it while `Shaper::advance` was handed only the cluster's first part. **Closed for this app by D-26** (the frame reads the cluster's tail with the window, so the piece it hands the eye ends on a cluster) and by D-23's `legal_caret` for what the frame cannot finish; the advance half was D-25. What remains open in *principle*: another caller of `View::hit_test` on a piece it truncated itself still gets the piece's end. | **closed 2026-11-18 for the only caller there is — residual: a cluster longer than the leaf after the cut, and any external caller that truncates its own piece** |
 ## Audit trail
+
+- **2026-11-18 — D-26 — the frame ends where the document has a position, not where a leaf does.**
+  Closes OQ-19 the short way. The eye laid out a piece of text and could not know what followed it,
+  so the piece's end was offered as a caret whether or not the document had a position there (D-23
+  corrected the click instead). Teaching the eye a second fact about a piece — that the document
+  continues inside its last cluster — is a parameter on `layout_styled_continuing`, a `Layout` field
+  and its mirror flag on the last line, and a read on every frame to learn the answer. The caller
+  can do the smaller thing: **stop handing the eye a piece that ends inside a cluster.**
+
+  **The change.** `frame()` reads one leaf past the window's end (the leaf a read's edge has to stop
+  on, because only a leaf boundary is both a byte count and a character boundary), lets the window's
+  text reach that far, and asks `tail_bytes` how many of those bytes belong to the cluster the cut
+  opened. The window's end grows by that much and the layout sees exactly `start..end` — the tail is
+  painted with the line it belongs to, the height model already charges that line to the leaf it
+  starts in, and `Line::boundaries` then offers only positions the document has. `hit_test` keeps
+  `legal_caret` (D-23) for what the frame cannot finish.
+
+  **What this costs, stated.** One extra leaf faulted per frame, and only when the document has a
+  leaf after the window at all: it is the leaf the next frame reads anyway, and the resident set
+  holds it, so the counted property OQ-12 records is unchanged — a screen's leaves, whatever the
+  document's length. The bytes handed to layout are still one screen plus the leaves already allowed.
+
+  **Residual, exactly.** A cluster longer than the leaf after the cut cannot be finished without a
+  longer look (D-25's bound, `CLUSTER_LEAF_LIMIT`'s spirit): the frame ends inside it and
+  `legal_caret` moves the click to where the cluster begins. So the eye's own `View::hit_test` still
+  offers a truncated piece's end to a caller that hands it one — OQ-19 is closed *for this app*,
+  which is the only caller there is, and the route to closing it for good is the piece flag above,
+  filed rather than built.
+
+  **Checked.** `a_frame_ends_where_the_document_has_a_position` — the every-leaf-boundary-inside-a-
+  cluster text: the frame ends past the cut (not on a multiple of 64), the end is a cluster start,
+  and every boundary the frame offers round-trips through a click with nothing corrected.
+  `a_cluster_too_long_for_the_look_is_still_not_a_caret` — `e` + 400 marks: the frame stops at 320
+  inside the cluster, and the click lands on 255, the `e` where the cluster begins. D-23's
+  `a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open` became the first of those
+  two by rewrite, since the frame no longer offers the boundary it was written against.
 
 - **2026-11-18 — D-25 — one cluster, one advance: the leaf a cluster starts in places it whole.**
   OQ-18's fix, and the same mechanism OQ-19 is waiting on. A leaf cut is a byte count, so a cluster

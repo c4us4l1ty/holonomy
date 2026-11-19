@@ -616,11 +616,11 @@ fn a_frame_hands_each_leaf_the_state_from_before_it() {
 }
 
 #[test]
-fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
-    // The frame ends where the window ends, and a window ends at a leaf — a byte count (D-22), so
-    // the cut can fall inside a cluster. The eye cannot tell that from the frame's text alone, so
-    // a click past the last cluster would put the caret inside a grapheme, and typing there would
-    // split it. The document is what knows, and the position it has is the one before the cluster.
+fn a_frame_ends_where_the_document_has_a_position() {
+    // The window ends at a leaf and a leaf cut is a byte count, so the window's own end can fall
+    // inside a cluster. A frame draws *and* hit tests, so it reads the cluster's tail with the
+    // window and ends on it: no boundary it offers is a byte the document does not have, and no
+    // click has to be corrected afterwards (AUDIT D-26, OQ-19).
     let mut shell = session();
     let text = a_cluster_straddling_every_leaf();
     shell.type_text(&text).expect("typed");
@@ -639,17 +639,11 @@ fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
         frame.origin() + frame.text().len() as u64
     };
     assert!(end > 0 && end < text.len() as u64, "the window is a prefix");
-    assert_eq!(end % 64, 0, "it ends at a leaf");
+    assert_ne!(end % 64, 0, "the frame did not stop at the cut");
     assert!(
-        !starts.contains(&end),
-        "and that leaf cut is inside a grapheme"
+        starts.contains(&end) || end == text.len() as u64,
+        "the frame ends where a cluster begins"
     );
-    let before = starts
-        .iter()
-        .copied()
-        .filter(|at| *at < end)
-        .max()
-        .expect("a cluster before the cut");
 
     let mut carets = 0;
     for (x, top, byte) in boundaries {
@@ -657,14 +651,7 @@ fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
             .click(Point::new(x, top))
             .expect("clicked")
             .expect("a caret");
-        if byte == end {
-            assert_eq!(
-                caret.byte, before,
-                "the cut is inside the cluster at {before}, and a caret goes there"
-            );
-        } else {
-            assert_eq!(caret.byte, byte, "a legal caret round-trips");
-        }
+        assert_eq!(caret.byte, byte, "every boundary round-trips, the end included");
         assert!(
             starts.contains(&caret.byte) || caret.byte == text.len() as u64,
             "the caret at {} is inside a grapheme",
@@ -673,6 +660,43 @@ fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
         carets += 1;
     }
     assert!(carets > 1, "the frame offered more than its own end");
+}
+
+#[test]
+fn a_cluster_too_long_for_the_look_is_still_not_a_caret() {
+    // D-25's residual, kept honest for the caret: a cluster longer than the leaf after the cut
+    // cannot be finished by the frame, so the frame ends inside it — and the click is corrected to
+    // where the cluster begins rather than landing in the middle of a grapheme (AUDIT D-26).
+    let mut document = "a".repeat(255);
+    document.push('e');
+    document.push_str(&"\u{301}".repeat(400));
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+
+    let starts: Vec<u64> = Clusters::new(&document).map(|(at, _)| at as u64).collect();
+    let (x, top, byte, end) = {
+        let frame = shell.frame().expect("a frame");
+        let mut last = None;
+        for line in frame.layout().lines() {
+            for (x, at) in line.boundaries() {
+                last = Some((x, line.top(), at));
+            }
+        }
+        let end = frame.origin() + frame.text().len() as u64;
+        let (x, top, byte) = last.expect("a boundary");
+        (x, top, byte, end)
+    };
+    assert_eq!(byte, end, "the frame's last boundary is the frame's own end");
+    assert_eq!(end, 320, "the look reached the leaf after the cut and stopped");
+    assert!(!starts.contains(&end), "and that byte is inside the cluster");
+
+    let caret = shell
+        .click(Point::new(x, top))
+        .expect("clicked")
+        .expect("a caret");
+    assert_eq!(caret.byte, 255, "the cluster begins at the `e`");
 }
 
 #[test]

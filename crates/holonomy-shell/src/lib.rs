@@ -698,16 +698,27 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         self.measured.heights.reset_reads();
         let (start, end, leaves, provisional) = self.choose_window()?;
 
-        let text = self.read(start, end)?;
-        self.window = Some(text);
-        let text: &str = self.window.as_ref().map_or("", |text| text.text());
+        // The window ends at a leaf, and a leaf cut is a byte count, so the window can end inside
+        // a cluster. A frame draws *and* hit tests, so it has to end where the document has a
+        // position: the cluster's tail comes with the window and is painted with it, and the eye
+        // is never asked to offer a boundary the document does not have (AUDIT D-26, OQ-19). A
+        // cluster longer than the leaf after the cut cannot be finished here; that bound is
+        // `legal_caret`'s, and D-25's residual.
+        let document_end = self.typing.document_len();
+        let look = self.leaf_range(end).map_or(end, |(_, next_end)| next_end);
+        let read = self.read(start, look)?;
+        self.window = Some(read);
+        let full: &str = self.window.as_ref().map_or("", |text| text.text());
+        let cut = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
+        let end = end + tail_bytes(full, cut, ClusterContext::START) as u64;
+        let len = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
+        let text: &str = full.get(..len).unwrap_or(full);
         let layout = layout_styled(StyledText::plain(text), start, self.width, &self.shaper);
 
         let spans = self
             .typing
             .draft()
             .spans_in(self.typing.spine(), start, end);
-        let document_end = self.typing.document_len();
         let first = leaves.first();
         let measured = measure_window(&layout, text, &spans, start, end, document_end);
         for (index, height, carry) in measured {
@@ -1066,9 +1077,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// `at` if the document has a caret there, or where the cluster containing it begins.
     ///
     /// Only the frame's end needs this (see [`Self::hit_test`]): the window's last cluster can be
-    /// cut in two by the leaf the window stops at. The position the document does have is the one
-    /// before that cluster, which is on the same line, painted, and a boundary a click could have
-    /// landed on had the cut fallen one byte earlier.
+    /// cut in two by the leaf the window stops at. The frame normally reaches past the cut and
+    /// ends on the cluster (AUDIT D-26), so this guards what it cannot finish — a cluster longer
+    /// than the leaf after the cut, which is D-25's residual. The position the document does have
+    /// is the one before that cluster, which is on the same line, painted, and a boundary a click
+    /// could have landed on had the cut fallen one byte earlier.
     ///
     /// # Errors
     ///
@@ -1182,6 +1195,20 @@ fn leaf_text(text: &str, start: u64, carry: Carry) -> (&str, u64) {
         Some(rest) if carry.after_cr => (rest, start + 1),
         _ => (text, start),
     }
+}
+
+/// How many bytes past `at` belong to the cluster that straddles it, or zero when one starts there.
+///
+/// `at` is a byte offset into `text`, which is segmented from `context`. The answer is bounded by
+/// `text`'s own end: a cluster that needs more bytes than the caller read is reported as far as the
+/// text goes, which is a bound the caller chose, not a claim that the cluster ended (AUDIT D-26).
+fn tail_bytes(text: &str, at: usize, context: ClusterContext) -> usize {
+    if at == 0 || at >= text.len() {
+        return 0;
+    }
+    Clusters::continuing(text, context)
+        .find(|&(start, cluster)| start + cluster.len() > at)
+        .map_or(0, |(start, cluster)| start + cluster.len() - at)
 }
 
 /// What one window measured, for the leaves it measured **in full**: their heights and the carry
