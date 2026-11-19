@@ -59,8 +59,110 @@ Listed so they stay dead.
 | OQ-18 | **A cluster split by a leaf cut pays its advance twice.** The eye shapes one cluster at a time, so a cluster whose bytes fall either side of a leaf cut was advanced on both sides: `e` + U+0301 is one unit wide in the document and two when a 64-unit wrap and a 64-byte leaf put the cut between them, which is one extra line in the scroll bar. **Closed by D-25:** the leaf the cluster starts in places it whole — a tail read of the leaf after the cut, a `skip` in the carry, and the next leaf's geometry beginning after the bytes it did not place — so one cluster costs one advance. The frame path computes the same skips from its own window, so the two measurements agree. | **closed 2026-11-18 — residual: a cluster longer than the leaf after the cut keeps the double advance, stated not hidden** |
 | OQ-19 | **A piece laid out without knowing what follows it offers its end as a caret, and shapes its last cluster short.** The eye sees text, not a document: a window's last byte can be inside a cluster, and `Line::boundaries` offers it while `Shaper::advance` was handed only the cluster's first part. **Closed for this app by D-26** (the frame reads the cluster's tail with the window, so the piece it hands the eye ends on a cluster) and by D-23's `legal_caret` for what the frame cannot finish; the advance half was D-25. What remains open in *principle*: another caller of `View::hit_test` on a piece it truncated itself still gets the piece's end. | **closed 2026-11-18 for the only caller there is — residual: a cluster longer than the leaf after the cut, and any external caller that truncates its own piece** |
 | OQ-20 | **GB9c was not implemented, so an Indic conjunct was two clusters.** Unicode 15.1's rule — `InCB=Consonant [InCB=Extend InCB=Linker]* InCB=Linker [InCB=Extend InCB=Linker]* × InCB=Consonant` — makes KA + VIRAMA + SSA one cluster in Devanagari and the same shape one in Bengali, Gujarati, Oriya, Telugu, Malayalam and the historic scripts; without it the seam between the consonant and its conjunct was offered as a caret position, in a script `docs/UI-SPEC.md` §8 names. Not a misread rule but an absent one, which is the class of gap no test can fail — hence the row, and hence building it rather than pinning it again. **Closed 2026-11-19 (D-28)**: the two properties are generated (`InCB=Consonant`, 78 ranges; `InCB=Linker`, 23 code points), `InCB=Extend` is derived from the break class by the standard's own formula, and the run is state in `Context`, so it travels across a leaf cut like every other left context. Residual: `unicode-segmentation` suppresses the break before a consonant on having seen *any* linker, where the standard's left context must be rooted in `InCB=Consonant`; this reads the rule, so `a` + VIRAMA + SSA is two clusters here, and a test pins it. | **closed — 2026-11-19, D-28** |
+| OQ-21 | **Redo is not always the inverse of the undo it undoes.** Found by D-30's runner, 2026-11-19. Unwinding the retained undo stack and rewinding it reports a document that comes back **one byte short**: seed 2, twenty thousand actions, 409 bytes expected, 408 returned, first difference at byte 260 — the region of an earlier `insert(155, 3)` / `mark` / `insert(158, 3)` on top of a `delete(260, 261)` + `insert(260, 1)` pair, with the last pushed step being a root recorded before a cut. Two facts are pinned by the harness: the undo and redo are exact for *marks* (`set_live` truncates the draft and redo grows it back), and the loss appears when the step restored is a **root** — `restore_root` drops the open buffer and rebuilds the spine from the recorded root, and the state `leave` records for redo is `settled_spine()`, the tree without the open leaf's *registered* extent. The likely mechanism is therefore an extent disagreement: when the open leaf's live length is shorter than the extent it was registered with (a cut inside the buffer), `settled_spine` removes `registered` bytes — which is right for the tree — but the *document* held only `live`, and the neighbouring leaf is cut by the difference. Not fixed here: it is a change to `Typing`'s undo geometry, not to the harness, and it must land with a test that pins the arithmetic. The reproducer is `unwinding_the_retained_undo_stack_comes_back_to_the_same_document` in `tests/keystroke_fuzz.rs`, `#[ignore]`d with this row as its reason. | **open — found 2026-11-19 by the third gate's runner; blocks the gate's undo clause** |
+
 ## Audit trail
 
+- **2026-11-19 — D-31 — a seal writes the live bytes, not the buffer behind them (found by the
+  gate it was written for).** The first run of D-30's harness failed within a second, on a length
+  the session and the independent model disagreed about by exactly the three bytes an undo had
+  taken back. `Typing::seal` appended `buffer.as_bytes()` — the whole resident buffer — while the
+  document's length comes from the *live* prefix of it; an undo deliberately leaves the bytes it
+  took back *behind* that prefix so redo can hand them over without copying anything. A seal is an
+  undo floor (`steps` and `undone` are cleared), so the tail can never be redone, and writing it
+  appended text that no mark, no root and no leaf could name: the document grew by exactly what
+  undo had removed. `seal` now appends `live_len()` bytes and the corrected slab carries that same
+  length, so a flush after an undo writes what the document says. Pinned by
+  `a_seal_writes_the_live_bytes_and_not_the_undone_tail_behind_them`, and the harness keeps what
+  it found the bug with: a failing step now names the action, its offsets and the caret, so the
+  next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
+  still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-19 — D-32 — a burst that fills the buffer splits between characters, not inside
+  one.** Found by D-30's runner at seed 0, step 529 894 of the million: `insert at 309` refused
+  `Text(InvalidUtf8)` with 239 bytes open and a three-byte character next in the burst.
+  `Typing::type_bytes` took `min(room, rest.len())` bytes and handed them to `SlabText::insert`,
+  which validates UTF-8 — so when the room left in the buffer was smaller than the character at the
+  split point (two bytes of room, a three-byte arrow) the edit was refused outright, and the
+  keystroke was lost. The split now walks back to a character start, and when the next character
+  does not fit whole the seal goes first, so the character begins the next source. A seal that
+  lands *inside* a character would have been worse than the refusal: two segments whose halves are
+  each not text, and no reader could ever put them back together. Pinned by
+  `a_burst_that_fills_the_buffer_splits_between_characters_and_never_inside_one`, which would have
+  failed with exactly the error the fuzz run reported.
+- **2026-11-19 — D-30 — the gate has a runner in the tree, and the gate is not claimed.**
+  Of Block 4's three gates this is the only one that is a test rather than a measurement on
+  reference hardware, so it is *approached* with a test: `crates/holonomy-text/tests/keystroke_fuzz.rs`
+  drives one seeded generator over a real `Typing` session, a real `ResidentSet` and one shared
+  segment store — a world-line stand-in that is a `Vec`, because the seam that matters (the sink
+  appends, the source faults in the same bytes) is what `tests/commit_boundary.rs` already proves
+  against the real container. The file is honest about the difference between running a gate and
+  passing one: **it says in its own module comment that the gate is not claimed**, and ROADMAP's
+  checkbox stays empty.
+  What it does assert, on every push, over a short slice (six seeds of 20 000 actions, every action
+  checked) and over the gate's million keystrokes (four runs of 250 000, `#[ignore]`d, release, run
+  by the `test` job):
+  (a) **the oracle is a second implementation.** A `String` receives every edit and the document is
+  read back through `copy` — the reader the Eye and the shell use — so a leaf, a draft or a
+  residency bug cannot pass by agreeing with itself; the leaves are additionally checked to tile
+  the document once and to name only segments that exist, with the *span's* extent (a drafted leaf's
+  slab keeps the length it was registered with, which is not the length it carries).
+  (b) **"zero leaks" is stated as bytes.** The view is the model's, every leaf is backed, and a wipe
+  leaves nothing resident; freed heap memory is not observable from a test and is `zeroize`'s claim,
+  not this file's.
+  (c) **"undo past every point in the log" is the session's retained stack** — `UNDO_DEPTH` 1024
+  marks, `ROOT_DEPTH` 64 roots, oldest dropped, and a cut drops the marks above it — unwound state by
+  state with every redo required to be the exact inverse of the undo it undoes, against the *settled*
+  document: a root recorded before a cut is the tree without whatever was open, because pending bytes
+  are in no segment and no root can name them (`restore_root`, OQ-8), so undo across an unsealed cut
+  returns to the last *written* document and a seal is how a user keeps what they typed. That clause
+  is where the gate currently stops: see OQ-21.
+  Two runs, two bugs, which is what a fuzz harness is for: D-31 (fixed here) and OQ-21 (filed, with
+  its seed and step).
+- **2026-11-19 — D-31 — a seal writes the live bytes, not the buffer behind them (found by the
+  gate it was written for).** The first run of D-30's harness failed within a second, on a length
+  the session and the independent model disagreed about by exactly the three bytes an undo had
+  taken back. `Typing::seal` appended `buffer.as_bytes()` — the whole resident buffer — while the
+  document's length comes from the *live* prefix of it; an undo deliberately leaves the bytes it
+  took back *behind* that prefix so redo can hand them over without copying anything. A seal is an
+  undo floor (`steps` and `undone` are cleared), so the tail can never be redone, and writing it
+  appended text that no mark, no root and no leaf could name: the document grew by exactly what
+  undo had removed. `seal` now appends `live_len()` bytes and the corrected slab carries that same
+  length, so a flush after an undo writes what the document says. Pinned by
+  `a_seal_writes_the_live_bytes_and_not_the_undone_tail_behind_them`, and the harness keeps what
+  it found the bug with: a failing step now names the action, its offsets and the caret, so the
+  next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
+  still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-19 — D-30 — Block 4's third gate is a seeded harness in the tree, and its words are
+  defined.** Of the block's three gates this is the only one that is a test rather than a
+  measurement on reference hardware, so it is claimed with a test:
+  `crates/holonomy-text/tests/keystroke_fuzz.rs` drives one seeded generator over a real `Typing`
+  session, a real `ResidentSet` and one shared segment store — a world-line stand-in that is a
+  `Vec`, because the seam that matters (sink appends, source faults in the same bytes) is what
+  `tests/commit_boundary.rs` already proves against the real container. Four runs of 250 000
+  keystrokes make the million, and the cuts, marks, undos, wipes and fault-ins between them are
+  *extra* actions rather than substitutes for keystrokes. Three decisions live in the file rather
+  than in this paragraph:
+  (a) **the oracle is a second implementation.** A `String` receives every edit and the document is
+  read back through `copy` — the reader the Eye and the shell use — every 64 actions, so a leaf, a
+  draft or a residency bug cannot pass by agreeing with itself; the leaves are additionally checked
+  to tile the document once and to name only segments that exist.
+  (b) **the count is rehearsed, not remembered.** The ignored case is executed by the `test` CI job
+  in release on every push and its `HOLONOMY_KEYSTROKE_FUZZ` line is the gate's evidence, so the
+  number cannot drift from the tree the way a typed-in measurement can. The default `cargo test`
+  runs a shorter slice of the same harness, which is what a sandbox without a toolchain actually
+  reads.
+  (c) **the words are made smaller than they sound.** "Zero leaks" is asserted over bytes the engine
+  can observe — the view is the model's, every leaf is backed, and a wipe leaves nothing resident —
+  and never over freed heap memory, which no test can see and `zeroize` owns. "Undo past every
+  point in the log" is the session's *retained* stack: `UNDO_DEPTH` 1024 marks, `ROOT_DEPTH` 64
+  roots, oldest dropped, and a cut drops the marks above it. Undoing inside the run is checked
+  against the set of lengths the session has actually been in; the stack itself is then unwound and
+  rewound, with redo required to land on the byte-identical document, which is the half that does
+  not trust the harness's idea of what an undo means. Deeper history is the log's, and Block 8's to
+  reconstruct.
+  Residual, named: the run keeps its document in a 64–512-byte band, which is what bounds the leaf
+  count and keeps the million actions a test rather than a benchmark. It therefore proves the
+  invariants under churn, not at document scale — gates 1 and 2 still carry that, and stay open.
 - **2026-11-19 — D-29 — a rebuilt spine carries the document's shape, not its edit history.**
   OQ-9's load-time half. A cut inside a leaf leaves one segment naming the same plaintext from two
   leaves: content correct, storage shared, but every leaf is a height-model row, a residency slot and

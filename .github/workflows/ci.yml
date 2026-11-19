@@ -63,6 +63,7 @@ jobs:
               "cargo tree -e features -p holonomy-seal >/tmp/holonomy-seal-feature-tree.txt && { grep -F zeroize /tmp/holonomy-seal-feature-tree.txt; git diff -- Cargo.lock; }" \
               "cargo clippy --locked --workspace --all-targets -- -D warnings" \
               "cargo test --locked --workspace" \
+              "cargo test --locked -p holonomy-text --release --test keystroke_fuzz -- --exact --ignored --nocapture a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement" \
               "cargo run --locked -p xtask -- gates --check" \
               "cargo test --locked -p holonomy-line --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored --nocapture" \
               "scripts/qualify-ext4-enospc.sh"; do
@@ -151,6 +152,19 @@ jobs:
             fi
           done
       - run: cargo test --locked --workspace
+      # Block 4's third gate is a *count*, so it is rehearsed instead of remembered. The step above
+      # runs the short slice of the same harness in a debug build; this runs its million keystrokes in
+      # release and prints HOLONOMY_KEYSTROKE_FUZZ as the measurement. The gate is NOT claimed: its
+      # undo clause is blocked on OQ-21, which is why undo and redo stay out of this run and why the
+      # walk is a separate, `#[ignore]`d reproducer (AUDIT D-30, D-31, OQ-21).
+      - name: Rehearse Block 4's third gate (1 M random keystrokes)
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-text --release --test keystroke_fuzz -- \
+            --exact --ignored --nocapture \
+            a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement \
+            2>&1 | tee "$RUNNER_TEMP/keystroke-fuzz.log"
+          grep 'HOLONOMY_KEYSTROKE_FUZZ' "$RUNNER_TEMP/keystroke-fuzz.log"
 
   sync:
     name: L-10 rsync transfer measurement
