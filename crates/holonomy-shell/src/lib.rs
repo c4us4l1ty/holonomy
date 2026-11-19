@@ -1000,8 +1000,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             };
             let carried = self.measured.carry(leaf);
             let from = leaf_start + carried.skip as u64;
-            let placed =
-                (leaf_end + self.measured.carry(leaf + 1).skip as u64).min(document);
+            let placed = (leaf_end + self.measured.carry(leaf + 1).skip as u64).min(document);
             let start = at.max(from);
             if start >= placed {
                 if placed >= document || hops >= CLUSTER_LEAF_LIMIT {
