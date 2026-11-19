@@ -183,22 +183,6 @@ enum Mark {
     },
 }
 
-/// The bytes that were open when a root step's inverse was taken.
-///
-/// A root names **written** bytes only, so restoring one drops whatever was open over the buffer.
-/// That is right for the undo — the bytes were typed after the cut, and the state before the cut
-/// did not have them — but it must not be right for the redo as well: undo then redo of a cut would
-/// silently lose the last thing typed, one byte at a time if that is how it was typed. Keeping a
-/// copy here is what makes the redo exact; it is a copy because the buffer itself is about to be
-/// cleared, and it is at most one capacity, taken on an undo, never on a keystroke.
-#[derive(Debug, Clone)]
-struct Pending {
-    /// The document offset the open bytes sat at.
-    at: u64,
-    /// The open bytes themselves, in document order.
-    bytes: Vec<u8>,
-}
-
 /// One state the session can return to.
 #[derive(Debug, Clone)]
 enum Step {
@@ -215,11 +199,29 @@ enum Step {
         spine: Spine,
         /// The document offset the cut started at — where the caret goes back to.
         at: u64,
-        /// The bytes that were open when this state was *left*, so the redo can re-attach them.
-        /// `None` for a root recorded before a cut: at a cut nothing is open, and an undo of it
-        /// restores the root rather than leaving it.
-        pending: Option<Pending>,
+        /// How many bytes were open when this state was *left*, so the redo can re-attach them
+        /// from the buffer. Zero for a root recorded before a cut: at a cut nothing is open, and an
+        /// undo of it restores the root rather than leaving it.
+        pending: usize,
     },
+}
+
+/// One retained state, as a debugger or a fuzz harness wants to see it.
+///
+/// This exists so a failure can say *which* state was wrong — a length, a root, and where — instead
+/// of only that a document came back a byte short. It is not part of the editing API: nothing in
+/// the session reads it, and `#[doc(hidden)]` keeps it out of the documentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepSummary {
+    /// `sealed` for a length with no open source, `live` for one in a source, `root` for a tree.
+    pub kind: &'static str,
+    /// The document offset the state names: where the caret goes back to.
+    pub at: u64,
+    /// A live mark's length; a root's pending length; zero for a sealed mark.
+    pub len: usize,
+    /// A root's tree length; zero for a mark.
+    pub tree: u64,
 }
 
 /// A document's tail while it is being typed into.
@@ -406,6 +408,20 @@ impl<S: SegmentSink> Typing<S> {
         Ok(true)
     }
 
+    /// The state an [`Self::undo`] would return to, described for a debugger.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn top_undo(&self) -> Option<StepSummary> {
+        self.steps.last().map(summary)
+    }
+
+    /// The state a [`Self::redo`] would re-apply, described for a debugger.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn top_redo(&self) -> Option<StepSummary> {
+        self.undone.last().map(summary)
+    }
+
     /// How many undo states the session holds.
     #[must_use]
     pub fn undo_depth(&self) -> usize {
@@ -449,11 +465,24 @@ impl<S: SegmentSink> Typing<S> {
     fn leave(&mut self, step: Step) -> Result<Step, TypingError> {
         let current = match &step {
             Step::Mark(_) => Step::Mark(self.current_mark()),
-            Step::Root { .. } => Step::Root {
-                spine: self.settled_spine()?,
-                at: self.open.map_or_else(|| self.caret(), |open| open.at),
-                pending: self.pending_step(),
-            },
+            Step::Root { .. } => {
+                let spine = self.settled_spine()?;
+                let pending = self.pending_len();
+                // The arithmetic the walk rests on, checked where it is used: the tree without the
+                // open leaf, plus the bytes the leaf holds, is the document. A state that does not
+                // add up is a state whose redo cannot be exact, and it is cheaper to say so here
+                // than to infer it from a document twenty actions later.
+                debug_assert_eq!(
+                    spine.len() + u64::try_from(pending).expect("a buffer fits in u64"),
+                    self.document_len(),
+                    "the settled tree and the open bytes do not add up to the document"
+                );
+                Step::Root {
+                    spine,
+                    at: self.open.map_or_else(|| self.caret(), |open| open.at),
+                    pending,
+                }
+            }
         };
         match step {
             Step::Mark(mark) => self.restore_mark(mark)?,
@@ -472,7 +501,13 @@ impl<S: SegmentSink> Typing<S> {
             return Ok(self.spine.clone());
         };
         let end = open.at + u64::from(open.registered);
-        Ok(self.spine.remove_range(open.at, end)?)
+        let settled = self.spine.remove_range(open.at, end)?;
+        debug_assert_eq!(
+            self.spine.len() - settled.len(),
+            u64::from(open.registered),
+            "the open leaf is not in the tree at its stated offset"
+        );
+        Ok(settled)
     }
 
     /// The state the session is in now, as a mark would record it.
@@ -489,6 +524,18 @@ impl<S: SegmentSink> Typing<S> {
     /// Moves the session to a length, touching at most one leaf — never bytes.
     fn restore_mark(&mut self, mark: Mark) -> Result<(), TypingError> {
         match (mark, self.open) {
+            (Mark::Live { at, len }, Some(open)) if open.at != at => {
+                // The open leaf is not the one this state was taken over — undo and redo can move a
+                // leaf, and a mark remembers where it was. The bytes are still in the buffer, so
+                // the leaf comes out of the tree and goes back where it belongs; a length-only
+                // restore would put them in the wrong place, which is OQ-22.
+                let leaf_end = open.at + u64::from(open.registered);
+                self.spine = self.spine.remove_range(open.at, leaf_end)?;
+                self.sources.close(open.source);
+                self.open = None;
+                self.next_at = Some(at.min(self.spine.len()));
+                self.attach(len)
+            }
             (Mark::Live { len, .. }, Some(_)) => self.set_live(len),
             (Mark::Live { at, len }, None) => {
                 // Redo of "there was no source": the leaf comes back where it was, which is the
@@ -515,59 +562,37 @@ impl<S: SegmentSink> Typing<S> {
     }
 
     /// Moves the session to a sealed state: this root, this caret, and — when a redo is coming
-    /// back to it — the bytes that were open.
+    /// back to it — the bytes that were open, re-attached out of the buffer.
     ///
     /// Anything open here is *pending*: a seal would have dropped this step, so the bytes were
-    /// never written and discarding them loses nothing the world-line has. The text a cut removed
-    /// is the other way round — it is in the log, and the root names it again. The pending bytes
-    /// are the third case: dropped by the undo, and put back by the redo (`Step::Root::pending`),
-    /// so that undo then redo reads as a no-op instead of losing them (OQ-21).
-    fn restore_root(
-        &mut self,
-        spine: Spine,
-        at: u64,
-        pending: Option<Pending>,
-    ) -> Result<(), TypingError> {
+    /// never written and the world-line does not have them. The buffer does, and that is the whole
+    /// reason a root restore **keeps** the buffer instead of clearing it: a mark is a length into
+    /// that buffer (no copy, no allocation), so every state that measured those bytes stays
+    /// restorable, and a redo can hand them back exactly as they were. `pending` says how much of
+    /// the buffer the state being left had open; the text a cut removed is a different case — it is
+    /// in the world-line, and the root names it again for free.
+    fn restore_root(&mut self, spine: Spine, at: u64, pending: usize) -> Result<(), TypingError> {
         if let Some(open) = self.open {
             self.sources.close(open.source);
             self.open = None;
         }
         self.draft.clear();
-        self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
-            .expect("an empty slab is valid UTF-8");
         self.spine = spine;
         self.next_at = Some(at.min(self.spine.len()));
-        if let Some(pending) = pending {
-            self.re_attach(pending)?;
+        if pending > 0 {
+            self.attach(pending)?;
         }
         Ok(())
     }
 
-    /// The bytes that are open now, as a redo can put them back.
+    /// How many bytes the open source holds right now: what a redo has to re-attach.
     ///
-    /// `None` when nothing is open, and also when the open leaf's live length is zero — the settled
-    /// tree already says everything the document says in that case.
-    fn pending_step(&self) -> Option<Pending> {
-        let open = self.open?;
-        let live = self.live_len();
-        if live == 0 {
-            return None;
+    /// Zero when nothing is open — the settled tree already says everything the document says.
+    fn pending_len(&self) -> usize {
+        if self.open.is_none() {
+            return 0;
         }
-        Some(Pending {
-            at: open.at,
-            bytes: self.buffer.as_bytes()[..live].to_vec(),
-        })
-    }
-
-    /// Puts bytes that were open back over the buffer, under a new provisional id.
-    ///
-    /// The leaf is registered at its full length, so the tree names the bytes and the document
-    /// reads as it did — the bytes stay *open*, exactly as they were before the undo dropped them.
-    fn re_attach(&mut self, pending: Pending) -> Result<(), TypingError> {
-        self.buffer = SlabText::from_plaintext(pending.bytes, self.capacity)?;
-        let len = self.buffer.len();
-        self.next_at = Some(pending.at.min(self.spine.len()));
-        self.attach(len)
+        self.live_len()
     }
 
     /// Records the tree as it is now, so a cut about to happen can be taken back.
@@ -577,7 +602,7 @@ impl<S: SegmentSink> Typing<S> {
             spine: self.spine.clone(),
             at,
             // Nothing is open at a cut — `delete` seals first, so every offset is the tree's own.
-            pending: None,
+            pending: 0,
         });
     }
 
@@ -625,6 +650,11 @@ impl<S: SegmentSink> Typing<S> {
         let Some(open) = self.open else {
             return Ok(());
         };
+        debug_assert!(
+            len <= self.buffer.len(),
+            "a length cannot be longer than the buffer it measures ({len} > {})",
+            self.buffer.len()
+        );
         if len == usize::try_from(open.registered).expect("capacity fits in usize") {
             // Back to the sealed length: the overlay has nothing left to say (D-2).
             self.draft.forget(open.at);
@@ -642,6 +672,11 @@ impl<S: SegmentSink> Typing<S> {
     /// This is redo of "there was no source": the text comes back under a *new* provisional id,
     /// because the abandoned one is never reused.
     fn attach(&mut self, len: usize) -> Result<(), TypingError> {
+        debug_assert!(
+            len <= self.buffer.len(),
+            "a leaf cannot claim bytes the buffer does not hold ({len} > {})",
+            self.buffer.len()
+        );
         let registered = u32::try_from(len).expect("capacity fits in u32");
         let source = self.sources.open();
         let at = self.next_at.take().unwrap_or_else(|| self.spine.len());
@@ -774,7 +809,13 @@ impl<S: SegmentSink> Typing<S> {
     #[must_use]
     pub fn pending(&self) -> &[u8] {
         // An undone tail is in the buffer and not in the document, so it is not pending either.
-        &self.buffer.as_bytes()[..self.live_len()]
+        let live = self.live_len();
+        debug_assert!(
+            live <= self.buffer.len(),
+            "the document cannot be pending over bytes the buffer does not hold ({live} > {})",
+            self.buffer.len()
+        );
+        &self.buffer.as_bytes()[..live]
     }
 
     /// The document's length, drafts applied — what the user would call "how long is this".
@@ -865,6 +906,30 @@ impl<S: SegmentSink> Typing<S> {
         self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
             .expect("an empty slab is valid UTF-8");
         Ok(())
+    }
+}
+
+/// Describes one retained state.
+fn summary(step: &Step) -> StepSummary {
+    match step {
+        Step::Mark(Mark::Sealed { at }) => StepSummary {
+            kind: "sealed",
+            at: *at,
+            len: 0,
+            tree: 0,
+        },
+        Step::Mark(Mark::Live { at, len }) => StepSummary {
+            kind: "live",
+            at: *at,
+            len: *len,
+            tree: 0,
+        },
+        Step::Root { spine, at, pending } => StepSummary {
+            kind: "root",
+            at: *at,
+            len: *pending,
+            tree: spine.len(),
+        },
     }
 }
 

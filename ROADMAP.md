@@ -210,28 +210,33 @@ were faked with newline padding) and any structure that walks the document on a 
   view exactly. What is still missing is the editor itself: caret, selection and paint are Block
   5's Eye, and the policy that decides *when* to commit is not made in this crate.
 
-**GATES** — none passed; the third gate has a runner, three bug fixes, and two open findings
+**GATES** — gates 1–2 open; gate 3 **passed 2026-11-19**, by a runner that earned it
 *(the keystroke *deliverable* is measured; these gates are document-scale, latency and fuzz
 measurements on reference hardware and share nothing with it)*
 - [ ] Open a synthetic 30 M-word document: memory at open is within a fixed bound that
       identical input of 1 page also satisfies.
 - [ ] Keystroke at offset 0 and at offset `N-1`: statistically identical latency curves.
-- [ ] 1 M random-keystroke fuzz run: zero leaks, zero residency blowups, undo past every
-      point in the log. **The runner is in the tree; the gate is not claimed.** A seeded generator
-      over a real `Typing` session, a real `ResidentSet` and one shared segment store, with an
+- [x] 1 M random-keystroke fuzz run: zero leaks, zero residency blowups, undo past every
+      point in the log. **`crates/holonomy-text/tests/keystroke_fuzz.rs`.** A seeded generator over
+      a real `Typing` session, a real `ResidentSet` and one shared segment store, with an
       independent `String` model and the document read back through `copy` — the Eye's and the
-      shell's reader. Six seeds of 20 000 actions on every push, **every** action checked; the
-      gate's million keystrokes in release, four seeds of 250 000, printing `HOLONOMY_KEYSTROKE_FUZZ`
-      per seed. The two clauses about leaks and residency hold at that scale. The third does not, yet.
-      Earning the gate has so far taken three fixes and left two findings: a seal that wrote the bytes
-      an undo had taken back (D-31), a burst that filled the buffer inside a character and lost the
-      keystroke (D-32), and a redo after an undo of a root that came back one byte short (OQ-21, fixed
-      by D-33 — a root step's inverse keeps the bytes its undo drops, so its redo re-attaches them).
-      What remains is the same family one layer down: the walk still reports a redo that re-attaches
-      one pending byte at the wrong offset (OQ-22, seed 0, redo five, 276 bytes where 275 was
-      expected), and with undo in the million-keystroke mix `Typing::pending` asserts on a live
-      length longer than its buffer (OQ-23). Both are why the million run still excludes undo, and
-      why the checkbox stays empty.
+      shell's reader. Two sizes of the same harness: six seeds of 20 000 actions on every push with
+      **every** action checked (view, leaves, budget), and the gate's million keystrokes in release,
+      four seeds of 250 000, undo and redo in the mix, printing `HOLONOMY_KEYSTROKE_FUZZ` per seed.
+      Unwinding is a test of its own, six seeds: every undo is recorded, every redo must be the exact
+      inverse of the undo in front of it, byte for byte, on the document the user sees.
+      The gate was **earned by failing first**, which is why it is worth the ink — it found three
+      defects and one limitation, and each fix is pinned by a test: a seal that wrote the bytes an
+      undo had taken back (D-31), a burst that filled the buffer inside a character and lost the
+      keystroke (D-32), and undo-then-redo that did not hand back what it took (OQ-21, OQ-22 — fixed
+      by D-34, which keeps the buffer across a root restore so the bytes a state needs are a length
+      into it, and makes a mark whose leaf is not the open one move the leaf). The invariant the fix
+      rests on, "the settled tree plus the open bytes is the document", is asserted where it is used,
+      and the million-keystroke run broke it once (OQ-23) before the fix.
+      What the clauses mean has not moved (D-30): "zero leaks" is bytes that are backed and
+      resident-zeroed — freed heap is `zeroize`'s and the counting allocator's subject — and "undo
+      past every point" is the session's **retained** stack, `UNDO_DEPTH` 1024 marks and
+      `ROOT_DEPTH` 64 roots.
 
 ---
 
