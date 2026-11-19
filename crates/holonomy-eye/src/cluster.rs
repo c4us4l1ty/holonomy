@@ -21,6 +21,7 @@
 //! | GB9 | × Extend, × ZWJ |
 //! | GB9a | × SpacingMark |
 //! | GB9b | Prepend × |
+//! | GB9c | the conjunct run: InCB=Consonant … InCB=Linker … × InCB=Consonant |
 //! | GB11 | Pictographic Extend\* ZWJ × Pictographic |
 //! | GB12, GB13 | regional indicators pair up, counting from the cluster's start |
 //!
@@ -41,14 +42,14 @@
 //! listed was `Other`, so it split from its base and the split became a caret position. That was
 //! AUDIT OQ-11; `a_mark_from_a_script_the_table_never_listed_joins_its_base` pins the difference.
 //!
-//! Two things remain **outside** the implementation, and are named rather than implied:
+//! The rules are the standard's **through GB13**, including Unicode 15.1's GB9c: a conjunct run is
+//! rooted in `InCB=Consonant`, made by an `InCB=Linker`, and continued by `InCB=Extend`, so
+//! `क` + VIRAMA + `ष` is one cluster and `क` + `ष` is two. That role is a third property, asked
+//! where GB9c asks it and nowhere else (AUDIT D-28).
 //!
-//! * **BiDi reordering** — the other half of the RFC's caret claim. It decides paint order rather
-//!   than segmentation, so it belongs beside the run tree, not here.
-//! * **GB9c**, Unicode 15.1's Indic conjunct rule (`InCB=Consonant [InCB=Extend InCB=Linker]*
-//!   × InCB=Consonant`). The database carries the property and the generator drops it, because a
-//!   rule that is not written must not have data pretending it is: a Devanagari conjunct is two
-//!   clusters here and one to a renderer. That is AUDIT OQ-20 — a rule gap, with its own row.
+//! One thing remains **outside** the implementation, and is named rather than implied: **BiDi
+//! reordering** — the other half of the RFC's caret claim. It decides paint order rather than
+//! segmentation, so it belongs beside the run tree, not here.
 //!
 //! What the crate does own is that segmentation is a pure function of the text **and of the state
 //! carried into it**: the same point answers the same way however the text was split into windows,
@@ -129,7 +130,43 @@ fn property(character: char) -> Property {
 
 mod tables;
 
-/// What GB11 needs to know about the characters already in the cluster.
+/// The `Indic_Conjunct_Break` role of a character, which GB9c reads (Unicode 15.1).
+///
+/// It cannot be folded into [`Property`]. `InCB=Consonant` is `Other` to every other rule,
+/// `InCB=Extend` is a *subset* of Extend and ZWJ, and since Unicode 18 some `InCB=Linker`
+/// characters are neither — so the role is asked separately, and only where GB9c is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Incb {
+    /// Not part of a conjunct run.
+    None,
+    /// `InCB=Consonant`: a consonant that a conjunct run can start from.
+    Consonant,
+    /// `InCB=Linker`: the virama-like character that turns `Consonant Extend*` into a conjunct.
+    Linker,
+    /// `InCB=Extend`: continues a run, and can neither start one nor make one.
+    Extend,
+}
+
+impl Incb {
+    /// The role of `character`, whose break class is `property`.
+    fn of(character: char, property: Property) -> Self {
+        if tables::incb_consonant(character) {
+            return Self::Consonant;
+        }
+        if tables::incb_linker(character) {
+            return Self::Linker;
+        }
+        // InCB=Extend is `[gcb=Extend gcb=ZWJ] - InCB=Linker - InCB=Consonant - U+200C`: a formula
+        // over the break class rather than a table, and ZWNJ is the one Extend it excludes by name.
+        let extends = matches!(property, Property::Extend | Property::Zwj);
+        if extends && character != '\u{200C}' {
+            return Self::Extend;
+        }
+        Self::None
+    }
+}
+
+/// What GB9c, GB11 and GB12/GB13 need to know about the characters already in the cluster.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Context {
     /// The cluster so far — up to but not including a ZWJ just absorbed — is
@@ -143,11 +180,19 @@ struct Context {
     joins_after_zwj: bool,
     /// Regional indicators in the cluster so far, for GB12/GB13's odd/even rule.
     regionals: u32,
+    /// The cluster so far ends with `InCB=Consonant [InCB=Extend InCB=Linker]*`, which is GB9c's
+    /// left context.
+    conjunct: bool,
+    /// That run has seen an `InCB=Linker`, without which GB9c does not forbid the break.
+    ///
+    /// Two flags rather than one because they are decided separately: `क` + `ष` is a run rooted in
+    /// a consonant with no linker in it, and it is two clusters.
+    linked: bool,
 }
 
 impl Context {
     /// Folds one more character into the context.
-    fn absorb(&mut self, property: Property) {
+    fn absorb(&mut self, property: Property, incb: Incb) {
         // Decided before the run is updated: a ZWJ's left context is the run *behind* it.
         self.joins_after_zwj = property == Property::Zwj && self.pictographic;
         self.pictographic = match property {
@@ -160,11 +205,29 @@ impl Context {
         } else {
             0
         };
+        match incb {
+            // A consonant roots a run whether or not the cluster had one: GB9c reads the run that
+            // ends here, so only the last consonant in the cluster can root it.
+            Incb::Consonant => {
+                self.conjunct = true;
+                self.linked = false;
+            }
+            Incb::Linker if self.conjunct => self.linked = true,
+            Incb::Extend => {}
+            // A linker with no run to be in, and everything else, ends the run.
+            _ => {
+                self.conjunct = false;
+                self.linked = false;
+            }
+        }
     }
 }
 
 /// Whether `current` continues the cluster that ends with `previous`, by UAX #29's rules in order.
-fn joins(previous: Property, current: Property, context: Context) -> bool {
+///
+/// `incb` is the [`Incb`] role of `current`, which only GB9c reads — it is the one rule whose right
+/// side is not a break class.
+fn joins(previous: Property, current: Property, incb: Incb, context: Context) -> bool {
     use Property::{Cr, Extend, HangulL, HangulLv, HangulLvt, HangulT, HangulV};
     use Property::{Lf, Pictographic, Prepend, RegionalIndicator, SpacingMark, Zwj};
 
@@ -198,6 +261,12 @@ fn joins(previous: Property, current: Property, context: Context) -> bool {
     if previous == Prepend {
         return true;
     }
+    // GB9c: InCB=Consonant [InCB=Extend InCB=Linker]* InCB=Linker [InCB=Extend InCB=Linker]* ×
+    // InCB=Consonant. The run must be rooted in a consonant *and* carry a linker, which is what
+    // makes `क` + VIRAMA + `ष` one cluster: `क` + `ष` is two, and a ZWNJ between them ends the run.
+    if incb == Incb::Consonant && context.conjunct && context.linked {
+        return true;
+    }
     // GB11: Pictographic Extend* ZWJ × Pictographic.
     if previous == Zwj && context.joins_after_zwj && current == Pictographic {
         return true;
@@ -218,12 +287,13 @@ fn joins(previous: Property, current: Property, context: Context) -> bool {
 /// Segmenting that piece from its own first byte would make a boundary a caret position the
 /// document does not have (`a` + ZWJ + `b`'s tail, or half a flag), which is AUDIT OQ-17. So the
 /// state travels: [`Clusters::carry`] at the end of one piece is [`Clusters::continuing`] at the
-/// start of the next, and it is two small words rather than text.
+/// start of the next, and it is a few flags and a count rather than text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClusterContext {
     /// The property of the last character consumed, which is what GB3–GB13's left context reads.
     previous: Option<Property>,
-    /// The GB11 run and the GB12/GB13 regional-indicator count *within* the current cluster.
+    /// The GB9c conjunct run, the GB11 run and the GB12/GB13 regional-indicator count *within*
+    /// the current cluster.
     context: Context,
 }
 
@@ -235,6 +305,8 @@ impl ClusterContext {
             pictographic: false,
             joins_after_zwj: false,
             regionals: 0,
+            conjunct: false,
+            linked: false,
         },
     };
 
@@ -244,8 +316,10 @@ impl ClusterContext {
     /// character, which is exactly what the segmenter asks itself.
     #[must_use]
     pub fn joins(self, character: char) -> bool {
+        let class = property(character);
+        let incb = Incb::of(character, class);
         self.previous
-            .is_some_and(|before| joins(before, property(character), self.context))
+            .is_some_and(|before| joins(before, class, incb, self.context))
     }
 }
 
@@ -309,7 +383,9 @@ impl<'a> Iterator for Clusters<'a> {
         // not join, the cluster ended before the piece began and this one opens a new cluster —
         // decided once, here, so the loop below can start from a clean state.
         let breaks = rest.chars().next().is_some_and(|first| {
-            previous.is_some_and(|before| !joins(before, property(first), context))
+            let class = property(first);
+            let incb = Incb::of(first, class);
+            previous.is_some_and(|before| !joins(before, class, incb, context))
         });
         if breaks {
             previous = None;
@@ -317,10 +393,11 @@ impl<'a> Iterator for Clusters<'a> {
         }
         for (offset, character) in rest.char_indices() {
             let class = property(character);
-            if previous.is_some_and(|before| !joins(before, class, context)) {
+            let incb = Incb::of(character, class);
+            if previous.is_some_and(|before| !joins(before, class, incb, context)) {
                 break;
             }
-            context.absorb(class);
+            context.absorb(class, incb);
             previous = Some(class);
             end = start + offset + character.len_utf8();
         }
@@ -412,9 +489,13 @@ mod tests {
     fn a_piece_that_continues_a_cluster_segments_as_the_whole_text_does() {
         // A leaf cut is a byte count, so a piece can begin inside a cluster. Handed the state the
         // text before it ended in, the piece's first cluster ends where the document's does — at
-        // every character boundary of a text that has a mark, a joiner chain and a flag in it.
-        let text = "e\u{301}x\u{1F468}\u{200D}\u{1F469}\u{1F1E6}\u{1F1E7}\u{1F1E8}";
-        let whole: Vec<(usize, usize)> = Clusters::new(text)
+        // every character boundary of a text that has a mark, a joiner chain, a flag and an Indic
+        // conjunct in it (the conjunct's run is state, not a pair, so a cut inside it is the case
+        // that tells whether the run travels).
+        let conjunct = "\u{0915}\u{094D}\u{0937}";
+        let pictographs = "e\u{301}x\u{1F468}\u{200D}\u{1F469}\u{1F1E6}\u{1F1E7}\u{1F1E8}";
+        let text = format!("{pictographs}{conjunct}");
+        let whole: Vec<(usize, usize)> = Clusters::new(&text)
             .map(|(at, cluster)| (at, at + cluster.len()))
             .collect();
         for cut in 1..text.len() {
@@ -547,10 +628,9 @@ mod tests {
 
     #[test]
     fn the_table_is_the_database_and_not_a_sample_of_it() {
-        // The counts are Unicode 18.0.0's, minus what the generator drops on purpose: the 798
-        // precomposed-syllable ranges (arithmetic here) and the 78 `InCB` code points (whose rule
-        // is OQ-20). Regenerating against another Unicode version moves these numbers with it —
-        // which is the point: an upgrade is a decision with a diff, not a side effect.
+        // The counts are Unicode 18.0.0's, minus the 798 precomposed-syllable ranges, which are
+        // arithmetic here. Regenerating against another Unicode version moves these numbers with
+        // it — which is the point: an upgrade is a decision with a diff, not a side effect.
         assert_eq!(ranges(Property::Cr), 1);
         assert_eq!(ranges(Property::Lf), 1);
         assert_eq!(ranges(Property::Control), 19);
@@ -564,6 +644,9 @@ mod tests {
         assert_eq!(ranges(Property::HangulT), 2);
         assert_eq!(ranges(Property::Pictographic), 156);
         assert_eq!(tables::BREAK.len(), 750);
+        // The two conjunct tables are data of their own, and their sizes are pinned the same way.
+        assert_eq!(tables::INCB_CONSONANT.len(), 78);
+        assert_eq!(tables::INCB_LINKER.len(), 23);
     }
 
     #[test]
@@ -593,12 +676,47 @@ mod tests {
     }
 
     #[test]
-    fn an_indic_conjunct_is_two_clusters_until_gb9c_is_written() {
-        // OQ-20, pinned rather than hidden: KA + VIRAMA + SSA is one conjunct to a renderer and two
-        // clusters here, because GB9c is not implemented. Whichever way OQ-20 is decided, this test
-        // changes with the decision — which is why it is written down.
-        let conjunct = vec!["\u{0915}\u{094D}", "\u{0937}"];
-        assert_eq!(clusters("\u{0915}\u{094D}\u{0937}"), conjunct);
+    fn an_indic_conjunct_is_one_cluster() {
+        // GB9c: a consonant, a linker, then the consonant after it is one cluster — the shape of
+        // every conjunct in Devanagari and its relatives, and the reason a caret may not sit
+        // between the halves of one.
+        let devanagari = "\u{0915}\u{094D}\u{0937}";
+        assert_eq!(clusters(devanagari), vec![devanagari]);
+        let bengali = "\u{0995}\u{09CD}\u{09B7}";
+        assert_eq!(clusters(bengali), vec![bengali]);
+        // An `InCB=Extend` between the consonant and its linker continues the run rather than
+        // ending it: KA + NUKTA + VIRAMA + SSA is still one cluster.
+        let nukta = "\u{0915}\u{093C}\u{094D}\u{0937}";
+        assert_eq!(clusters(nukta), vec![nukta]);
+        // And a joined conjunct carries the run, so a second linker continues it: one cluster.
+        let chain = "\u{0915}\u{094D}\u{0937}\u{094D}\u{0930}";
+        assert_eq!(clusters(chain), vec![chain]);
+    }
+
+    #[test]
+    fn a_conjunct_run_needs_both_a_consonant_and_a_linker() {
+        // Two consonants with no linker between them are two clusters: GB9c is about the linker,
+        // not about consonants touching.
+        let bare = vec!["\u{0915}", "\u{0937}"];
+        assert_eq!(clusters("\u{0915}\u{0937}"), bare);
+        // An Extend alone does not make a conjunct either — KA + NUKTA is one cluster by GB9, and
+        // the SSA after it starts a new one.
+        let extended = vec!["\u{0915}\u{093C}", "\u{0937}"];
+        assert_eq!(clusters("\u{0915}\u{093C}\u{0937}"), extended);
+        // A run that does not begin with a consonant does not continue: the standard's GB9c reads
+        // `InCB=Consonant [InCB=Extend InCB=Linker]*`, so `a` + VIRAMA + SSA is two clusters even
+        // though the virama is a linker. (`unicode-segmentation` suppresses the break here, on
+        // having seen any linker; this reads the rule.)
+        let unrooted = vec!["a\u{094D}", "\u{0937}"];
+        assert_eq!(clusters("a\u{094D}\u{0937}"), unrooted);
+    }
+
+    #[test]
+    fn a_zwnj_ends_the_conjunct_run() {
+        // ZWNJ is `gcb=Extend` but `InCB=None`, and it exists to say "do not form a conjunct": it
+        // joins the cluster (GB9) and still ends the run, so the SSA after it is its own cluster.
+        let split = vec!["\u{0915}\u{200C}\u{094D}", "\u{0937}"];
+        assert_eq!(clusters("\u{0915}\u{200C}\u{094D}\u{0937}"), split);
     }
 
     #[test]

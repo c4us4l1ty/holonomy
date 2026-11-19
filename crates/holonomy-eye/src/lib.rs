@@ -44,8 +44,8 @@
 //! segmentation *rules* are the standard's, applied in order, and the **property data** they read
 //! is generated from the Unicode Character Database (`scripts/gen-cluster-tables.py` writes
 //! `cluster.rs`'s tables), so a mark from any script joins its base, not only the scripts this
-//! UI's spec names. Two things are still outside it, and neither is a table: **GB9c**, Unicode
-//! 15.1's Indic conjunct rule (AUDIT OQ-20), and **BiDi reordering**, not attempted at all.
+//! UI's spec names. The rules run through GB13, Unicode 15.1's Indic conjunct rule included (AUDIT
+//! D-28). One thing is still outside it: **BiDi reordering**, not attempted at all.
 //! The run tree is also built from a whole window of text, so nothing here yet constrains shaping
 //! cost to the viewport. Those are Block 5's remaining gates, not this crate's footnotes.
 
