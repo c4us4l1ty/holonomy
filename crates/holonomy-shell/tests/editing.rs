@@ -608,7 +608,11 @@ fn a_frame_hands_each_leaf_the_state_from_before_it() {
     assert_eq!(caret.map(|caret| caret.byte), Some(68));
 
     assert!(shell.backspace().expect("a backspace"));
-    assert_eq!(shell.document_len(), 123, "the `e` and its marks go together");
+    assert_eq!(
+        shell.document_len(),
+        123,
+        "the `e` and its marks go together"
+    );
 }
 
 #[test]
