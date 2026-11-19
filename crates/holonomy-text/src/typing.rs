@@ -657,7 +657,17 @@ impl<S: SegmentSink> Typing<S> {
             }
             // Take only what fits, so one burst can be many keystrokes and still never hides an
             // allocation inside an edit: the split happens here, at a seal, where it is counted.
-            let take = room.min(rest.len());
+            // The split lands *between* characters: a fragment cut inside one is not text, and
+            // `SlabText` would refuse it — so when the next character does not fit whole, the seal
+            // goes first and the character starts the next source.
+            let mut take = room.min(rest.len());
+            while take > 0 && !starts_a_character(rest, take) {
+                take -= 1;
+            }
+            if take == 0 {
+                self.seal()?;
+                continue;
+            }
             let at = live;
             match self.buffer.insert(at, &rest[..take])? {
                 EditOutcome::InPlace => {}
@@ -759,13 +769,17 @@ impl<S: SegmentSink> Typing<S> {
         let Some(open) = self.open else {
             return Ok(());
         };
-        let len = self.buffer.len();
+        // The bytes that are in the document, not the buffer's capacity for them: an undo leaves
+        // the bytes it took back *behind* the live length so redo can hand them over, and a seal
+        // ends redo (`self.undone.clear()` below), so writing the tail would append text nobody
+        // can name — the document would grow by exactly what undo removed.
+        let len = self.live_len();
         if len == 0 {
             return Ok(());
         }
         let appended: Appended = self
             .sink
-            .append_segment(self.buffer.as_bytes())
+            .append_segment(&self.buffer.as_bytes()[..len])
             .map_err(|reason| TypingError::Append { reason })?;
         self.sources
             .seal(open.source, appended.segment)
@@ -790,6 +804,11 @@ impl<S: SegmentSink> Typing<S> {
             .expect("an empty slab is valid UTF-8");
         Ok(())
     }
+}
+
+/// Whether `at` begins a character in `bytes` — the same test [`SlabText`] applies to an edit.
+fn starts_a_character(bytes: &[u8], at: usize) -> bool {
+    at == bytes.len() || bytes.get(at).is_some_and(|byte| byte & 0xC0 != 0x80)
 }
 
 /// A sink that keeps what it is given, so a test can check what the world-line would have written.
@@ -881,6 +900,25 @@ mod tests {
             other => panic!("the first source was sealed, got {other:?}"),
         }
         assert!(typing.sources().locate(open.slab().segment()).is_open());
+    }
+
+    #[test]
+    fn a_burst_that_fills_the_buffer_splits_between_characters_and_never_inside_one() {
+        // Capacity eight, six one-byte characters open: two bytes of room and a three-byte
+        // character next. Taking what fits would cut the character in half and hand the slab bytes
+        // that are not text (`Text(InvalidUtf8)` from a real million-keystroke run); the seal goes
+        // first instead, and the whole character starts the next source.
+        let mut typing = session(8);
+        typing.insert(b"abcdef").expect("typed");
+        typing.insert("\u{2192} ok".as_bytes()).expect("typed");
+        assert_eq!(typing.document_len(), 12);
+        assert_eq!(
+            typing.sealed_bytes(),
+            6,
+            "six characters, and not half an arrow"
+        );
+        assert_eq!(typing.pending(), "\u{2192} ok".as_bytes());
+        assert_eq!(typing.spine().len(), 12, "the sealed six and the open six");
     }
 
     #[test]
@@ -1152,6 +1190,32 @@ mod tests {
         assert_eq!(typing.sealed_bytes(), 18);
         assert_eq!(typing.undo_depth(), 0, "the seal is the floor");
         assert!(!typing.undo().expect("nothing to undo"));
+    }
+
+    #[test]
+    fn a_seal_writes_the_live_bytes_and_not_the_undone_tail_behind_them() {
+        let mut typing = session(64);
+        typing.insert(b"abcdef").expect("typed");
+        typing.mark();
+        typing.insert(b"xyz").expect("typed");
+        assert!(typing.undo().expect("undone"));
+        // The three bytes are still in the buffer — that is what redo would hand back — and they
+        // are not in the document.
+        assert_eq!(typing.document_len(), 6);
+        assert_eq!(typing.pending(), b"abcdef");
+        typing.flush().expect("the buffer seals");
+        assert_eq!(
+            typing.document_len(),
+            6,
+            "a seal may not resurrect the bytes an undo took back"
+        );
+        assert_eq!(typing.spine().len(), 6);
+        assert_eq!(typing.sealed_bytes(), 6);
+        assert_eq!(typing.sink.segments, vec![b"abcdef".to_vec()]);
+        assert!(
+            typing.pending().is_empty(),
+            "the buffer went with the seal, tail and all"
+        );
     }
 
     #[test]

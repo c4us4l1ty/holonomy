@@ -210,14 +210,27 @@ were faked with newline padding) and any structure that walks the document on a 
   view exactly. What is still missing is the editor itself: caret, selection and paint are Block
   5's Eye, and the policy that decides *when* to commit is not made in this crate.
 
-**GATES** — none passed; the three measurements below are untouched
+**GATES** — none passed; the third gate now has a runner, and it found two bugs
 *(the keystroke *deliverable* is measured; these gates are document-scale, latency and fuzz
 measurements on reference hardware and share nothing with it)*
 - [ ] Open a synthetic 30 M-word document: memory at open is within a fixed bound that
       identical input of 1 page also satisfies.
 - [ ] Keystroke at offset 0 and at offset `N-1`: statistically identical latency curves.
 - [ ] 1 M random-keystroke fuzz run: zero leaks, zero residency blowups, undo past every
-      point in the log.
+      point in the log. **The runner landed 2026-11-19; the gate is not claimed.**
+      `crates/holonomy-text/tests/keystroke_fuzz.rs` types into a real `Typing` session over a
+      real `ResidentSet` and one shared segment store, with an independent `String` model and the
+      document read back through `copy` — the Eye's and the shell's reader. Its **first run** found
+      and fixed a seal that wrote the bytes an undo had taken back, so the document grew by exactly
+      what undo removed (D-31), and a burst that filled the buffer *inside* a character and lost the
+      keystroke to `Text(InvalidUtf8)` (D-32). Its **remaining finding blocks the third clause**:
+      unwinding the
+      retained undo stack reports a redo after an undo of a root that comes back one byte short —
+      seed 2, step 20 000, differing at byte 260 of 409 (OQ-21, kept as an `#[ignore]`d reproducer
+      rather than papered over). The leak and residency clauses are exercised on every push by a
+      short slice of the same harness, every action checked; the million is `#[ignore]`d, run in
+      release by the `test` job, and excludes undo/redo until OQ-21 is fixed, so it is a
+      measurement of the two clauses that hold, not evidence for the one that does not (D-30).
 
 ---
 
