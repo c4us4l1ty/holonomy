@@ -166,7 +166,7 @@ own families and bundles only what it draws itself.
 - **Its line breaking.** CJK 避头尾, script-aware word classes (Hangul, Hebrew, Arabic, Syriac) and
   RTL line order live in GPUI's line wrapper, which this design does not use: the Eye lays out the
   page. Patches #4, #23, #30, #31, #32 are the reference list for what correct means there, and the
-  gap AUDIT records as OQ-11's remaining half (BiDi) and OQ-20 (GB9c).
+  gap AUDIT records as OQ-11's remaining half: BiDi.
 - **Its font fidelity patches.** Smoothing parity, synthesized oblique and the PingFang PostScript
   collision are #1, #12, #14. Without them the page is stock GPUI, and a fidelity claim in a gate is
   measured against stock GPUI, never against quiet-md's pixels.

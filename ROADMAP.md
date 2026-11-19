@@ -250,9 +250,9 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
   out of the resident set and the pending buffer, and `holonomy-shell` runs the loop that turns a
   scroll position into a laid-out frame and writes the measured heights back (D-18, D-19). Gate 2's
   *inputs* are therefore measured end to end on a 4,000-leaf document.
-- Not yet: BiDi reordering (gate 3), GB9c's Indic conjuncts (OQ-20 — the rules are the standard's as
-  of D-16 and the properties the database's as of D-27), a real shaper (Block 8), and seconds
-  rather than counts for gate 2 — without those, L-8 stays `spec` rather than `enforced`.
+- Not yet: BiDi reordering (gate 3 — the segmentation rules are the standard's through GB13 as of
+  D-16 and D-28, and the property data is the database's as of D-27), a real shaper (Block 8), and
+  seconds rather than counts for gate 2 — without those, L-8 stays `spec` rather than `enforced`.
 
 **GATES**
 - [ ] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
