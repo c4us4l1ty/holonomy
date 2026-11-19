@@ -80,6 +80,24 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-19 — D-36 — "memory at open" is two claims, and only one of them is fixed.** Block 4's
+  first gate reads *"Open a synthetic 30 M-word document: memory at open is within a fixed bound
+  that identical input of 1 page also satisfies."* Measured, the sentence splits in half.
+  `crates/holonomy-text/tests/open_memory.rs` opens both documents — 180 MB of text as 43,946
+  leaves, and one page as one leaf — with the counting allocator installed, and asks them the same
+  questions. **Resident plaintext is exactly what L-2 says**: a `ResidentSet` with a fixed
+  viewport budget, asked for four thousand segments of the big document, evicts and holds the same
+  bound the page-sized one holds; the budget is a construction argument, never the document's
+  length. **The index is not fixed**: a spine is `2n - 1` nodes of `Arc<Node>` — a 16-byte header
+  over two child pointers and three aggregates — so it costs a measured constant a leaf (about 112
+  bytes: 4.9 MB for the big document, some 56 bytes for the page) and under three percent of the
+  document's own bytes. That is the price of `locate` being a descent rather than a scan (D-1);
+  making it fixed would mean lazily materialising the tree, which is a redesign of the one
+  structure every operation descends, and it would buy a few megabytes on a document that already
+  needs a world-line to exist. The clause is therefore **amended** rather than failed silently:
+  gate 1 now claims a fixed bound on *resident plaintext* (the memory L-2 bounds) plus a measured
+  per-leaf cost for the index, and both are asserted by the named test. The checkbox is set only
+  by a run that prints the numbers, as with every other gate here.
 - **2026-11-19 — D-35 — a cut wipes what it vacates, and a slab wipes its whole allocation.**
   Found by review while hunting (not by a failing test, because nothing in safe code can read the
   region involved). `SlabText::delete` shifts the surviving bytes left and truncates, which leaves
