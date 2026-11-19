@@ -713,13 +713,25 @@ fn a_cluster_split_by_a_leaf_costs_its_advance_once() {
 
     let whole = layout_styled(StyledText::plain(&document), 0, Fixed::units(64), &Fake);
     assert_eq!(whole.height(), Fixed::units(20), "one line in the document");
-    assert_eq!(shell.heights().total(), whole.height(), "a leaf walk agrees");
-    assert_eq!(shell.heights().len(), 2, "and there are two leaves to disagree in");
+    assert_eq!(
+        shell.heights().total(),
+        whole.height(),
+        "a leaf walk agrees"
+    );
+    assert_eq!(
+        shell.heights().len(),
+        2,
+        "and there are two leaves to disagree in"
+    );
 
     // A frame measures the same leaves again, out of the window's own text rather than leaf by
     // leaf: the two paths have to reach the same geometry, or a frame would move the scroll bar.
     shell.frame().expect("a frame");
-    assert_eq!(shell.heights().total(), whole.height(), "and a frame agrees");
+    assert_eq!(
+        shell.heights().total(),
+        whole.height(),
+        "and a frame agrees"
+    );
 }
 
 #[test]

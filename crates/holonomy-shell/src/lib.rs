@@ -1000,8 +1000,8 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             };
             let carried = self.measured.carry(leaf);
             let from = leaf_start + carried.skip as u64;
-            let placed = (leaf_end + self.measured.carry(leaf as usize + 1).skip as u64)
-                .min(document);
+            let placed =
+                (leaf_end + self.measured.carry(leaf + 1).skip as u64).min(document);
             let start = at.max(from);
             if start >= placed {
                 if placed >= document || hops >= CLUSTER_LEAF_LIMIT {
@@ -1185,20 +1185,6 @@ fn leaf_text(text: &str, start: u64, carry: Carry) -> (&str, u64) {
     }
 }
 
-/// How many bytes past `at` belong to the cluster that straddles it, or zero when one starts there.
-///
-/// `at` is a byte offset into `text`, which is segmented from `context`. The answer is bounded by
-/// `text`'s own end: a cluster that would need more bytes than the caller looked at is reported as
-/// none, so the caller's look is the bound (AUDIT D-25).
-fn tail_bytes(text: &str, at: usize, context: ClusterContext) -> usize {
-    if at == 0 || at >= text.len() {
-        return 0;
-    }
-    Clusters::continuing(text, context)
-        .find(|&(start, cluster)| start + cluster.len() > at)
-        .map_or(0, |(start, cluster)| start + cluster.len() - at)
-}
-
 /// What one window measured, for the leaves it measured **in full**: their heights and the carry
 /// each one hands the next, indexed from the window's first leaf.
 ///
@@ -1249,7 +1235,7 @@ fn measure_window(
                 // The predecessor can only have placed the tail if it fitted inside the look it
                 // takes — the leaf after it, whole — or if the cluster ends at the document's end
                 // (AUDIT D-25).
-                let look = spans.get(index + 1).map_or(0, |next| next.len() as usize);
+                let look = spans.get(index + 1).map_or(0, |next| next.len());
                 let reaches_end = span.offset() + span.len() >= document_end;
                 if joins_before && (cluster.len() < look || reaches_end) {
                     skip = cluster.len().min(high - low);
@@ -1285,7 +1271,10 @@ fn measure_window(
         .flat_map(|line| line.clusters())
         .map(|cluster| (cluster.byte, cluster.x))
         .collect();
-    let end_x = layout.lines().last().map_or(Fixed::ZERO, |line| line.end_x());
+    let end_x = layout
+        .lines()
+        .last()
+        .map_or(Fixed::ZERO, |line| line.end_x());
     for (index, span) in spans.iter().enumerate() {
         let at = span.offset() + skips[index] as u64;
         offsets[index] = clusters
