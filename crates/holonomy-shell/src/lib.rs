@@ -616,6 +616,32 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let (start, end) = (span.offset(), span.offset() + span.len());
         let read = self.read(start, end)?;
         let (text, from) = leaf_text(read.text(), start, carried);
+        if text.is_empty() {
+            // Every byte of this leaf was the tail of a cluster the leaf before it placed. There is
+            // nothing here to shape and nothing to hand on but the position it ends at.
+            return Ok((
+                Fixed::ZERO,
+                Carry {
+                    x: carried.x,
+                    after_cr: false,
+                    cluster: carried.cluster,
+                    skip: 0,
+                },
+            ));
+        }
+        // A leaf cut is a byte count, so this leaf can end inside a cluster — and then the
+        // cluster's advance would be paid on both sides of the cut. The leaf the cluster
+        // *starts* in places it whole: it looks a bounded way past its own end for the tail,
+        // lays the tail out with the rest, and tells the next leaf to skip those bytes
+        // (AUDIT D-25).
+        let tail = self.cluster_tail(text, end, carried.cluster)?;
+        let padded;
+        let text = if tail.is_empty() {
+            text
+        } else {
+            padded = format!("{text}{tail}");
+            padded.as_str()
+        };
         let layout = layout_styled_continuing(
             StyledText::plain(text),
             from,
@@ -649,6 +675,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             },
             after_cr: text.ends_with('\r'),
             cluster: layout.carry(),
+            skip: tail.len(),
         };
         Ok((height, next))
     }
@@ -776,6 +803,58 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Ok((window.start(), window.end(), window.leaves(), true))
     }
 
+    /// The bytes past `end` that complete the cluster a leaf cut opened, or empty if it opened
+    /// none.
+    ///
+    /// The answer is bounded twice: the look is one leaf's worth of bytes, and a cluster that does
+    /// not end inside them is not completed at all — the geometry it had before the tail was read
+    /// (whose advance was paid on both sides of the cut) stands, which is OQ-18's residual.
+    ///
+    /// # Errors
+    ///
+    /// A leaf the document refused to read.
+    fn cluster_tail(
+        &mut self,
+        text: &str,
+        end: u64,
+        context: ClusterContext,
+    ) -> Result<String, ShellError> {
+        let document = self.typing.document_len();
+        if end >= document {
+            return Ok(String::new());
+        }
+        // Where the leaf's own text leaves the segmenter: a cluster is open at the cut exactly when
+        // the byte after it would join what is already there.
+        let mut clusters = Clusters::continuing(text, context);
+        while clusters.next().is_some() {}
+        let at_end = clusters.carry();
+        // The look is the leaf after this one, whole: a range's edge has to be a character boundary
+        // as well as a byte count, and a leaf boundary is the only one that is both — a seal cuts
+        // on a character (AUDIT D-25).
+        let Some((_, next_end)) = self.leaf_range(end) else {
+            return Ok(String::new());
+        };
+        let look = self.read(end, next_end.min(document))?;
+        let Some(first) = look.text().chars().next() else {
+            return Ok(String::new());
+        };
+        if !at_end.joins(first) {
+            return Ok(String::new());
+        }
+        let mut tail = Clusters::continuing(look.text(), at_end);
+        match tail.next() {
+            // The cluster ends inside the bytes looked at, or at the document's own end, which is a
+            // boundary whatever a cut did: those bytes are the leaf's to place.
+            Some((_, cluster))
+                if cluster.len() < look.text().len()
+                    || end + look.text().len() as u64 >= document =>
+            {
+                Ok(cluster.to_string())
+            }
+            _ => Ok(String::new()),
+        }
+    }
+
     /// The document offset of the line that begins at or before `into` units into `leaf`.
     ///
     /// The height index knows which *leaf* a scroll position falls in; only the leaf's text knows
@@ -805,7 +884,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         } else {
             Fixed::ZERO
         };
-        let mut at = start;
+        let mut at = from;
         for (index, line) in lines.iter().enumerate() {
             if index < inherited {
                 continue;
@@ -862,29 +941,36 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         // A leaf is cut on a byte count, not on a cluster boundary: a mark or a joiner can be the
         // first byte of the leaf holding the caret, with its base at the last byte of the one
         // before, and a run of marks can straddle several leaves. The grapheme a backspace removes
-        // starts where its *cluster* starts, so the walk steps back over every leaf whose first
-        // cluster is a continuation of the one before it — which the leaf's carried state says
-        // without reading anything.
+        // starts where its *cluster* starts, so the walk steps back over every leaf whose geometry
+        // begins at or after the caret — those bytes were placed by the leaf before, and the
+        // cluster the caret is in is that leaf's to name (AUDIT D-22, D-25).
         let mut hops = 0;
         loop {
-            let Some((from, _)) = self.leaf_bounds(leaf) else {
+            let Some((leaf_start, _)) = self.leaf_bounds(leaf) else {
                 return Ok(None);
             };
+            let carried = self.measured.carry(leaf);
+            let from = leaf_start + carried.skip as u64;
             if from >= at {
-                return Ok(None);
+                if leaf == 0 || hops >= CLUSTER_LEAF_LIMIT {
+                    return Ok(None);
+                }
+                leaf -= 1;
+                hops += 1;
+                continue;
             }
-            let context = self.measured.carry(leaf).cluster;
             let read = self.read(from, at)?;
             let text = read.text();
-            let clusters = Clusters::continuing(text, context);
+            let clusters = Clusters::continuing(text, carried.cluster);
             let Some((offset, _)) = clusters.last() else {
                 return Ok(None);
             };
             let opens_inside = offset == 0
-                && text
-                    .chars()
-                    .next()
-                    .is_some_and(|first| context.joins(first));
+                && (carried.skip > 0
+                    || text
+                        .chars()
+                        .next()
+                        .is_some_and(|first| carried.cluster.joins(first)));
             if opens_inside && leaf > 0 && hops < CLUSTER_LEAF_LIMIT {
                 leaf -= 1;
                 hops += 1;
@@ -905,24 +991,33 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         };
         // The mirror of `cluster_before`: the cluster that starts at the caret can end in the leaf
         // after it, so the window is widened leaf by leaf until the cluster it opens with ends
-        // inside it. A cluster that reaches the document's end is complete there.
+        // inside it. A cluster that reaches the document's end is complete there. A leaf's extent
+        // includes the bytes the leaf after it skipped — its predecessor placed them (AUDIT D-25).
         let mut hops = 0;
         loop {
-            let Some((_, end)) = self.leaf_bounds(leaf) else {
+            let Some((leaf_start, leaf_end)) = self.leaf_bounds(leaf) else {
                 return Ok(None);
             };
-            let end = end.min(document);
-            if end <= at {
-                return Ok(None);
+            let carried = self.measured.carry(leaf);
+            let from = leaf_start + carried.skip as u64;
+            let placed = (leaf_end + self.measured.carry(leaf as usize + 1).skip as u64)
+                .min(document);
+            let start = at.max(from);
+            if start >= placed {
+                if placed >= document || hops >= CLUSTER_LEAF_LIMIT {
+                    return Ok(Some(placed));
+                }
+                leaf += 1;
+                hops += 1;
+                continue;
             }
-            let context = self.measured.carry(leaf).cluster;
-            let read = self.read(at, end)?;
-            let mut clusters = Clusters::continuing(read.text(), context);
+            let read = self.read(start, placed)?;
+            let mut clusters = Clusters::continuing(read.text(), carried.cluster);
             let Some((_, cluster)) = clusters.next() else {
                 return Ok(None);
             };
-            let cluster_end = at + cluster.len() as u64;
-            if cluster_end < end || end >= document || hops >= CLUSTER_LEAF_LIMIT {
+            let cluster_end = start + cluster.len() as u64;
+            if cluster_end < placed || placed >= document || hops >= CLUSTER_LEAF_LIMIT {
                 return Ok(Some(cluster_end));
             }
             leaf += 1;
@@ -999,7 +1094,8 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
 ///
 /// A leaf cut is a byte count, not a line or a cluster boundary, so a leaf's layout is only
 /// meaningful together with this: where its predecessor's last line had got to, whether that line
-/// ended on a bare carriage return, and the segmentation state at the end of the leaf's text.
+/// ended on a bare carriage return, the segmentation state where its own geometry begins, and how
+/// many of its first bytes the predecessor already placed.
 #[derive(Debug, Clone, Copy, Default)]
 struct Carry {
     /// How wide the predecessor's last line was when it ended; zero means the leaf begins a line.
@@ -1007,9 +1103,12 @@ struct Carry {
     /// The predecessor's last byte is a CR, so a LF at the first byte of this leaf is the second
     /// half of **one** break rather than a line of its own.
     after_cr: bool,
-    /// The UAX #29 state at the end of the predecessor's text: a leaf can begin inside a cluster,
-    /// and a piece handed this state segments as the document does (AUDIT OQ-17).
+    /// The UAX #29 state where this leaf's geometry begins — after `skip` bytes, so a leaf that
+    /// begins inside a cluster is told the state the document had there (AUDIT OQ-17, D-25).
     cluster: ClusterContext,
+    /// Bytes at the leaf's start the predecessor already placed, because they were the tail of a
+    /// cluster that began there. One cluster, one advance, at the leaf that starts it (AUDIT D-25).
+    skip: usize,
 }
 
 /// The measured geometry of the document: one height per leaf, and the carry each leaf was measured
@@ -1069,15 +1168,35 @@ impl Measured {
 
 /// A leaf's text as its layout must see it, and the document offset that text starts at.
 ///
-/// One thing is trimmed: a LF at the start of a leaf whose predecessor ended on a CR. The eye
-/// treats `\r\n` as one break, and a leaf cut can fall between the two bytes — a cut is on byte
-/// counts, not on line boundaries. Laid out on its own the LF starts a line the document does not
-/// have, which is a phantom line in the scroll geometry and a blank line on screen.
+/// Two things are trimmed. Bytes the predecessor already placed, because they were the tail of a
+/// cluster that started in the leaf before: placing them again is what made one grapheme cost two
+/// advances (AUDIT OQ-18, D-25). And a LF at the start of a leaf whose predecessor ended on a CR:
+/// the eye treats `\r\n` as one break, and a leaf cut can fall between the two bytes — a cut is on
+/// byte counts, not on line boundaries. Laid out on its own the LF starts a line the document does
+/// not have, which is a phantom line in the scroll geometry and a blank line on screen.
 fn leaf_text(text: &str, start: u64, carry: Carry) -> (&str, u64) {
+    let (text, start) = match text.get(carry.skip..) {
+        Some(rest) => (rest, start + carry.skip as u64),
+        None => (text, start),
+    };
     match text.strip_prefix('\n') {
         Some(rest) if carry.after_cr => (rest, start + 1),
         _ => (text, start),
     }
+}
+
+/// How many bytes past `at` belong to the cluster that straddles it, or zero when one starts there.
+///
+/// `at` is a byte offset into `text`, which is segmented from `context`. The answer is bounded by
+/// `text`'s own end: a cluster that would need more bytes than the caller looked at is reported as
+/// none, so the caller's look is the bound (AUDIT D-25).
+fn tail_bytes(text: &str, at: usize, context: ClusterContext) -> usize {
+    if at == 0 || at >= text.len() {
+        return 0;
+    }
+    Clusters::continuing(text, context)
+        .find(|&(start, cluster)| start + cluster.len() > at)
+        .map_or(0, |(start, cluster)| start + cluster.len() - at)
 }
 
 /// What one window measured, for the leaves it measured **in full**: their heights and the carry
@@ -1107,19 +1226,41 @@ fn measure_window(
     // as the document does (AUDIT OQ-17).
     let mut context = ClusterContext::default();
     let mut contexts: Vec<ClusterContext> = Vec::with_capacity(spans.len());
-    for span in spans {
-        // The carry is the one a leaf is **measured with**, so it is the state at the leaf's start:
-        // it is recorded before the leaf's own text is folded in, not after it (AUDIT D-24).
-        contexts.push(context);
+    let mut skips: Vec<usize> = Vec::with_capacity(spans.len());
+    for (index, span) in spans.iter().enumerate() {
         let low = usize::try_from(span.offset().saturating_sub(start)).unwrap_or(0);
         let high = usize::try_from((span.offset() + span.len()).saturating_sub(start))
             .unwrap_or(0)
             .min(text.len());
+        // The carry is the one a leaf is **measured with**: the state where its own geometry
+        // begins — after any bytes its predecessor placed — and the count of those bytes. A leaf
+        // begins inside a cluster only when the cut opened one, and then the leaf before it placed
+        // the tail unless the tail was longer than the look it takes (AUDIT D-24, D-25).
+        let mut opens = context;
+        let mut skip = 0usize;
         if let Some(slice) = text.get(low..high) {
             let mut clusters = Clusters::continuing(slice, context);
+            if let Some((at, cluster)) = clusters.next() {
+                let joins_before = at == 0
+                    && slice
+                        .chars()
+                        .next()
+                        .is_some_and(|first| context.joins(first));
+                // The predecessor can only have placed the tail if it fitted inside the look it
+                // takes — the leaf after it, whole — or if the cluster ends at the document's end
+                // (AUDIT D-25).
+                let look = spans.get(index + 1).map_or(0, |next| next.len() as usize);
+                let reaches_end = span.offset() + span.len() >= document_end;
+                if joins_before && (cluster.len() < look || reaches_end) {
+                    skip = cluster.len().min(high - low);
+                    opens = clusters.carry();
+                }
+            }
             while clusters.next().is_some() {}
             context = clusters.carry();
         }
+        contexts.push(opens);
+        skips.push(skip);
     }
     for line in layout.lines() {
         let at = line.start_byte();
@@ -1135,17 +1276,23 @@ fn measure_window(
             heights[index] += line.height();
         }
     }
-    for line in layout.lines() {
-        for cluster in line.clusters() {
-            let found = spans.iter().position(|span| {
-                cluster.byte >= span.offset() && cluster.byte < span.offset() + span.len()
-            });
-            if let Some(index) = found {
-                if offsets[index].is_none() {
-                    offsets[index] = Some(cluster.x);
-                }
-            }
-        }
+    // The x where each leaf's geometry begins: the first cluster at or after the byte the leaf
+    // starts its own layout at. That is not always a cluster inside the span — a leaf whose bytes
+    // were all placed by its predecessor begins at the cluster after them (AUDIT D-25).
+    let clusters: Vec<(u64, Fixed)> = layout
+        .lines()
+        .iter()
+        .flat_map(|line| line.clusters())
+        .map(|cluster| (cluster.byte, cluster.x))
+        .collect();
+    let end_x = layout.lines().last().map_or(Fixed::ZERO, |line| line.end_x());
+    for (index, span) in spans.iter().enumerate() {
+        let at = span.offset() + skips[index] as u64;
+        offsets[index] = clusters
+            .iter()
+            .find(|(byte, _)| *byte >= at)
+            .map(|(_, x)| *x)
+            .or_else(|| (at >= end).then_some(end_x));
     }
     spans
         .iter()
@@ -1166,6 +1313,7 @@ fn measure_window(
                     x: offsets[index].unwrap_or(Fixed::ZERO),
                     after_cr: before == Some(&b'\r'),
                     cluster: contexts[index],
+                    skip: skips[index],
                 },
             )
         })

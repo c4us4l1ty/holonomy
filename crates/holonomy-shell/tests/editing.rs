@@ -699,12 +699,10 @@ fn a_backspace_crosses_two_leaf_boundaries_to_take_its_cluster() {
 }
 
 #[test]
-fn a_cluster_split_by_a_leaf_costs_its_advance_twice() {
-    // OQ-18's residual, measured rather than asserted as right. A cluster's advance is exact only
-    // when the cluster is shaped whole, and the shell lays leaves out one at a time: `e` + U+0301
-    // is one unit wide in the document and two when a leaf cut falls between them at a 64-unit
-    // wrap, so the scroll bar here is a line long. Segmentation is exact (OQ-17); this is what is
-    // left, and fixing it needs the two leaves shaped together.
+fn a_cluster_split_by_a_leaf_costs_its_advance_once() {
+    // OQ-18's residual, now the behaviour: the leaf a cluster *starts* in places it whole and the
+    // leaf after it skips the tail, so `e` + U+0301 is one unit wide whether or not a leaf cut fell
+    // between the two — and the scroll bar is not a line long (AUDIT D-25).
     let mut document = "a".repeat(63);
     document.push_str("e\u{301}");
     let mut shell = session();
@@ -715,11 +713,13 @@ fn a_cluster_split_by_a_leaf_costs_its_advance_twice() {
 
     let whole = layout_styled(StyledText::plain(&document), 0, Fixed::units(64), &Fake);
     assert_eq!(whole.height(), Fixed::units(20), "one line in the document");
-    assert_eq!(
-        shell.heights().total(),
-        Fixed::units(40),
-        "two leaves, and one glyph of advance counted at each side of the cut"
-    );
+    assert_eq!(shell.heights().total(), whole.height(), "a leaf walk agrees");
+    assert_eq!(shell.heights().len(), 2, "and there are two leaves to disagree in");
+
+    // A frame measures the same leaves again, out of the window's own text rather than leaf by
+    // leaf: the two paths have to reach the same geometry, or a frame would move the scroll bar.
+    shell.frame().expect("a frame");
+    assert_eq!(shell.heights().total(), whole.height(), "and a frame agrees");
 }
 
 #[test]
