@@ -41,12 +41,13 @@
 //! and line breaks, at eight zoom steps and five DPIs, on a fake shaper so it needs no font.
 //!
 //! L-8 still carries `status: spec`, and the crate says why rather than leaving it to a reader. The
-//! segmentation *rules* are the standard's, applied in order, but their **property tables** are
-//! hand-written: they cover the scripts `docs/UI-SPEC.md` §8 names, general diacritics, variation
-//! selectors, tags, joiners, and the emoji blocks, and a mark outside that coverage splits from its
-//! base — a coverage gap in the tables, not a misread rule. BiDi reordering is still not attempted
-//! at all, and the run tree is built from a whole window of text, so nothing here yet constrains
-//! shaping cost to the viewport. Those are Block 5's remaining gates, not this crate's footnotes.
+//! segmentation *rules* are the standard's, applied in order, and the **property data** they read
+//! is generated from the Unicode Character Database (`scripts/gen-cluster-tables.py` writes
+//! `cluster.rs`'s tables), so a mark from any script joins its base, not only the scripts this
+//! UI's spec names. Two things are still outside it, and neither is a table: **GB9c**, Unicode
+//! 15.1's Indic conjunct rule (AUDIT OQ-20), and **BiDi reordering**, not attempted at all.
+//! The run tree is also built from a whole window of text, so nothing here yet constrains shaping
+//! cost to the viewport. Those are Block 5's remaining gates, not this crate's footnotes.
 
 mod cluster;
 mod geom;
