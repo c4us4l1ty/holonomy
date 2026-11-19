@@ -86,7 +86,11 @@ impl Tape {
 /// Everything that must be true of a spine and its model, checked after every edit.
 fn agrees(tape: &Tape, spine: &Spine, model: &[u8], seed: u64, step: u64, rng: &mut Rng) {
     let shown = format!("seed {seed} step {step}");
-    assert_eq!(spine.len() as usize, model.len(), "{shown}: document length");
+    assert_eq!(
+        spine.len() as usize,
+        model.len(),
+        "{shown}: document length"
+    );
     assert_eq!(tape.materialise(spine), model, "{shown}: document bytes");
 
     let spans = spine.spans_in(0, spine.len());
@@ -96,19 +100,40 @@ fn agrees(tape: &Tape, spine: &Spine, model: &[u8], seed: u64, step: u64, rng: &
         "{shown}: every leaf must appear once"
     );
     for (index, span) in spans.iter().enumerate() {
-        assert!(!span.is_empty(), "{shown}: an empty leaf survived at {index}");
+        assert!(
+            !span.is_empty(),
+            "{shown}: an empty leaf survived at {index}"
+        );
         // The O(log n) index has to agree with the walk that produced the spans.
         assert_eq!(
             spine.slab_span(index as u32),
             Some(*span),
             "{shown}: slab_span({index})"
         );
-        let first = spine.locate(span.offset()).expect("a leaf's first byte is in the document");
-        assert_eq!(first.slab(), span.slab(), "{shown}: locate({})", span.offset());
-        assert_eq!(first.within(), 0, "{shown}: locate({}) within", span.offset());
+        let first = spine
+            .locate(span.offset())
+            .expect("a leaf's first byte is in the document");
+        assert_eq!(
+            first.slab(),
+            span.slab(),
+            "{shown}: locate({})",
+            span.offset()
+        );
+        assert_eq!(
+            first.within(),
+            0,
+            "{shown}: locate({}) within",
+            span.offset()
+        );
         let last = span.offset() + span.len() - 1;
-        let last = spine.locate(last).expect("a leaf's last byte is in the document");
-        assert_eq!(last.slab(), span.slab(), "{shown}: the last byte of {index}");
+        let last = spine
+            .locate(last)
+            .expect("a leaf's last byte is in the document");
+        assert_eq!(
+            last.slab(),
+            span.slab(),
+            "{shown}: the last byte of {index}"
+        );
         assert_eq!(last.within(), span.len() as u32 - 1);
     }
     assert_eq!(spine.locate(spine.len()), None, "{shown}: past the end");
@@ -229,14 +254,19 @@ fn rebuilding_from_slabs_coalesces_contiguous_neighbours_and_moves_no_byte() {
         }
         let spine = Spine::from_slabs(slabs.iter().copied());
         assert_eq!(
-            spine.spans_in(0, spine.len())
+            spine
+                .spans_in(0, spine.len())
                 .iter()
                 .map(|span| span.slab())
                 .collect::<Vec<_>>(),
             expected,
             "seed {seed}: the rebuilt leaves"
         );
-        assert_eq!(tape.materialise(&spine), model, "seed {seed}: the rebuilt bytes");
+        assert_eq!(
+            tape.materialise(&spine),
+            model,
+            "seed {seed}: the rebuilt bytes"
+        );
         let spans = spine.spans_in(0, spine.len());
         for pair in spans.windows(2) {
             assert!(
@@ -272,23 +302,53 @@ fn the_overlay_length_is_the_sum_of_what_it_drafted() {
         for span in spine.spans_in(0, spine.len()) {
             expected += live.get(&span.offset()).copied().unwrap_or(span.len());
         }
-        assert_eq!(draft.document_len(&spine), expected, "seed {seed}: document length");
+        assert_eq!(
+            draft.document_len(&spine),
+            expected,
+            "seed {seed}: document length"
+        );
 
-        // And the spans walk that length, with the drafted leaves at their live lengths.
-        let mut at = 0;
-        for span in draft.spans_in(&spine, 0, expected) {
-            assert_eq!(span.offset(), at, "seed {seed}: the overlay's spans must tile");
-            if span.is_draft() {
-                assert_eq!(
-                    Some(span.len()),
-                    live.get(&at).copied(),
-                    "seed {seed}: a drafted leaf's live length"
-                );
-                assert_eq!(draft.live_len(at), Some(span.len()));
+        // And the spans walk that length: each leaf at its live length, drafted exactly where the
+        // overlay has something to say. `live` is keyed by the *sealed* offset, so the two walks
+        // are kept apart — the overlay's offsets are in the live document, which is the point.
+        let walked = draft.spans_in(&spine, 0, expected);
+        let mut live_at = 0;
+        let mut cursor = 0;
+        for span in spine.spans_in(0, spine.len()) {
+            let length = live.get(&span.offset()).copied().unwrap_or(span.len());
+            if length == 0 {
+                // An empty draft has no span of its own — it contributes no bytes to the live
+                // document — so the overlay simply has nothing to show there and the next leaf
+                // still starts at the same live offset.
+                assert_eq!(draft.live_len(span.offset()), Some(0));
+                continue;
             }
-            at += span.len();
+            let found = &walked[cursor];
+            cursor += 1;
+            assert_eq!(found.offset(), live_at, "seed {seed}: the overlay's tiling");
+            assert_eq!(found.len(), length, "seed {seed}: the leaf at {live_at}");
+            assert_eq!(
+                found.is_draft(),
+                live.contains_key(&span.offset()),
+                "seed {seed}: drafted exactly where the overlay spoke"
+            );
+            if found.is_draft() {
+                assert_eq!(draft.live_len(span.offset()), Some(length));
+            }
+            live_at += length;
         }
-        assert_eq!(at, expected, "seed {seed}: the overlay's spans must reach the end");
+        assert_eq!(
+            live_at, expected,
+            "seed {seed}: the overlay's spans must reach the end"
+        );
+        assert_eq!(cursor, walked.len(), "seed {seed}: every span walked");
+        for pair in walked.windows(2) {
+            assert_eq!(
+                pair[0].offset() + pair[0].len(),
+                pair[1].offset(),
+                "seed {seed}: the overlay's spans must tile"
+            );
+        }
     }
 }
 
@@ -316,8 +376,15 @@ fn boundary(text: &str, at: usize) -> usize {
 fn the_resident_buffer_matches_a_string_and_refuses_what_it_cannot_hold() {
     for seed in 0..6 {
         let mut rng = Rng::new(seed);
-        for capacity in [1usize, 2, 3, 4, 5, 8, 16, 64] {
-            let mut slab = SlabText::from_plaintext(Vec::new(), capacity).expect("empty is text");
+        for slack in [1usize, 2, 3, 4, 5, 8, 16, 64] {
+            let mut slab = SlabText::from_plaintext(Vec::new(), slack).expect("empty is text");
+            // The capacity is the *allocation's*, not the ask: `Vec::reserve` may round up, and
+            // what an edit has to fit is what the buffer actually has.
+            let capacity = slab.capacity();
+            assert!(
+                capacity >= slack,
+                "seed {seed} slack {slack}: {capacity} bytes"
+            );
             let mut model = String::new();
             for step in 0..60 {
                 let shown = format!("seed {seed} capacity {capacity} step {step}");
