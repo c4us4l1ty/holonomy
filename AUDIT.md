@@ -60,6 +60,29 @@ Listed so they stay dead.
 | OQ-19 | **A piece laid out without knowing what follows it offers its end as a caret, and shapes its last cluster short.** The eye sees text, not a document: a window's last byte can be inside a cluster, and `Line::boundaries` offers it while `Shaper::advance` was handed only the cluster's first part. The shell closes the caret half by asking the document (`legal_caret`, D-23); the advance half is OQ-18. | **open — needs the piece API to carry a second fact** | `layout_styled_continuing` would take, besides the state *before* the piece, whether the document **continues inside the piece's last cluster** — the same value a `Line` flag already has at the front, applied at the end. The caller's cost is the one thing that keeps this a row: knowing the answer means reading the character after the window, which is a leaf outside the window and a read on every frame, against OQ-12's "one screen plus two leaves" and L-2's habit of not faulting what it does not paint. Two honest ways to pay it: widen the window by the cluster's tail so the frame ends where the document has a position (faults nothing extra and paints the tail), or pass the flag and let the eye stop offering the boundary while still shaping the short cluster — the first is the better rectangle, and neither is worth guessing at without a shaper to measure it on. |
 ## Audit trail
 
+- **2026-11-18 — D-24 — the carries a frame wrote were a leaf late.** Found while re-reading the
+  carry path to build D-25, and introduced by D-22 three commits earlier. `measure_window` derived
+  each leaf's carry from that leaf's **own** end: the segmentation state after folding in the leaf's
+  text (`contexts[index]`), and the `after_cr` flag from the leaf's last byte. A `Carry` is the
+  carry a leaf is **measured with** — `reflow` stores it that way, `Measured`'s own doc says so — so
+  every leaf in a frame later got its successor's state.
+
+  **Failure scenario.** `a`×63, `e`, two U+0301, `\n`, then a leaf of `a`×58 and `\n`. Leaf 0 ends
+  on the `e`, leaf 1 opens with the marks. A click runs a frame, which writes both carries back;
+  `Backspace` at 68 then asked `cluster_before`, got the state at leaf 1's **end** (a `\n`, so GB4
+  breaks), read the marks as a cluster of their own, and stopped at 64 — four bytes instead of five,
+  half a grapheme left behind. That is D-22's symptom, reached from the other direction. The same
+  off-by-one moved `after_cr` onto the wrong leaf, which is D-21's CRLF rule one leaf out for
+  `line_start` and `caret_place`.
+
+  **The fix.** Record the context *before* folding the leaf's text in, and read `after_cr` from the
+  byte before the leaf's **start** — the window's own start has none and needs none, because it is
+  a line start.
+
+  **Checked.** `a_frame_hands_each_leaf_the_state_from_before_it` clicks (which runs a frame, then
+  the carries are in play) and asserts the backspace takes `e` + two marks: 123 bytes. The old code
+  answered 124.
+
 - **2026-11-18 — D-23 — a frame's end is the one boundary a frame can offer that the document may
   not have.** OQ-19's shell half, found by asking what D-22 left on the *other* side of a piece. A
   window ends at a leaf, a leaf cut is a byte count, so the cut can fall inside a cluster — and the

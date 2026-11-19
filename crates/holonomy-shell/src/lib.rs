@@ -1108,6 +1108,9 @@ fn measure_window(
     let mut context = ClusterContext::default();
     let mut contexts: Vec<ClusterContext> = Vec::with_capacity(spans.len());
     for span in spans {
+        // The carry is the one a leaf is **measured with**, so it is the state at the leaf's start:
+        // it is recorded before the leaf's own text is folded in, not after it (AUDIT D-24).
+        contexts.push(context);
         let low = usize::try_from(span.offset().saturating_sub(start)).unwrap_or(0);
         let high = usize::try_from((span.offset() + span.len()).saturating_sub(start))
             .unwrap_or(0)
@@ -1117,7 +1120,6 @@ fn measure_window(
             while clusters.next().is_some() {}
             context = clusters.carry();
         }
-        contexts.push(context);
     }
     for line in layout.lines() {
         let at = line.start_byte();
@@ -1150,10 +1152,11 @@ fn measure_window(
         .enumerate()
         .filter(|(_, span)| span.offset() >= start && span.offset() + span.len() <= end)
         .map(|(index, span)| {
-            // The leaf's last byte, read out of the window the frame already holds: a CR there is
-            // what the leaf hands the next one.
-            let within = usize::try_from(span.offset() + span.len() - start).ok();
-            let last = within
+            // The **predecessor's** last byte, read out of the window the frame already holds: a CR
+            // there is what the leaf before this one hands it, so it is the byte before the leaf's
+            // start — the window's own start has none, and it is a line start, so it needs none.
+            let before = usize::try_from(span.offset().saturating_sub(start))
+                .ok()
                 .and_then(|at| at.checked_sub(1))
                 .and_then(|at| text.as_bytes().get(at));
             (
@@ -1161,7 +1164,7 @@ fn measure_window(
                 heights[index],
                 Carry {
                     x: offsets[index].unwrap_or(Fixed::ZERO),
-                    after_cr: last == Some(&b'\r'),
+                    after_cr: before == Some(&b'\r'),
                     cluster: contexts[index],
                 },
             )

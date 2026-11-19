@@ -584,6 +584,34 @@ fn a_cluster_straddling_every_leaf() -> String {
 }
 
 #[test]
+fn a_frame_hands_each_leaf_the_state_from_before_it() {
+    // A frame writes back the carries it measured, and every later question about a leaf is
+    // answered with the carry *into* it. Recording the state at a leaf's end as that leaf's own
+    // carry made the leaf after a mid-cluster cut segment as though the cut were a boundary, so the
+    // backspace below stopped at 64 instead of taking the `e` and its marks from 63 (AUDIT D-24).
+    let mut document = "a".repeat(63);
+    document.push('e');
+    document.push_str("\u{301}\u{301}\n");
+    document.push_str(&"a".repeat(58));
+    document.push('\n');
+    let mut shell = session();
+    shell.type_text(&document).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    assert_eq!(shell.document_len(), 128, "two leaves exactly");
+
+    // Line 0 is `a`×63 and the `e` with its two marks, sixty-four units of text, so byte 68 is the
+    // boundary at x = 64 — the cluster's end, never a byte inside it.
+    let caret = shell
+        .click(Point::new(Fixed::units(64), Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(caret.map(|caret| caret.byte), Some(68));
+
+    assert!(shell.backspace().expect("a backspace"));
+    assert_eq!(shell.document_len(), 123, "the `e` and its marks go together");
+}
+
+#[test]
 fn a_click_cannot_put_the_caret_inside_the_cluster_the_window_cut_open() {
     // The frame ends where the window ends, and a window ends at a leaf — a byte count (D-22), so
     // the cut can fall inside a cluster. The eye cannot tell that from the frame's text alone, so
