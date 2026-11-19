@@ -4,14 +4,14 @@
 //! zero residency blowups, undo past every point in the log.* This file is that run, and it found
 //! three real bugs on its way to passing: a seal that wrote the bytes an undo had taken back
 //! (D-31), a burst that filled the buffer inside a character and lost the keystroke (D-32), and a
-//! redo after an undo of a root that came back one byte short (OQ-21 — the third clause's own
-//! failure, fixed by keeping the bytes a root undo drops so the redo can re-attach them).
+//! redo that did not hand back what the undo in front of it had taken (OQ-21, then OQ-22, fixed by
+//! D-33 and D-34: a root restore keeps the buffer, so the bytes a step needs are a length into it
+//! rather than a copy, and a mark whose leaf is not the open one moves the leaf).
 //!
 //! The short slice runs on every push in a debug build with every action checked, undo and redo
-//! included. The million is `#[ignore]`d and runs in release in the `test` job — **without** undo
-//! and redo, because the third clause does not hold yet: D-33 made undo-then-redo exact for its own
-//! reproduction (OQ-21), and the walk then found the next one, OQ-22, with a hard invariant break
-//! beside it (OQ-23).
+//! included. The million is `#[ignore]`d and runs in release in the `test` job, with undo and redo
+//! in the mix as well: the gate's third clause is about undo, and a run without it would measure
+//! two thirds of the claim.
 //!
 //! It types into a real [`Typing`] session over a real [`ResidentSet`], and after every step it
 //! asks three questions:
@@ -26,7 +26,7 @@
 //!    session has actually been in, and at the end of the run the whole stack is unwound and
 //!    rewound, each redo matched against the state it undid, byte for byte. That is the model-free
 //!    half — it does not trust this file's idea of what an undo means — and it is a test of its
-//!    own, for six seeds, `#[ignore]`d with its reason (OQ-22). One thing it accounts
+//!    own, for six seeds. One thing it accounts
 //!    for, in the design's own words: a root recorded before a cut names **written** bytes only, so
 //!    the bytes open at that moment are not in it. The walk starts from the settled document, and
 //!    the step that undoes the root keeps a copy of those bytes so its redo puts them back — which
@@ -56,7 +56,7 @@ use std::rc::Rc;
 
 use holonomy_text::{
     copy, Appended, Location, ResidentSet, SegmentId, SegmentSink, SegmentSource, Selection, Slab,
-    Typing, TypingError,
+    StepSummary, Typing, TypingError,
 };
 
 /// The shortest document the run lets itself get down to before it is forced to type.
@@ -572,20 +572,20 @@ impl Session {
 
     /// Unwinds the whole retained stack and rewinds it, one state at a time.
     ///
-    /// This is the model-free half of the undo claim: whatever each state is called, every redo
-    /// has to be the exact inverse of the undo it undoes. What it compares against is the document
-    /// the *world-line* holds, not the one on screen, and that is not a detail: a root recorded
-    /// before a cut is the tree **without** whatever was open at that moment (`restore_root`'s
-    /// contract, and OQ-8's reason — pending bytes were never written, so no root can name them).
-    /// Redo of such a step cannot put them back, and the walk would fail for a design decision
-    /// rather than a bug. The pending span is therefore removed from the top before the walk, and
-    /// the depth it costs is stated: undo across a cut returns to the last *written* document, and
-    /// anything typed since is lost. A seal is the ordinary way to keep it.
+    /// This is the model-free half of the undo claim: whatever each state is called, every redo has
+    /// to be the exact inverse of the undo it undoes — the whole document, byte for byte, including
+    /// bytes that are open and not yet written. That last part is the point: a root names written
+    /// bytes only, so a root's redo cannot name what was open over the buffer either. It does not
+    /// have to: the buffer keeps those bytes, and a root restore re-attaches them by length
+    /// (D-34), so undo-then-redo is a no-op on the document the user sees, not merely on the one
+    /// the world-line holds.
     fn walk_history(&mut self) -> usize {
-        let top = self.read();
-        let pending = self.typing.pending().len();
-        let caret = self.typing.caret();
-        let mut states = vec![settled(&top, caret, pending)];
+        // No exception: the document the walk starts from is the document the session is in, open
+        // bytes and all. Until D-34 it had to be settled first — a root's redo could not hand
+        // back what was open over the buffer — and that subtraction was the one-byte disagreement
+        // the walk reported (OQ-22). Now the buffer survives a root restore, so a redo puts the
+        // open bytes back and undo-then-redo is a no-op on the whole document.
+        let mut states = vec![self.read()];
         while self.typing.undo().expect("a recorded state restores") {
             let text = self.read();
             let len = text.len() as u64;
@@ -597,12 +597,15 @@ impl Session {
         assert_eq!(left, 0, "seed {}: {left} states unvisited", self.seed);
         let deepest = states.len() - 1;
         let mut redone = 0;
-        while self.typing.redo().expect("an undone state re-applies") {
+        let mut applied: Vec<StepSummary> = Vec::new();
+        while let Some(step) = self.typing.top_redo() {
+            applied.push(step);
+            assert!(self.typing.redo().expect("an undone state re-applies"));
             redone += 1;
             let text = self.read();
             let want = &states[deepest - redone];
             if &text != want {
-                self.report_rewind(want, &text, redone);
+                self.report_rewind(want, &text, redone, &applied);
             }
         }
         assert_eq!(
@@ -616,7 +619,7 @@ impl Session {
     }
 
     /// Says where a rewound state and the state it had to re-apply part company.
-    fn report_rewind(&self, want: &str, got: &str, redone: usize) -> ! {
+    fn report_rewind(&self, want: &str, got: &str, redone: usize, applied: &[StepSummary]) -> ! {
         let first = first_difference(want, got);
         // Windows for a human, so they have to be character-aligned: a byte range that starts or
         // ends inside a combining sequence reads back as `None` and printed two empty strings.
@@ -629,11 +632,13 @@ impl Session {
         let slabs = self.typing.spine().slab_count();
         panic!(
             "seed {}: redo {redone} differs at {first} of {}/{}: want={a:?} got={b:?} \
-             pending={pending} open={open} spine={spine} slabs={slabs} {:?}",
+             pending={pending} open={open} spine={spine} slabs={slabs} ring={:?}\n\
+             applied={:?}\n want={want:?}\n  got={got:?}",
             self.seed,
             want.len(),
             got.len(),
-            self.recent
+            self.recent,
+            &applied[applied.len().saturating_sub(6)..],
         );
     }
 
@@ -655,19 +660,6 @@ impl Session {
              segments={segments} document_bytes={document} peak_resident_bytes={peak}"
         )
     }
-}
-
-/// The document with the pending span — the bytes that are in the buffer and in no segment —
-/// taken out, which is the newest state a root can name.
-fn settled(text: &str, caret: u64, pending: usize) -> String {
-    let mut settled = text.to_owned();
-    if pending == 0 {
-        return settled;
-    }
-    let end = usize::try_from(caret).unwrap_or(text.len()).min(text.len());
-    let start = end.saturating_sub(pending);
-    settled.replace_range(start..end, "");
-    settled
 }
 
 /// A character-aligned window around `first` that both documents actually have.
@@ -712,10 +704,7 @@ fn run(seed: u64, steps: u64) -> Session {
 /// Runs until `keystrokes` inserts have happened, so the gate's count is keystrokes and the
 /// interleaved cuts, marks, undos and wipes are extra rather than instead.
 fn run_keystrokes(seed: u64, keystrokes: u64) -> Session {
-    // Undo and redo stay out of this run until OQ-22 and OQ-23 are fixed: with them in, the million
-    // trips an invariant in `Typing::pending` (`live_len()` eight, buffer three) at about a hundred
-    // and sixty seconds in. The short slice still exercises undo and redo on every push.
-    let mut session = Session::new(seed, false, false);
+    let mut session = Session::new(seed, false, true);
     // Inserts always make progress, so the cap only ever catches a harness bug — as a failure,
     // not a hang.
     let cap = keystrokes.saturating_mul(8);
@@ -737,8 +726,7 @@ fn a_random_session_keeps_the_view_the_leaves_and_the_budget_in_agreement() {
     // The short slice: six seeds, twenty thousand actions each, in a debug build, with every action
     // checked — the document read back through the reader the shell uses and compared with an
     // independent model, the leaves tiled and backed, and the resident set inside its budget.
-    // Undo and redo are part of the mix; unwinding the stack is the ignored test below, because
-    // that is the clause that does not hold yet (OQ-21).
+    // Undo and redo are part of the mix; unwinding the stack is the test below.
     for seed in 0..6 {
         let session = run(seed, 20_000);
         assert!(
@@ -751,15 +739,14 @@ fn a_random_session_keeps_the_view_the_leaves_and_the_budget_in_agreement() {
     }
 }
 
-/// The third clause of the gate, and the reason it is unclaimed.
+/// The third clause of the gate: undo past every point the session retains, and back.
 ///
 /// This walk is what caught OQ-21 (a redo after an undo of a root, one byte short, seed 2 at byte
-/// 260 of 409), and D-33 fixed that reproduction: a root step's inverse now keeps the bytes that
-/// were open, so its redo re-attaches them instead of losing them. The walk then moved on to the
-/// next one, which is OQ-22 and still open: seed 0, redo five, a document 276 bytes wide where 275
-/// was expected, with one pending byte and the leaf at the wrong offset.
+/// 260 of 409), then OQ-22 (a redo that put its open bytes back in the wrong place, seed 0, redo
+/// five). Both are fixed: a root restore keeps the buffer, so a step's open bytes are a length into
+/// it rather than a copy that can be re-attached in the wrong tree, and a mark whose leaf is not
+/// the open one moves the leaf instead of only setting a length (D-34).
 #[test]
-#[ignore = "blocked on OQ-22: a redo re-attaches pending bytes at the wrong offset (seed 0)"]
 fn unwinding_the_retained_undo_stack_comes_back_to_the_same_document() {
     for seed in 0..6 {
         let mut session = run(seed, 20_000);
