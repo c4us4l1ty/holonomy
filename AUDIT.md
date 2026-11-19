@@ -97,8 +97,10 @@ Listed so they stay dead.
   structure every operation descends, and it would buy a few megabytes on a document that already
   needs a world-line to exist. The clause is therefore **amended** rather than failed silently:
   gate 1 now claims a fixed bound on *resident plaintext* (the memory L-2 bounds) plus a measured
-  per-leaf cost for the index, and both are asserted by the named test. The checkbox is set only
-  by a run that prints the numbers, as with every other gate here.
+  per-leaf cost for the index, and both are asserted by the named test — printed, and asserted, so
+  a green run *is* the measurement rather than a log nobody reads. Claimed on CI run `44579774910`, whose
+  test job enforced the resident bound (equal at both sizes), eviction under four thousand faults,
+  the per-leaf band, and the index under five percent of the document.
 - **2026-11-19 — D-35 — a cut wipes what it vacates, and a slab wipes its whole allocation.**
   Found by review while hunting (not by a failing test, because nothing in safe code can read the
   region involved). `SlabText::delete` shifts the surviving bytes left and truncates, which leaves
