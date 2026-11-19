@@ -213,8 +213,16 @@ were faked with newline padding) and any structure that walks the document on a 
 **GATES** — gates 1–2 open; gate 3 **passed 2026-11-19**, by a runner that earned it
 *(the keystroke *deliverable* is measured; these gates are document-scale, latency and fuzz
 measurements on reference hardware and share nothing with it)*
-- [ ] Open a synthetic 30 M-word document: memory at open is within a fixed bound that
-      identical input of 1 page also satisfies.
+- [x] **Amended 2026-11-19 (AUDIT D-36) — the clause is two claims, and the measurement split
+      them.** Open a synthetic 30 M-word document: **resident plaintext** at open is within a fixed
+      bound that identical input of 1 page also satisfies (the memory L-2 bounds — it holds), and
+      the **index** costs a measured per-leaf constant that is under three percent of the
+      document (it grows with leaves by construction: D-1's descent needs its nodes). Measured by
+      `crates/holonomy-text/tests/open_memory.rs`, which prints `HOLONOMY_OPEN_MEMORY` for both
+      sizes and asserts the budget, the eviction, the per-leaf band and the fraction. **Claimed
+      2026-11-19 on the measuring run**: CI run `44579774910` (test job green) enforced every clause — the
+      resident bound equal at one page and at thirty million words, eviction under four thousand
+      faults, the per-leaf band, and the index under five percent.
 - [ ] Keystroke at offset 0 and at offset `N-1`: statistically identical latency curves.
 - [x] 1 M random-keystroke fuzz run: zero leaks, zero residency blowups, undo past every
       point in the log. **`crates/holonomy-text/tests/keystroke_fuzz.rs`.** A seeded generator over
