@@ -79,16 +79,49 @@ impl Spine {
     }
 
     /// Builds a spine from slabs in document order, in O(n).
+    ///
+    /// Neighbours that name contiguous bytes of one segment become **one leaf**: nothing in the
+    /// document separates them, and a leaf boundary is an accounting unit rather than a semantic
+    /// one — every leaf costs a height-model row, a residency slot and a read. A document rebuilt
+    /// from a log whose geometry earlier edits fragmented would otherwise carry that fragmentation
+    /// forever, which is AUDIT OQ-9, and this is its load-time half.
+    ///
+    /// Merging cannot overflow a slab's range: the second slab is contiguous and already valid, so
+    /// its `start + len` is the merged `start + len`. Nothing else may move — a different segment
+    /// is a different plaintext, and a gap is a range the document does not name — so the pass only
+    /// ever looks at the immediately preceding slab. A loaded spine therefore has the invariant
+    /// that no two adjacent leaves name contiguous bytes of one segment.
     #[must_use]
     pub fn from_slabs<I>(slabs: I) -> Self
     where
         I: IntoIterator<Item = Slab>,
     {
-        // A zero-byte leaf carries nothing but would inflate slab counts and path copies; the
-        // document is unchanged by definition, so it is dropped at the door.
-        let collected: Vec<Slab> = slabs.into_iter().filter(|slab| !slab.is_empty()).collect();
+        let mut coalesced: Vec<Slab> = Vec::new();
+        let mut open: Option<Slab> = None;
+        for slab in slabs {
+            // A zero-byte leaf carries nothing but would inflate slab counts and path copies; the
+            // document is unchanged by definition, so it is dropped at the door.
+            if slab.is_empty() {
+                continue;
+            }
+            open = match open {
+                Some(tail) if tail.segment() == slab.segment() && tail.end() == slab.start() => {
+                    Some(Slab::new(
+                        tail.segment(),
+                        tail.start(),
+                        tail.len() + slab.len(),
+                    ))
+                }
+                Some(tail) => {
+                    coalesced.push(tail);
+                    Some(slab)
+                }
+                None => Some(slab),
+            };
+        }
+        coalesced.extend(open);
         Self {
-            root: tree::build_balanced(&collected),
+            root: tree::build_balanced(&coalesced),
         }
     }
 
@@ -417,6 +450,60 @@ mod tests {
         assert_eq!(last.slab().segment(), SegmentId::new(2));
         assert_eq!(last.within(), 29);
         assert!(spine.locate(60).is_none());
+    }
+
+    #[test]
+    fn contiguous_fragments_of_one_segment_become_one_leaf() {
+        // A log whose geometry edits fragmented names the same plaintext in runs; loading it merges
+        // each run, so the leaf count is the document's shape and not its history (AUDIT OQ-9).
+        let spine = Spine::from_slabs([
+            Slab::new(SegmentId::new(0), 0, 10),
+            Slab::new(SegmentId::new(0), 10, 20),
+            Slab::new(SegmentId::new(1), 0, 5),
+        ]);
+        assert_eq!(spine.slab_count(), 2);
+        assert_eq!(spine.len(), 35);
+        let spans = spine.spans_in(0, 35);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].slab(), Slab::new(SegmentId::new(0), 0, 30));
+        assert_eq!(spans[1].offset(), 30);
+        assert_eq!(spans[1].slab(), Slab::new(SegmentId::new(1), 0, 5));
+    }
+
+    #[test]
+    fn fragments_of_different_segments_or_with_a_gap_stay_apart() {
+        // Merging is contiguity inside one segment and nothing else: a different segment is a
+        // different plaintext, and a gap is a range the document does not name.
+        let spine = Spine::from_slabs([
+            Slab::new(SegmentId::new(0), 0, 10),
+            Slab::new(SegmentId::new(1), 0, 10),
+            Slab::new(SegmentId::new(0), 10, 10),
+            Slab::new(SegmentId::new(0), 30, 10),
+        ]);
+        assert_eq!(spine.slab_count(), 4);
+    }
+
+    #[test]
+    fn a_split_and_rejoin_stays_two_leaves_until_the_document_is_rebuilt() {
+        // The residual OQ-9 keeps: a structural cut fragments the spine and the tree does not heal
+        // itself. Loading the geometry again is where it heals, and the bytes do not move.
+        let spine = Spine::from_slabs([Slab::new(SegmentId::new(0), 0, 20)]);
+        let (before, after) = spine.split_at(10).expect("a split inside the document");
+        let rejoined = before.concat(&after);
+        assert_eq!(rejoined.slab_count(), 2);
+        let geometry: Vec<Slab> = rejoined
+            .spans_in(0, 20)
+            .iter()
+            .map(|span| span.slab())
+            .collect();
+        let rebuilt = Spine::from_slabs(geometry);
+        assert_eq!(rebuilt.slab_count(), 1);
+        assert_eq!(rebuilt.len(), 20);
+        // The geometry is coarser and the bytes are where they were: byte 15 of segment 0 is byte
+        // 15 of segment 0, whichever slab names it.
+        let byte = |spine: &Spine| spine.locate(15).map(|hit| hit.segment_offset());
+        assert_eq!(byte(&rebuilt), byte(&rejoined));
+        assert_eq!(byte(&rebuilt), Some(15));
     }
 
     #[test]
