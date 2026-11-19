@@ -1235,7 +1235,9 @@ fn measure_window(
                 // The predecessor can only have placed the tail if it fitted inside the look it
                 // takes — the leaf after it, whole — or if the cluster ends at the document's end
                 // (AUDIT D-25).
-                let look = spans.get(index + 1).map_or(0, |next| next.len());
+                let look = spans
+                    .get(index + 1)
+                    .map_or(0, |next| usize::try_from(next.len()).unwrap_or(0));
                 let reaches_end = span.offset() + span.len() >= document_end;
                 if joins_before && (cluster.len() < look || reaches_end) {
                     skip = cluster.len().min(high - low);
