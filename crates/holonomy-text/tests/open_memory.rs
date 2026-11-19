@@ -11,7 +11,9 @@
 //! 2. **The resident plaintext**, under pressure: a `ResidentSet` with a viewport budget is asked
 //!    for four thousand segments of the big document and must evict rather than grow.
 //!
-//! The finding, printed per size as `HOLONOMY_OPEN_MEMORY`:
+//! What the run proves is the *bounds* asserted below, not the digits of a printed figure: the
+//! numbers are printed per size as `HOLONOMY_OPEN_MEMORY`, and every one of them is also an
+//! assertion, so a green run is the measurement.
 //!
 //! - Resident plaintext is exactly what L-2 claims: bounded by a budget fixed at construction,
 //!   and a document a thousand times longer does not move it.
@@ -50,9 +52,12 @@ const SLACK: usize = 64;
 const PRESSURE_SEGMENTS: u64 = 4_000;
 /// What a leaf is allowed to cost the index. A balanced tree over `n` leaves holds `2n - 1` nodes,
 /// each one `Arc<Node>`: a 16-byte header over two child pointers and three aggregates, so about
-/// fifty-six bytes a node and a hundred and twelve a leaf. The measurement prints the figure; this
-/// is the bound the assertion enforces, above it so a small layout change does not red the build.
-const PER_LEAF_BOUND: u64 = 192;
+/// fifty-six bytes a node and a hundred and twelve a leaf. That 112 is the layout's arithmetic;
+/// what CI proves is the **band** below, so the claim does not rest on the prediction being exact
+/// and a legitimate node change of a few bytes does not red the build. Sixteen bytes a node under
+/// the arithmetic and the same again over it is a factor the platform's `Arc` cannot produce.
+const PER_LEAF_MIN: u64 = 64;
+const PER_LEAF_MAX: u64 = 192;
 
 /// A stand-in for the world-line: ASCII pages of a fixed size, any segment id.
 struct Pages {
@@ -210,8 +215,9 @@ fn opening_thirty_million_words_costs_the_index_and_none_of_the_text() {
     //    bounded, and it is a fixed *fraction* of the document — but it is not fixed in absolute
     //    terms, so "memory at open is within a fixed bound" is false as written. D-36 amends it.
     assert!(
-        big.millibytes_per_leaf <= PER_LEAF_BOUND.saturating_mul(1_000),
-        "the index costs {} millibytes a leaf, over the {PER_LEAF_BOUND}-byte bound",
+        big.millibytes_per_leaf >= PER_LEAF_MIN.saturating_mul(1_000)
+            && big.millibytes_per_leaf <= PER_LEAF_MAX.saturating_mul(1_000),
+        "the index costs {} millibytes a leaf, outside the {PER_LEAF_MIN}-{PER_LEAF_MAX} band",
         big.millibytes_per_leaf
     );
     assert!(

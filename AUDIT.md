@@ -89,9 +89,10 @@ Listed so they stay dead.
   viewport budget, asked for four thousand segments of the big document, evicts and holds the same
   bound the page-sized one holds; the budget is a construction argument, never the document's
   length. **The index is not fixed**: a spine is `2n - 1` nodes of `Arc<Node>` — a 16-byte header
-  over two child pointers and three aggregates — so it costs a measured constant a leaf (about 112
-  bytes: 4.9 MB for the big document, some 56 bytes for the page) and under three percent of the
-  document's own bytes. That is the price of `locate` being a descent rather than a scan (D-1);
+  over two child pointers and three aggregates — so it costs a constant a leaf: the layout's
+  arithmetic gives 112 bytes (4.9 MB for the big document, some 56 bytes for the page), and CI
+  proves the band that arithmetic sits in rather than trusting the digits: 64-192 bytes a leaf,
+  and the index under five percent of the document's own bytes. That is the price of `locate` being a descent rather than a scan (D-1);
   making it fixed would mean lazily materialising the tree, which is a redesign of the one
   structure every operation descends, and it would buy a few megabytes on a document that already
   needs a world-line to exist. The clause is therefore **amended** rather than failed silently:
