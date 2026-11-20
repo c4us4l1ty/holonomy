@@ -94,16 +94,38 @@ The run prints `HOLONOMY_INTENTS intents= redraws= carets= saves= bytes=` under
 steps, more than a hundred redraws, more than ten caret reports, at least one write, and a document
 that is still non-empty at the end. Green on `main`.
 
-### M3 — A real shaper (Block 8, the half Block 5 waits on)
+### M3 — A real face — **done**
 
-`Shaper` is a trait; the only implementation in the tree is a test double. This step adds
-`holonomy-shape`: font loading, shaping, metrics, fallback, cluster segmentation that agrees with
-`Clusters`. No window, no GPU — shaping is a pure function and can be gated headlessly.
+`holonomy_eye::Face` reads a real OpenType font's metrics — `head`, `hhea`, `hmtx`, `maxp` and
+`cmap` — and implements `Shaper`, so proportional advances, the font's own ascent and descent and a
+real character map stand behind every layout. The font is the one the previous editor shipped
+(`holonomy-old/assets/fonts/Inter-Regular.ttf`, SIL OFL, licence beside it), compiled into the test
+binary. The parser is a few hundred lines of integer arithmetic in the Eye: no dependency, because
+the workspace lockfile is committed and CI builds `--locked`, so adding one is a supply-chain
+decision rather than a convenience.
 
-**Acceptance (headless):** the one-geometry gate's matrix (documents × widths × zooms × DPIs) re-run
-with the real shaper; widths within the font's own metrics; CJK and emoji clusters measured whole;
-fallback for a missing glyph chosen deterministically; and Block 5 gate 2's *timing* half measured at
-30 M words, which is the clause its checkbox has been waiting for.
+**Acceptance (headless, `crates/holonomy-eye/tests/real_face.rs`), by assertion:**
+
+- the file parses and reports the design units, glyph count and mapped-character count of a real
+  text face;
+- every printable ASCII character maps to a glyph and has a width — 95 of them;
+- the face is **proportional** — `i` is not `m`, and neither is `W` — so a monospace assumption
+  anywhere in the geometry would show up as a failure instead of a coincidence;
+- scaling to twice the size doubles the advance to within one sixty-fourth of a unit, and a
+  cluster's width is the sum of its characters' advances;
+- a hard break has no width, and line height is ascender minus descender with ascent inside it;
+- a paragraph laid out with the real face keeps the Eye's law: `hit_test(paint_point(c)) == c` for
+  every caret the layout offers, at real metrics rather than a test double's.
+
+Prints `HOLONOMY_FACE …`, `HOLONOMY_FACE_SCALE …` and `HOLONOMY_FACE_LAYOUT …` under `--nocapture`;
+the counts are asserted (95 printable ASCII advances, ≥5 scalings, ≥4 sums, >50 caret round trips,
+≥2 lines), so a green run cannot be a run that read no font.
+
+**What this is not:** shaping. Kerning, ligatures, mark positioning and Arabic joining live in
+`GSUB`/`GPOS`, which nothing reads yet; a cluster's width is the *sum* of its characters, which is
+exactly right for one-glyph-per-character text and a measurement — not a promise — elsewhere. That
+gap is recorded as **OQ-24** in `AUDIT.md`, and Block 5 gate 2's timing half can now be measured
+with these metrics.
 
 ### M4 — The window (Block 6, first half)
 
@@ -159,5 +181,5 @@ deliberately renderer-agnostic: they survive that fallback untouched.
 
 ## Where we are
 
-M0, M1 and M2 done. M3 next: `holonomy-shape` — a real font, real metrics, real clusters — which is
-also the shaper Block 5 gate 2's timing half has been waiting for.
+M0, M1, M2 and M3 done. M4 next: the window itself — GPUI, the event loop, the keymap, the IME
+path — drawing M1's picture and speaking M2's intents, with M3's metrics behind the text.
