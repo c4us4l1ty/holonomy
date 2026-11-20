@@ -131,23 +131,34 @@ fn snapshot(shell: &mut Editor<Recorder, Repeated, Fake>) -> Snapshot {
 }
 
 #[test]
-fn a_frame_with_nothing_changed_between_is_the_same_frame() {
+fn framing_a_screen_does_not_move_the_geometry_it_measured() {
+    // The sharpest form of the question, and the one that failed first: a frame writes the heights
+    // of the leaves it measured back into the index. After a full `reflow` every leaf is already
+    // measured, so a frame has nothing to add — if the total moves anyway, the two measurement
+    // paths disagree about the same leaves, and the scroll geometry depends on where the user has
+    // scrolled rather than on the document.
     let mut shell = measured();
-    let total = shell.heights().total();
     for top in [0, 40, 400, 20_000] {
         shell.scroll_to(Fixed::units(top));
+        let before = shell.heights().total();
         let first = snapshot(&mut shell);
+        let after = shell.heights().total();
+        assert_eq!(
+            after.sixtyfourths(),
+            before.sixtyfourths(),
+            "at scroll {top}: one frame moved the measured total"
+        );
         let second = snapshot(&mut shell);
         assert_eq!(
+            shell.heights().total().sixtyfourths(),
+            before.sixtyfourths(),
+            "at scroll {top}: the second frame moved it again"
+        );
+        assert_eq!(
             first, second,
-            "at scroll {top}: the second frame differed from the first"
+            "at scroll {top}: two identical frames differed"
         );
     }
-    assert_eq!(
-        shell.heights().total(),
-        total,
-        "framing the same document over and over moved its measured total"
-    );
 }
 
 #[test]
@@ -196,16 +207,19 @@ fn resizing_away_and_back_returns_the_same_frame_at_the_top() {
 
 #[test]
 fn undo_after_a_resize_still_hands_back_the_bytes() {
+    // A delete is an undo step of its own, and a resize throws the measured geometry away — the
+    // question is whether it throws the history away with it.
     let mut shell = measured();
     let typed = shell.document_len();
-    shell.type_text("hello").expect("typed");
-    assert_eq!(shell.document_len(), typed + 5);
+    shell.select_all();
+    assert!(shell.delete_selection().expect("deleted"), "the select-all");
+    assert_eq!(shell.document_len(), 0, "everything went");
     shell.resize(Fixed::units(300), VIEWPORT);
-    assert!(shell.undo().expect("undoable"), "the typing is undoable");
+    assert!(shell.undo().expect("undoable"), "the delete is undoable");
     assert_eq!(
         shell.document_len(),
         typed,
-        "undo after a resize did not take the bytes back"
+        "undo after a resize did not hand the document back"
     );
     let frame = shell.frame().expect("a frame");
     assert!(
