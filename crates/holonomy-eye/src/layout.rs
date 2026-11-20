@@ -112,7 +112,15 @@ impl<'a> Line<'a> {
         self.end_x
     }
 
-    /// Whether the line ends in a hard break, and so offers a caret at its end.
+    /// Whether the line offers a caret at its end.
+    ///
+    /// True for a line that ends in a hard break, and true for the **document's last line** even
+    /// when no break follows it — a document's end is a caret position, and a layout that withheld
+    /// it would leave the last glyph with no caret to its right. False for a line a window inherits
+    /// the tail of, whose own caret was offered by the window that ended it. (This used to say a
+    /// line offers its end caret "when the line ends in a hard break" and nothing else — a
+    /// comment a Block 5 gate harness contradicted by counting the last document line's extra
+    /// boundary. The code was right; the sentence was wrong.)
     #[must_use]
     pub fn has_end(&self) -> bool {
         self.has_end
