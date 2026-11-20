@@ -163,9 +163,8 @@ impl<'a> Layout<'a> {
             lines,
             clusters,
             caret: caret.and_then(|byte| self.paint_point(byte)),
-            selection: selection.map_or_else(Vec::new, |(start, end)| {
-                self.selection_spans(start, end)
-            }),
+            selection: selection
+                .map_or_else(Vec::new, |(start, end)| self.selection_spans(start, end)),
             width: self.width(),
             height: self.height(),
         }

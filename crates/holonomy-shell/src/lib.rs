@@ -173,10 +173,8 @@ impl<'a> Frame<'a> {
     /// carets. A renderer drops the frame, keeps the picture, and draws it later.
     #[must_use]
     pub fn picture(&self) -> Picture {
-        self.layout.picture(
-            self.caret.map(|caret| caret.byte),
-            self.selection,
-        )
+        self.layout
+            .picture(self.caret.map(|caret| caret.byte), self.selection)
     }
 }
 
@@ -757,15 +755,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             .locate(self.typing.spine(), start)
             .is_some_and(|hit| hit.within() == 0);
         let first = leaves.first();
-        let measured = measure_window(
-            &layout,
-            text,
-            &spans,
-            start,
-            end,
-            document_end,
-            head_whole,
-        );
+        let measured = measure_window(&layout, text, &spans, start, end, document_end, head_whole);
         for (index, height, carry) in measured {
             self.measured.set(first + index, height, carry);
         }

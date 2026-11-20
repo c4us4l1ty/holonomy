@@ -148,7 +148,10 @@ impl<'a> Line<'a> {
     /// line's content ends.
     #[must_use]
     pub fn x_at(&self, byte: u64) -> Fixed {
-        let mut x = self.clusters.first().map_or(Fixed::ZERO, |cluster| cluster.x);
+        let mut x = self
+            .clusters
+            .first()
+            .map_or(Fixed::ZERO, |cluster| cluster.x);
         for cluster in &self.clusters {
             if cluster.byte > byte {
                 break;

@@ -115,7 +115,11 @@ fn measured() -> Shell {
 /// the geometry is integral, and the fake shaper makes it so.
 fn cells(value: Fixed, what: &str) -> i64 {
     let sixtyfourths = value.sixtyfourths();
-    assert_eq!(sixtyfourths % 64, 0, "{what} is not a whole cell: {value:?}");
+    assert_eq!(
+        sixtyfourths % 64,
+        0,
+        "{what} is not a whole cell: {value:?}"
+    );
     sixtyfourths / 64
 }
 
@@ -126,7 +130,7 @@ fn raster(picture: &Picture) -> Vec<Vec<Option<usize>>> {
     assert!(width > 0, "a picture with no width");
     let mut grid = vec![vec![None; width as usize]; picture.lines.len()];
     let mut claimed = 0usize;
-    for (index, line) in picture.lines.iter().enumerate() {
+    for index in 0..picture.lines.len() {
         for cluster in picture.clusters_on(index) {
             let from = cells(cluster.x, "a cluster's left edge");
             let to = cells(cluster.end(), "a cluster's right edge");
@@ -172,7 +176,11 @@ fn every_cluster_owns_its_cells_once() {
         let frame = shell.frame().expect("a frame");
         let picture = frame.picture();
         assert_eq!(
-            picture.lines.iter().map(|line| line.clusters.len()).sum::<usize>(),
+            picture
+                .lines
+                .iter()
+                .map(|line| line.clusters.len())
+                .sum::<usize>(),
             picture.clusters.len(),
             "at scroll {top}: the lines' cluster ranges do not partition the cluster list"
         );
@@ -215,7 +223,7 @@ fn line_boxes_tile_the_picture() {
             LINE,
             "line {index} is not one line box tall"
         );
-        top = top + line.height;
+        top += line.height;
     }
     assert_eq!(
         top, picture.height,
@@ -267,7 +275,10 @@ fn the_caret_lands_on_a_cluster_it_owns() {
                 shown.line, shown.byte, shown.x, cluster.x
             );
             assert_eq!(shown.top, line.top, "the caret is off its own line's box");
-            assert_eq!(shown.height, line.height, "the caret is not a line box tall");
+            assert_eq!(
+                shown.height, line.height,
+                "the caret is not a line box tall"
+            );
         } else {
             assert!(
                 line.has_end && shown.byte == line.end_byte,
@@ -308,7 +319,10 @@ fn a_selection_covers_exactly_the_clusters_between_its_ends() {
     let frame = shell.frame().expect("a frame");
     let (start, end) = frame.selection().expect("a selection");
     let picture = frame.picture();
-    assert!(!picture.selection.is_empty(), "the selection painted nothing");
+    assert!(
+        !picture.selection.is_empty(),
+        "the selection painted nothing"
+    );
 
     let mut painted = 0u64;
     let mut absent = 0u64;
@@ -357,7 +371,10 @@ fn a_selection_covers_exactly_the_clusters_between_its_ends() {
                 cluster.byte >= start && cluster.byte + cluster.len as u64 <= end,
                 "line {index}: a visible cluster outside the select-all range"
             );
-            assert!(cluster.end() <= span.end, "line {index}: a cluster past the span");
+            assert!(
+                cluster.end() <= span.end,
+                "line {index}: a cluster past the span"
+            );
         }
     }
 }
