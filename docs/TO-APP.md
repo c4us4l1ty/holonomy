@@ -47,24 +47,30 @@ Fixed; the regression asserts the whole snapshot across two frames at four scrol
 *Why first:* every later visual claim is checked against a frame, and a frame that disagrees with
 itself makes a renderer bug look like a core bug and a core bug look like a renderer bug.
 
-### M1 — The frame as a picture
+### M1 — The frame as a picture — **done**
 
-`Frame` today is text + layout + caret. A renderer needs a view model it can consume without
-reaching into the Eye: for each visible line, its box; for each cluster, its byte and x; the caret
-rect; the selection rects; and the total height. Deliver it as `Frame::picture()`.
+`Frame::picture()` returns `holonomy_eye::Picture`: an owned, drawable view model — line boxes, a
+flat cluster list with per-line ranges, the caret, and the selection as runs of each line.
+`Layout::selection_spans` is where selection became *geometry* rather than a pair of offsets a
+renderer re-derives; a partial cluster paints whole, stated once, there.
 
-**Acceptance (headless):** an ASCII rasteriser in `holonomy-shell`'s tests draws each frame into a
-grid of cells and asserts, over the generated-document corpus the Block 5 gates already use:
+**Acceptance (headless, `crates/holonomy-shell/tests/picture.rs`), by assertion:**
 
-- every cluster occupies exactly one set of cells, with no cell claimed twice and none skipped;
-- the caret rect lands on a cell that belongs to the caret's own cluster (or the space before it at
-  a line start), at every zoom × DPI the one-geometry gate covers;
-- a selection covers exactly the clusters between its ends, and nothing else;
-- line boxes tile the viewport with no gap and no overlap, and their count equals the lines the
-  `HeightModel` says are visible.
+- every cluster owns its cells once — no double claim, no cluster with no width, nothing outside the
+  wrap width — over four scroll positions;
+- line boxes start at zero, each begins where the last ended, each is one line box tall, their sum
+  is the picture's height and the layout's;
+- the caret lands on its own cluster's left edge (or on a line end that offers one) for every
+  clickable cluster on the visible lines;
+- a selection paints exactly the clusters between its ends — checked in both directions, painted
+  and unpainted — and selecting everything starts every line at the margin.
 
-Prints `HOLONOMY_PICTURE documents=… frames=… cells=… carets=… selections=…`; the gate is claimed
-when that line is green and the counts are non-trivial.
+The runs print `HOLONOMY_PICTURE pictures= clusters= cells=`, `HOLONOMY_PICTURE_CARETS carets=` and
+`HOLONOMY_PICTURE_SELECTION painted= unpainted=` under
+`cargo test -p holonomy-shell --test picture -- --nocapture`. The counts are asserted in the same
+run — four pictures, more than a hundred clusters, ten or more carets, both painted and unpainted
+clusters present — so a green run is a run that drew something and found it consistent. All four
+tests are green on `main`.
 
 ### M2 — Intents as data
 
@@ -141,5 +147,5 @@ deliberately renderer-agnostic: they survive that fallback untouched.
 
 ## Where we are
 
-M0 done. M1 next: it is pure logic, it can be proved headlessly, and it is the last thing that can
-be settled before a font and a window are in the way.
+M0 done. M1 done. M2 next: one entry point for a window — `Intent` and `Effect` — proved
+behaviour-preserving against the direct method calls before any window exists to call them.
