@@ -16,7 +16,7 @@
 //! that applied no intents would be a green run that proved nothing.
 
 use holonomy_eye::{Fixed, Point, Shaper, Style, View};
-use holonomy_shell::{Effect, Editor, Intent};
+use holonomy_shell::{Editor, Effect, Intent};
 use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
 
 /// One logical unit per cluster, two for `m` and `中` — as in the other shell tests.
@@ -193,7 +193,7 @@ impl Rng {
 fn step(seed: u64, shell_len: u64) -> Intent {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     match rng.below(14) {
-        0 | 1 | 2 => {
+        0..=2 => {
             let text = if rng.below(3) == 0 { "m中\n" } else { "ab" };
             Intent::Type(text.to_owned())
         }
@@ -322,7 +322,10 @@ fn a_redraw_is_asked_for_exactly_when_something_changed() {
     // Scrolling to where we already are is not a change.
     let at = shell.scroll();
     assert!(
-        shell.apply(Intent::ScrollTo(at)).expect("applied").is_empty(),
+        shell
+            .apply(Intent::ScrollTo(at))
+            .expect("applied")
+            .is_empty(),
         "a scroll that does not move asked for a repaint"
     );
     // Nor is a resize to the size we already have.
@@ -348,7 +351,9 @@ fn a_redraw_is_asked_for_exactly_when_something_changed() {
     let effects = shell.apply(Intent::Type("c".to_owned())).expect("applied");
     assert!(effects.contains(&Effect::Redraw), "typing did not repaint");
     assert!(
-        effects.iter().any(|effect| matches!(effect, Effect::Caret(_))),
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Caret(_))),
         "typing did not report the caret"
     );
     // A flush says the bytes landed, and asks for no repaint of its own.
