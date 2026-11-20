@@ -80,6 +80,17 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-20 — OQ-24 — shaping is metrics only, and nothing reads `GSUB`/`GPOS`. OPEN, by
+  design for now.** `holonomy_eye::Face` reads `head`, `hhea`, `hmtx`, `maxp` and `cmap` (M3), so
+  advances, ascent and descent are the font's own numbers — but a cluster's width is the *sum of
+  its characters' advances*. That is exactly right for one-glyph-per-character text, which is what
+  this release is typed in, and it is a measurement rather than a promise for everything else:
+  kerning pairs, `fi`-style ligatures, mark positioning and Arabic joining are not applied, and a
+  renderer that *did* apply them would draw glyphs the Eye measured differently — the two-geometry
+  disease with a nicer name. The rule until a real shaper lands: **whatever draws must not
+  substitute glyphs**, and `Face`'s widths are the only geometry. Closing this means putting
+  HarfBuzz (or an equivalent) behind the `Shaper` trait, which changes no geometry code because the
+  trait is the boundary; it is also what Block 5 gate 3 (BiDi) and any non-Latin script need.
 - **2026-11-20 — D-39 — a frame wrote a clipped leaf's carry back as the leaf's own, so the
   second frame at a scroll position started 16 bytes early. FIXED.** Found by the frame-stability
   hunt (`crates/holonomy-shell/tests/frame_stability.rs`). On a four-thousand-leaf document at
