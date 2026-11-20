@@ -100,7 +100,13 @@ Listed so they stay dead.
   echo measurement on reference hardware (Block 6 owns that). **A control:** a whole-document walk
   is timed by the same clock and must cost the keystroke's price a hundred times over, so a fake
   clock or an idle fixture fails loudly. The numbers are printed as `HOLONOMY_KEYSTROKE_LATENCY`
-  and `HOLONOMY_KEYSTROKE_CONTROL`, and every one of them is also an assertion.
+  and `HOLONOMY_KEYSTROKE_CONTROL`, and every one of them is also an assertion — so the run that
+  claims the gate is the run that enforced the numbers. Claimed on CI run `44665191051` (`32c58c9`), test job
+  green: the interleaving ran, both bands held, the echo ceiling held at both ends, and the
+  whole-document walk cost the keystroke's price more than a hundred times over. The first attempt
+  failed, and its failure was the harness's own: `summarise` and `measure` must agree that p50 is
+  the **upper** median, which is now pinned by a unit test at the entry point that takes the
+  caller's samples.
 - **2026-11-19 — D-36 — "memory at open" is two claims, and only one of them is fixed.** Block 4's
   first gate reads *"Open a synthetic 30 M-word document: memory at open is within a fixed bound
   that identical input of 1 page also satisfies."* Measured, the sentence splits in half.
