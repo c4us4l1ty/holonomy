@@ -53,6 +53,7 @@ mod cluster;
 mod geom;
 mod heights;
 mod layout;
+mod picture;
 mod shaper;
 mod style;
 mod view;
@@ -65,6 +66,7 @@ pub use crate::layout::{
     layout_styled, layout_styled_continuing, layout_styled_from, layout_window, Caret, Layout,
     Line, Placed,
 };
+pub use crate::picture::{Picture, PictureCluster, PictureLine, SelectionSpan};
 pub use crate::shaper::Shaper;
 pub use crate::style::{Style, StyledRun, StyledText};
 pub use crate::view::View;
