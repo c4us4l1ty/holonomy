@@ -80,6 +80,28 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-19 — D-38 — Block 5 gate 1 is claimed, and proving it corrected two beliefs about
+  layout — one of them in the code's own documentation.** The gate reads *"for arbitrary documents,
+  `hit_test(paint_to_point(g)) == g` for every shaped glyph"*. `crates/holonomy-eye/tests/
+  one_geometry.rs` proves it over **generated** documents (four seeds, three each, drawn from an
+  alphabet of proportional extremes, combining marks, emoji sequences, CJK, Devanagari-shaped
+  clusters and all three hard-break spellings) at three wrap widths and the 8 zoom × 5 DPI sweep,
+  asserting: every painted caret comes back from its own point with the same line, top, height and
+  x — and the same *byte* wherever that line's boundaries are distinct at device resolution; clicks
+  on a boundary land on it, clicks between two boundaries choose one of those two; and the printed
+  counts (`HOLONOMY_ONE_GEOMETRY`) are part of the claim, so a run that checked nothing could not be
+  green. A **monospace control** measures the v3 bug directly: on `mimimimi`, a cell-per-cluster
+  model puts at least half the carets somewhere paint did not, which is what makes the property
+  test discriminating rather than decorative. Claimed on CI run `44672133052` (`2caa52a`), test job green.
+  Two beliefs the harness had to correct, both about layout and both now pinned by tests: an
+  **empty document is one empty line with exactly one caret** (byte zero, which both consumers
+  answer identically — the first version of the test asserted no caret at all), and **a line's
+  boundaries include its end whenever it offers one**, which the document's last line always does
+  even with no hard break after it. The second was not merely a wrong test: `Line::has_end`'s
+  documentation said a line offers an end caret "when the line ends in a hard break", while the
+  layout gives the final line one unconditionally — so a caller reading the comment would have
+  concluded the last glyph had no caret to its right. The comment is amended to say what the code
+  has always done, and this gate's harness is the evidence for it.
 - **2026-11-19 — D-37 — what "statistically identical latency curves" means, since no shared
   machine can certify that two nanosecond figures are equal.** Block 4's second gate reads:
   *"Keystroke at offset 0 and at offset `N-1`: statistically identical latency curves."* Taken

@@ -299,12 +299,13 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
   seconds rather than counts for gate 2 — without those, L-8 stays `spec` rather than `enforced`.
 
 **GATES**
-- [ ] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
+- [x] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
       shaped glyph — the v3 regression made impossible, proven. **Measured 2026-11-19 by
       `crates/holonomy-eye/tests/one_geometry.rs`**: generated documents, every painted caret,
       clicks on and between boundaries, 8 zooms × 5 DPIs, with printed counts
-      (`HOLONOMY_ONE_GEOMETRY`) and a monospace control; the checkbox waits for the run that
-      enforces those counts.
+      (`HOLONOMY_ONE_GEOMETRY`) and a monospace control. **Claimed 2026-11-19 on the measuring
+      run**: CI run `44672133052` (`2caa52a`), test job green, which enforced every caret and click count, at
+      all 8 zooms and 5 DPIs, over 12 generated documents at 3 wrap widths (AUDIT D-38).
 - [ ] Layout cost on a 30 M-word doc is invariant in document length (viewport-shape cost only).
 - [ ] Bi-directional and multi-script text handle cluster boundaries correctly (no caret
       grapheme-splitting).
