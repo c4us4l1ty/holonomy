@@ -130,7 +130,7 @@ fn raster(picture: &Picture) -> Vec<Vec<Option<usize>>> {
     assert!(width > 0, "a picture with no width");
     let mut grid = vec![vec![None; width as usize]; picture.lines.len()];
     let mut claimed = 0usize;
-    for index in 0..picture.lines.len() {
+    for (index, row) in grid.iter_mut().enumerate() {
         for cluster in picture.clusters_on(index) {
             let from = cells(cluster.x, "a cluster's left edge");
             let to = cells(cluster.end(), "a cluster's right edge");
@@ -140,7 +140,7 @@ fn raster(picture: &Picture) -> Vec<Vec<Option<usize>>> {
                 "cluster {} at {from}..{to} is outside the {width}-cell width",
                 cluster.byte
             );
-            for cell in &mut grid[index][from as usize..to as usize] {
+            for cell in &mut row[from as usize..to as usize] {
                 assert!(
                     cell.is_none(),
                     "line {index}: two clusters claim the same cell"
