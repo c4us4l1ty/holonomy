@@ -16,7 +16,7 @@
 //! that applied no intents would be a green run that proved nothing.
 
 use holonomy_eye::{Fixed, Point, Shaper, Style, View};
-use holonomy_shell::{Editor, Effect, Intent};
+use holonomy_shell::{Editor, Effect, Intent, Move};
 use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
 
 /// One logical unit per cluster, two for `m` and `中` — as in the other shell tests.
@@ -192,7 +192,7 @@ impl Rng {
 /// The intent a seed step asks for, and the direct call that means the same thing.
 fn step(seed: u64, shell_len: u64) -> Intent {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    match rng.below(14) {
+    match rng.below(15) {
         0..=2 => {
             let text = if rng.below(3) == 0 { "m中\n" } else { "ab" };
             Intent::Type(text.to_owned())
@@ -210,7 +210,16 @@ fn step(seed: u64, shell_len: u64) -> Intent {
             Intent::Resize { width, viewport }
         }
         11 => Intent::SetView(View::new(500 + rng.below(1_500) as i64, 96).expect("a view")),
-        12 => Intent::Undo,
+        12 => Intent::Move {
+            to: match rng.below(4) {
+                0 => Move::Left,
+                1 => Move::Right,
+                2 => Move::Up,
+                _ => Move::Down,
+            },
+            extend: rng.below(2) == 0,
+        },
+        13 => Intent::Undo,
         _ => {
             // Redo, reveal and flush share the tail; flush only when there is something to write.
             if rng.below(2) == 0 && shell_len > 0 {
@@ -250,6 +259,9 @@ fn directly(shell: &mut Shell, intent: &Intent) {
         Intent::SetView(view) => shell.set_view(*view),
         Intent::RevealCaret => {
             shell.reveal_caret().expect("revealed");
+        }
+        Intent::Move { to, extend } => {
+            shell.move_caret_to(*to, *extend).expect("moved");
         }
         Intent::Undo => {
             shell.undo().expect("undone");

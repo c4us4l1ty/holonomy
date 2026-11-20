@@ -127,17 +127,46 @@ exactly right for one-glyph-per-character text and a measurement — not a promi
 gap is recorded as **OQ-24** in `AUDIT.md`, and Block 5 gate 2's timing half can now be measured
 with these metrics.
 
-### M4 — The window (Block 6, first half)
+### M4 — The window (Block 6, first half) — **half done**
 
-`holonomy-gui` on GPUI: window, event loop, keymap, scroll, resize, caret blink, clipboard, the IME
-input path. It draws M1's picture and speaks M2's intents. No unlock screen yet and no autosave —
-this step is "a window you can type in", opened on an in-memory document.
+**M4a, done: everything a window needs that is not pixels.** `crates/holonomy-gui`:
 
-**Acceptance:** CI builds it with the platform libraries (`wayland`, `xkbcommon`, `vulkan`, `fontconfig`)
-in a dedicated job — a green build is the gate that the pixel layer is real. Headless: a
-`WindowlessApp` drives key events through the same mapping the window uses and asserts the frames
-match `Editor`'s. Manual, on your machine: open, type a paragraph, undo, redo, scroll to the end and
-back, resize the window, copy and paste.
+- **`Keymap`** — `Key` + `Modifiers` to `Intent`, the one place a keystroke becomes an edit:
+  characters type, Enter breaks, arrows move (`Shift` extends, `Ctrl+Home/End` reach the document's
+  ends), `Ctrl+Z/Y` undo and redo, `Ctrl+A` selects all, `Ctrl+S` writes through, PageUp/PageDown
+  scroll a screen. A key the map does not use is silence, not an error.
+- **Caret navigation in the loop** — `Intent::Move { to, extend }` and `Editor::move_caret_to`:
+  left and right step one *cluster*, up and down keep the column, Home/End are the line's ends. The
+  geometry moves go through the same `hit_test` a click does, so a keyboard caret lands only on
+  boundaries a renderer drew.
+- **Typing bursts are one undo step** — the app lays a mark when a run of typing begins, so `Ctrl+Z`
+  takes back the run. This closed **D-40**: before it, `Ctrl+Z` after typing reported nothing to
+  undo.
+- **`App`** — editor, keymap, surface, and a dirty flag, so a repaint happens exactly when
+  something changed.
+- **`Surface`** — the pixel sink, in the advances the Eye measured (a backend never decides a
+  cluster's width), and **`CellSurface`**, a text-grid sink so the whole stack can be run and read
+  back with no GPU at all.
+
+Acceptance (headless, `crates/holonomy-gui/tests/keys.rs`): typing reaches the frame and the
+surface; arrows move a caret and keep the column; shift selects and the next key replaces; shortcuts
+are the loop's own; an unchanged window does not repaint. Counts asserted and printed as
+`HOLONOMY_WINDOW*`.
+
+**M4b, blocked in this environment: the pixels.** `ROADMAP.md` names GPUI, and GPUI is what the
+real window will be drawn with. It cannot be compiled where this was written: the workspace lockfile
+is committed and CI builds `--locked`, so a new dependency needs registry access to resolve and
+checksum ~200 transitive crates, and this environment has none — `Cargo.lock` cannot be regenerated
+here at all. The crate is therefore backend-free by construction: a GPUI adapter is one
+implementation of `Surface` plus an event loop that turns platform keys into `Key` and platform
+resize into `App::resize`. That is a small file, and it is the first task for a machine that can
+fetch crates. Recorded rather than faked.
+
+**Also open: D-41** — a frame does not show bytes typed into an open leaf until they are written
+through, so a shipped window would show nothing while you type. Reproducer
+`typing_is_visible_before_the_bytes_are_written_through` is in the keymap tests, `#[ignore]`d with
+the number. That is the next fix, before the pixels: a window whose text lags its document would
+make every visual test a lie.
 
 ### M5 — Open, save, unlock, survive
 

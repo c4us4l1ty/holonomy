@@ -50,7 +50,7 @@
 
 mod intent;
 
-pub use crate::intent::{Effect, Intent};
+pub use crate::intent::{Effect, Intent, Move};
 
 use holonomy_eye::{
     byte_window, layout_styled, layout_styled_continuing, window_text, Caret, ClusterContext,
@@ -467,6 +467,17 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Ok(Some(caret))
     }
 
+    /// Closes the current undo step, so the next edit is a step of its own.
+    ///
+    /// Undo in this system is a stack of **marks**, not of keystrokes: `Typing` records a step when
+    /// a caller marks, and returns to the last mark when it undoes. A window therefore marks at the
+    /// start of a typing burst — consecutive keystrokes become one undo — and a headless caller
+    /// that wants every edit to be its own step marks before each one. Nothing in the loop marks
+    /// on its own; see AUDIT D-40 for what that cost when the keymap first used it.
+    pub fn mark(&mut self) {
+        self.typing.mark();
+    }
+
     /// Undoes the last action, reporting whether there was one.
     ///
     /// # Errors
@@ -521,6 +532,86 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             self.scroll_to(bottom - self.viewport);
         }
         Ok(self.scroll != before)
+    }
+
+    /// Moves the caret, extending the selection when `extend` is set.
+    ///
+    /// Left and right step one **cluster** through the document — the same clusters backspace and
+    /// delete cut — so a mark or a joiner is one move, not two. Up, down, line start and line end
+    /// ask the frame's own geometry where the target is: the point is built from the caret's own
+    /// line box and handed to the same hit test a click goes through, which is what keeps a
+    /// keyboard caret on boundaries the renderer actually drew.
+    ///
+    /// Reports whether the caret moved; a left at the document's start moves nothing.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the frame or the document refuses to read.
+    pub fn move_caret_to(&mut self, to: Move, extend: bool) -> Result<bool, ShellError> {
+        let caret = self.typing.caret();
+        let target = match to {
+            Move::Left => self.cluster_before(caret)?.unwrap_or(0),
+            Move::Right => self
+                .cluster_after(caret)?
+                .unwrap_or_else(|| self.typing.document_len()),
+            Move::DocumentStart => 0,
+            Move::DocumentEnd => self.typing.document_len(),
+            Move::Up | Move::Down | Move::LineStart | Move::LineEnd => {
+                let Some(point) = self.geometry_point(to)? else {
+                    return Ok(false);
+                };
+                let Some(caret) = self.hit_test(point)? else {
+                    return Ok(false);
+                };
+                caret.byte
+            }
+        };
+        let before = self.typing.caret();
+        self.place_caret(target, extend)?;
+        Ok(self.typing.caret() != before)
+    }
+
+    /// The device point a geometry move asks about, with the caret brought on screen first.
+    fn geometry_point(&mut self, to: Move) -> Result<Option<Point>, ShellError> {
+        let view = self.view;
+        for attempt in 0..2 {
+            let point = {
+                let frame = self.frame()?;
+                frame.caret().map(|caret| {
+                    let y = caret.top + Fixed::ONE;
+                    let point = match to {
+                        Move::Up => Point::new(caret.x, caret.top - Fixed::ONE),
+                        Move::Down => Point::new(caret.x, caret.top + caret.height + Fixed::ONE),
+                        Move::LineStart => Point::new(Fixed::ZERO, y),
+                        _ => {
+                            let past = frame.layout().width() + frame.layout().width();
+                            Point::new(caret.x + past, y)
+                        }
+                    };
+                    Point::new(view.to_device(point.x), view.to_device(point.y))
+                })
+            };
+            if point.is_some() {
+                return Ok(point);
+            }
+            if attempt == 0 {
+                self.reveal_caret()?;
+            }
+        }
+        Ok(None)
+    }
+
+    /// Puts the caret at `at`, keeping or moving the selection's anchor.
+    fn place_caret(&mut self, at: u64, extend: bool) -> Result<(), ShellError> {
+        let anchor = self.selection.anchor();
+        let at = at.min(self.typing.document_len());
+        self.move_caret(at)?;
+        self.selection = if extend {
+            Selection::new(anchor, at).clamped(self.typing.document_len())
+        } else {
+            Selection::caret(at)
+        };
+        Ok(())
     }
 
     /// The caret's line box in **document** coordinates, whether or not it is on screen.

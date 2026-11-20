@@ -1,0 +1,501 @@
+//! The window's half of Block 6 (`docs/TO-APP.md` M4): keys in, intents out, a picture on a surface.
+//!
+//! This crate is deliberately **backend-free**. It owns the three things a window does that the
+//! editor loop does not:
+//!
+//! - **a keymap** — [`Key`] and [`Modifiers`] to [`Intent`], the one place a keystroke becomes an
+//!   edit (`Ctrl/Cmd-Z` is undo, `Shift-Left` extends, `PageDown` scrolls a screen);
+//! - **an app loop** — [`App`] holds the [`Editor`], applies intents, and knows when a repaint is
+//!   due;
+//! - **a surface** — [`Surface`], the pixel sink, and [`CellSurface`], an implementation that
+//!   draws the picture into a grid of characters so the whole stack can be run and looked at with
+//!   no GPU at all.
+//!
+//! # Why there is no GPUI here yet
+//!
+//! `ROADMAP.md` names GPUI as the UI framework of record, and it is what the real window will be
+//! built on. It cannot be compiled in the environment this crate was written in: the workspace
+//! lockfile is committed and CI builds `--locked`, so adding a dependency needs registry access to
+//! resolve and checksum roughly two hundred transitive crates, and this environment has none. The
+//! honest shape is therefore what is here: the logic a window needs, provable headlessly, with the
+//! GPU backend as one file behind [`Surface`] when a machine that can fetch crates writes it.
+//!
+//! Nothing in this crate assumes a grid, a font or a window: [`Surface`] hands a backend clusters at
+//! the advances the Eye measured, so a GPU backend draws exactly the picture the tests assert.
+
+use holonomy_eye::{Fixed, Picture, Style};
+use holonomy_shell::{Editor, Effect, Intent, Move};
+use holonomy_text::{SegmentSink, SegmentSource};
+
+/// The keyboard modifiers that change what a keystroke means.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    /// Shift: extend the selection instead of collapsing it.
+    pub shift: bool,
+    /// Control, or Command on a platform that maps it here: the shortcut modifier.
+    pub control: bool,
+    /// Alt/Option: reserved for word-wise motion, which the loop does not have yet.
+    pub alt: bool,
+}
+
+impl Modifiers {
+    /// No modifiers held.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            shift: false,
+            control: false,
+            alt: false,
+        }
+    }
+
+    /// Shift alone.
+    #[must_use]
+    pub const fn shift() -> Self {
+        Self {
+            shift: true,
+            control: false,
+            alt: false,
+        }
+    }
+
+    /// Control (or Command) alone.
+    #[must_use]
+    pub const fn control() -> Self {
+        Self {
+            shift: false,
+            control: true,
+            alt: false,
+        }
+    }
+
+    /// Control and shift.
+    #[must_use]
+    pub const fn control_shift() -> Self {
+        Self {
+            shift: true,
+            control: true,
+            alt: false,
+        }
+    }
+}
+
+/// A key, as a window reports it once the platform's own layout has been applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    /// A character the layout produced.
+    Character(char),
+    /// Return or Enter: a hard break.
+    Enter,
+    /// Backspace.
+    Backspace,
+    /// Delete (forward).
+    Delete,
+    /// The left arrow.
+    Left,
+    /// The right arrow.
+    Right,
+    /// The up arrow.
+    Up,
+    /// The down arrow.
+    Down,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page up.
+    PageUp,
+    /// Page down.
+    PageDown,
+    /// Escape: dismisses, never edits.
+    Escape,
+}
+
+/// What a keystroke means, in the editor's vocabulary.
+///
+/// A key with no meaning here is not an error — it is silence, which is what a window does with a
+/// key it does not use.
+#[derive(Debug, Clone)]
+pub struct Keymap {
+    /// One screenful, for Page Up and Page Down.
+    page: Fixed,
+}
+
+impl Keymap {
+    /// A keymap that pages by `page` logical units.
+    #[must_use]
+    pub fn new(page: Fixed) -> Self {
+        Self { page }
+    }
+
+    /// The intent `key` means under `modifiers`, if any.
+    #[must_use]
+    pub fn intent(&self, key: Key, modifiers: Modifiers) -> Option<Intent> {
+        let extend = modifiers.shift;
+        match key {
+            Key::Character(character) if modifiers.control => {
+                let shortcut = character.to_ascii_lowercase();
+                match shortcut {
+                    'z' if extend => Some(Intent::Redo),
+                    'z' => Some(Intent::Undo),
+                    'y' => Some(Intent::Redo),
+                    'a' => Some(Intent::SelectAll),
+                    's' => Some(Intent::Flush),
+                    _ => None,
+                }
+            }
+            Key::Character(character) if !modifiers.alt => {
+                Some(Intent::Type(character.to_string()))
+            }
+            Key::Enter => Some(Intent::Type("\n".to_owned())),
+            Key::Backspace => Some(Intent::Backspace),
+            Key::Delete => Some(Intent::DeleteForward),
+            Key::Left => Some(Intent::Move {
+                to: Move::Left,
+                extend,
+            }),
+            Key::Right => Some(Intent::Move {
+                to: Move::Right,
+                extend,
+            }),
+            Key::Up => Some(Intent::Move {
+                to: Move::Up,
+                extend,
+            }),
+            Key::Down => Some(Intent::Move {
+                to: Move::Down,
+                extend,
+            }),
+            Key::Home if modifiers.control => Some(Intent::Move {
+                to: Move::DocumentStart,
+                extend,
+            }),
+            Key::End if modifiers.control => Some(Intent::Move {
+                to: Move::DocumentEnd,
+                extend,
+            }),
+            Key::Home => Some(Intent::Move {
+                to: Move::LineStart,
+                extend,
+            }),
+            Key::End => Some(Intent::Move {
+                to: Move::LineEnd,
+                extend,
+            }),
+            Key::PageUp => Some(Intent::ScrollBy(Fixed::ZERO - self.page)),
+            Key::PageDown => Some(Intent::ScrollBy(self.page)),
+            Key::Character(_) | Key::Escape => None,
+        }
+    }
+}
+
+/// The pixel sink: what a backend has to implement to be a window.
+///
+/// Everything is in logical units at the advances the Eye measured, so a backend never decides how
+/// wide a cluster is — it is told. That is the whole reason paint and hit-test cannot disagree.
+pub trait Surface {
+    /// A new frame begins: forget the last one.
+    fn begin(&mut self);
+    /// The viewport's size, in logical units.
+    fn size(&mut self, width: Fixed, height: Fixed);
+    /// One cluster, its left edge and top, and the advance it was measured with.
+    fn cluster(&mut self, x: Fixed, y: Fixed, text: &str, advance: Fixed, style: Style);
+    /// A selection run: a rectangle in logical units.
+    fn selection(&mut self, x: Fixed, y: Fixed, width: Fixed, height: Fixed);
+    /// The caret, when the frame has one on screen.
+    fn caret(&mut self, x: Fixed, y: Fixed, height: Fixed);
+}
+
+/// A surface that draws into a grid of characters: the crudest window there is, and the only one
+/// that needs no GPU.
+///
+/// It exists so the whole stack — keys, intents, frames, pictures — can be *run* and read back as
+/// text. [`Self::render`] returns a screenful, which is what a headless demo prints and what the
+/// tests assert against.
+#[derive(Debug, Clone)]
+pub struct CellSurface {
+    /// Cells per logical unit: 8 makes `i` and `m` visibly different widths.
+    scale: i64,
+    columns: usize,
+    rows: usize,
+    cells: Vec<Vec<char>>,
+    caret: Option<(usize, usize)>,
+    selections: Vec<(usize, usize, usize, usize)>,
+    clusters: u64,
+}
+
+impl CellSurface {
+    /// A surface `columns × rows` cells, at `scale` cells per logical unit.
+    #[must_use]
+    pub fn new(columns: usize, rows: usize, scale: i64) -> Self {
+        Self {
+            scale: scale.max(1),
+            columns,
+            rows,
+            cells: vec![vec![' '; columns]; rows],
+            caret: None,
+            selections: Vec::new(),
+            clusters: 0,
+        }
+    }
+
+    /// The cell a logical coordinate falls in.
+    fn cell(&self, value: Fixed) -> usize {
+        let sixtyfourths = value.sixtyfourths();
+        let cells = sixtyfourths * self.scale / 64;
+        usize::try_from(cells).unwrap_or(0)
+    }
+
+    /// The screen as text, one line per row, trailing blanks kept so columns line up.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for row in &self.cells {
+            let line: String = row.iter().collect();
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Where the caret was drawn, in cells, if it was.
+    #[must_use]
+    pub fn caret_cell(&self) -> Option<(usize, usize)> {
+        self.caret
+    }
+
+    /// How many clusters were drawn into this frame.
+    #[must_use]
+    pub fn clusters(&self) -> u64 {
+        self.clusters
+    }
+
+    /// The character in a cell, or a space when the cell is empty.
+    #[must_use]
+    pub fn at(&self, column: usize, row: usize) -> char {
+        self.cells
+            .get(row)
+            .and_then(|line| line.get(column))
+            .copied()
+            .unwrap_or(' ')
+    }
+
+    /// Whether a cell is inside a selection run.
+    #[must_use]
+    pub fn selected(&self, column: usize, row: usize) -> bool {
+        self.selections.iter().any(|(x, y, width, height)| {
+            column >= *x && column < x + width && row >= *y && row < y + height
+        })
+    }
+}
+
+impl Surface for CellSurface {
+    fn begin(&mut self) {
+        for line in &mut self.cells {
+            line.fill(' ');
+        }
+        self.caret = None;
+        self.selections.clear();
+        self.clusters = 0;
+    }
+
+    fn size(&mut self, _width: Fixed, _height: Fixed) {}
+
+    fn cluster(&mut self, x: Fixed, y: Fixed, text: &str, _advance: Fixed, _style: Style) {
+        let column = self.cell(x);
+        let row = self.cell(y);
+        if column >= self.columns || row >= self.rows {
+            return;
+        }
+        // One cell per cluster's first character: this surface shows *where* text is, not how it
+        // is hinted, and a mark with no cell of its own still occupies its base's cell.
+        if let Some(character) = text.chars().next() {
+            self.cells[row][column] = character;
+            self.clusters += 1;
+        }
+    }
+
+    fn selection(&mut self, x: Fixed, y: Fixed, width: Fixed, height: Fixed) {
+        let column = self.cell(x);
+        let row = self.cell(y);
+        let columns = self.cell(width).max(1);
+        let rows = self.cell(height).max(1);
+        self.selections.push((column, row, columns, rows));
+    }
+
+    fn caret(&mut self, x: Fixed, y: Fixed, _height: Fixed) {
+        self.caret = Some((self.cell(x), self.cell(y)));
+    }
+}
+
+/// Why a frame could not be drawn.
+#[derive(Debug)]
+pub enum GuiError {
+    /// The editor refused the frame: a leaf the resident set could not read.
+    Shell(holonomy_shell::ShellError),
+}
+
+impl core::fmt::Display for GuiError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Shell(error) => write!(formatter, "the editor refused a frame: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for GuiError {}
+
+impl From<holonomy_shell::ShellError> for GuiError {
+    fn from(error: holonomy_shell::ShellError) -> Self {
+        Self::Shell(error)
+    }
+}
+
+/// The application: an editor, a keymap, a surface, and whether a repaint is owed.
+pub struct App<S: SegmentSink, R: SegmentSource, H: holonomy_eye::Shaper, T: Surface> {
+    editor: Editor<S, R, H>,
+    keymap: Keymap,
+    surface: T,
+    dirty: bool,
+    /// Whether the last intent typed, so a run of keystrokes is one undo step.
+    typing: bool,
+}
+
+impl<S, R, H, T> App<S, R, H, T>
+where
+    S: SegmentSink,
+    R: SegmentSource,
+    H: holonomy_eye::Shaper,
+    T: Surface,
+{
+    /// A window over `editor`, drawing into `surface`.
+    #[must_use]
+    pub fn new(editor: Editor<S, R, H>, keymap: Keymap, surface: T) -> Self {
+        Self {
+            editor,
+            keymap,
+            surface,
+            dirty: true,
+            typing: false,
+        }
+    }
+
+    /// The editor, for a caller that needs a number the window does not show.
+    pub fn editor(&mut self) -> &mut Editor<S, R, H> {
+        &mut self.editor
+    }
+
+    /// The surface, for a caller that wants to read back what was drawn.
+    #[must_use]
+    pub fn surface(&self) -> &T {
+        &self.surface
+    }
+
+    /// Whether a repaint is owed.
+    #[must_use]
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// A key press. Returns the effects the window still owes the user.
+    ///
+    /// # Errors
+    ///
+    /// [`GuiError`] when the editor refuses the edit.
+    pub fn press(&mut self, key: Key, modifiers: Modifiers) -> Result<Vec<Effect>, GuiError> {
+        let Some(intent) = self.keymap.intent(key, modifiers) else {
+            return Ok(Vec::new());
+        };
+        // One undo step per typing **burst**, the way every editor coalesces keystrokes: the mark
+        // is laid when a run of typing begins, so Ctrl+Z takes back the run rather than one letter.
+        let typing = matches!(intent, Intent::Type(_));
+        if typing && !self.typing {
+            self.editor.mark();
+        }
+        self.typing = typing;
+        let effects = self.editor.apply(intent)?;
+        if !effects.is_empty() {
+            self.dirty = true;
+        }
+        Ok(effects)
+    }
+
+    /// The window changed size.
+    ///
+    /// # Errors
+    ///
+    /// [`GuiError`] when the editor refuses the resize.
+    pub fn resize(&mut self, width: Fixed, height: Fixed) -> Result<Vec<Effect>, GuiError> {
+        let effects = self.editor.apply(Intent::Resize {
+            width,
+            viewport: height,
+        })?;
+        if !effects.is_empty() {
+            self.dirty = true;
+        }
+        Ok(effects)
+    }
+
+    /// The text of the current frame — what is on screen, not what is in the document.
+    ///
+    /// # Errors
+    ///
+    /// [`GuiError`] when the editor refuses a frame.
+    pub fn frame_text(&mut self) -> Result<String, GuiError> {
+        let frame = self.editor.frame()?;
+        Ok(frame.text().to_owned())
+    }
+
+    /// The caret's document offset.
+    pub fn caret(&mut self) -> u64 {
+        self.editor.caret()
+    }
+
+    /// How many bytes the document holds — what is *in* the document, which a frame may not yet
+    /// show (AUDIT D-41).
+    pub fn document_len(&mut self) -> u64 {
+        self.editor.document_len()
+    }
+
+    /// The selection, as ordered ends, when it is not empty.
+    pub fn selection(&mut self) -> Option<(u64, u64)> {
+        let selection = self.editor.selection();
+        (selection.anchor() != selection.focus()).then(|| (selection.anchor(), selection.focus()))
+    }
+
+    /// Paints the current frame into the surface, and only paints when a repaint is owed.
+    ///
+    /// # Errors
+    ///
+    /// [`GuiError`] when the editor refuses a frame.
+    pub fn draw(&mut self) -> Result<bool, GuiError> {
+        if !self.dirty {
+            return Ok(false);
+        }
+        let (picture, origin, text) = {
+            let frame = self.editor.frame()?;
+            let picture: Picture = frame.picture();
+            (picture, frame.origin(), frame.text().to_owned())
+        };
+        self.surface.begin();
+        self.surface.size(picture.width, picture.height);
+        for (index, line) in picture.lines.iter().enumerate() {
+            if let Some(span) = picture.selection_on(index) {
+                self.surface
+                    .selection(span.x, line.top, span.end - span.x, line.height);
+            }
+            for cluster in picture.clusters_on(index) {
+                let from = usize::try_from(cluster.byte.saturating_sub(origin)).unwrap_or(0);
+                let to = from + cluster.len;
+                let text = text.get(from..to).unwrap_or_default();
+                self.surface
+                    .cluster(cluster.x, line.top, text, cluster.advance, cluster.style);
+            }
+        }
+        if let Some(caret) = picture.caret {
+            self.surface.caret(caret.x, caret.top, caret.height);
+        }
+        self.dirty = false;
+        Ok(true)
+    }
+}

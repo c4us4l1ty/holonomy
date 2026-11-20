@@ -14,6 +14,27 @@ use crate::{Editor, ShellError};
 use holonomy_eye::{Fixed, Point, Shaper, View};
 use holonomy_text::{SegmentSink, SegmentSource};
 
+/// Where a caret move asks the caret to go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    /// One cluster to the previous boundary.
+    Left,
+    /// One cluster to the next boundary.
+    Right,
+    /// To the line above, keeping the column.
+    Up,
+    /// To the line below, keeping the column.
+    Down,
+    /// To the start of the caret's line.
+    LineStart,
+    /// To the end of the caret's line.
+    LineEnd,
+    /// To the document's first byte.
+    DocumentStart,
+    /// To the document's last byte.
+    DocumentEnd,
+}
+
 /// One thing a user asked for, in the window's vocabulary.
 ///
 /// Every variant names an operation the editor loop already has; none of them carries an editing
@@ -47,6 +68,13 @@ pub enum Intent {
     },
     /// Zoom and DPI — a view transform, never a second geometry.
     SetView(View),
+    /// Move the caret, extending the selection when `extend` (shift).
+    Move {
+        /// Where the caret is asked to go.
+        to: Move,
+        /// Whether the selection's anchor stays where it was.
+        extend: bool,
+    },
     /// Scroll the smallest amount that puts the caret on screen; `false` when it already is.
     RevealCaret,
     /// Undo the last step.
@@ -153,6 +181,12 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
                 self.set_view(view);
                 if changed {
                     effects.push(Effect::Redraw);
+                }
+            }
+            Intent::Move { to, extend } => {
+                if self.move_caret_to(to, extend)? {
+                    effects.push(Effect::Redraw);
+                    effects.push(Effect::Caret(self.caret()));
                 }
             }
             Intent::RevealCaret => {

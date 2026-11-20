@@ -80,6 +80,35 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-20 — D-41 — a frame does not show bytes typed since the open leaf was measured.
+  OPEN.** Found by M4's window tests: five keystrokes leave a document of five bytes and a frame of
+  two — `document_len` is 5 and `frame_text` is `"he"` — and the frame only catches up once the
+  open leaf is written through (`Ctrl+S`/`flush`). The frame's window ends where the **measured**
+  geometry says the leaf ends (`byte_window` over `HeightModel`), and no keystroke re-measures the
+  leaf it is typed into: `sync_measured` only reacts to a change in leaf *count*, and typing into
+  an open leaf does not change the count. A window that draws frames therefore shows nothing of
+  what is being typed until something else happens to flush. This is the first defect that would be
+  visible in a shipped window within ten seconds of use, and it blocks M4: a window whose text lags
+  its document is not a window. The reproducer is
+  `typing_is_visible_before_the_bytes_are_written_through` in `crates/holonomy-gui/tests/keys.rs`,
+  `#[ignore]`d with this number and printing both counts when it runs
+  (`cargo test -p holonomy-gui --test keys -- --ignored`). Its siblings — the surface drawing what
+  the picture says, arrows, shift-selection, shortcuts — pass against the same window once the
+  bytes are written through.
+- **2026-11-20 — D-40 — typing was not undoable: nothing marked a burst, so undo had no step to
+  return to. FIXED.** Found by M4's keymap test, which typed `abc`, pressed `Ctrl+Z`, and expected
+  an empty document. Undo in this system is a stack of **marks**, not keystrokes: `Typing::undo`
+  returns to the last `Step::Mark`, and nothing in the shell or the loop ever called `Typing::mark`
+  — so a window could type a paragraph and `Ctrl+Z` would report "nothing to undo" while the
+  paragraph stood there. Every headless test that exercised undo did it after a **cut**, and a cut
+  marks on its own, which is why the gap survived three blocks of tests. The fix has two halves: the
+  loop now exposes `Editor::mark`, and the window's half (`holonomy_gui::App`) marks at the start of
+  a typing **burst**, so consecutive keystrokes coalesce into one undo step and `Ctrl+Z` takes back
+  the run — the behaviour every editor has, now stated in one place. The regression is
+  `shortcuts_are_the_loops_own` in `crates/holonomy-gui/tests/keys.rs`: type `abc`, undo, empty,
+  redo, `abc`. Nothing could be lost by this defect — the bytes were always the document's — but a
+  user could not take back a paragraph, which for a writing application is a defect in the first
+  sentence of the manual.
 - **2026-11-20 — OQ-24 — shaping is metrics only, and nothing reads `GSUB`/`GPOS`. OPEN, by
   design for now.** `holonomy_eye::Face` reads `head`, `hhea`, `hmtx`, `maxp` and `cmap` (M3), so
   advances, ascent and descent are the font's own numbers — but a cluster's width is the *sum of
