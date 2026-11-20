@@ -120,7 +120,7 @@ fn scaling_and_sums_are_the_fonts_own_arithmetic() {
     for pair in ["ab", "ma", "W.", "i'm"] {
         let mut total = Fixed::ZERO;
         for character in pair.chars() {
-            total = total + face.advance(&character.to_string(), small);
+            total += face.advance(&character.to_string(), small);
         }
         let cluster = face.advance(pair, small);
         assert!(
