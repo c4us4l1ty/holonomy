@@ -50,6 +50,7 @@
 //! cost to the viewport. Those are Block 5's remaining gates, not this crate's footnotes.
 
 mod cluster;
+mod face;
 mod geom;
 mod heights;
 mod layout;
@@ -60,6 +61,7 @@ mod view;
 mod window;
 
 pub use crate::cluster::{ClusterContext, Clusters};
+pub use crate::face::{Face, FaceError};
 pub use crate::geom::{Fixed, Point};
 pub use crate::heights::{HeightModel, Window};
 pub use crate::layout::{
