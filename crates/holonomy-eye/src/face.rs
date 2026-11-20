@@ -112,9 +112,7 @@ impl Face {
             let advance = u16::at(hmtx, index * 4).ok_or(FaceError::BadTable("hmtx"))?;
             advances.push(advance);
         }
-        let cmap = tables
-            .get(bytes, b"cmap")
-            .and_then(|cmap| read_cmap(cmap))?;
+        let cmap = tables.get(bytes, b"cmap").and_then(read_cmap)?;
         Ok(Self {
             units_per_em,
             ascender,

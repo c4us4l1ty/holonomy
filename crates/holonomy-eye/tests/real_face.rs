@@ -84,7 +84,7 @@ fn the_font_is_read_rather_than_assumed() {
     let w = face.advance_units('W');
     assert!(i < m && i < w, "i={i} m={m} W={w} is not proportional");
     assert!(
-        face.advance('i', size(1)) < face.advance('m', size(1)),
+        face.advance("i", size(1)) < face.advance("m", size(1)),
         "the advances did not survive scaling"
     );
 
