@@ -72,15 +72,27 @@ run — four pictures, more than a hundred clusters, ten or more carets, both pa
 clusters present — so a green run is a run that drew something and found it consistent. All four
 tests are green on `main`.
 
-### M2 — Intents as data
+### M2 — Intents as data — **done**
 
-The window will need one entry point, not twenty methods: `Intent` (type text, move caret, select,
-scroll, resize, zoom, undo, redo, save, quit) and `Effect` (read clipboard, write clipboard, seal,
-notice). `Editor::apply(Intent) -> Vec<Effect>`.
+`Intent` and `Effect`, and `Editor::apply` as the one door a window speaks through:
+`Intent::{Type, Backspace, DeleteForward, DeleteSelection, SelectAll, Click, DragTo, ScrollTo,
+ScrollBy, Resize, SetView, RevealCaret, Undo, Redo, Flush, Reflow}`, answering with
+`Effect::{Redraw, Caret, Saved}`. The door has no opinions: each intent calls the method a headless
+caller would, so the window cannot invent an editing rule the core does not have.
 
-**Acceptance (headless):** the mapping is *behaviour-preserving* — for a randomised intent stream,
-`apply` and the equivalent direct method calls produce byte-identical frames, snapshot by snapshot
-— and no intent panics, loses the caret, or leaves the caret outside the text it offers.
+**Acceptance (headless, `crates/holonomy-shell/tests/intents.rs`), by assertion:** two identical
+editors are driven for 240 randomised steps — one through `apply`, one through the direct calls —
+and after **every** step their whole visible state is compared: text, origin, height, line count,
+caret, selection, document length, measured total, scroll, width, viewport and view. Alongside: the
+caret never leaves the document, a frame's caret always agrees with the editor's, and no intent
+sequence can panic. A second test pins the effects to the truth — a scroll that does not move, a
+resize to the same size and a backspace at the top of the document ask for **no** repaint; typing
+asks for a repaint and reports the caret; a flush says the bytes landed.
+
+The run prints `HOLONOMY_INTENTS intents= redraws= carets= saves= bytes=` under
+`cargo test -p holonomy-shell --test intents -- --nocapture`, and the counts are asserted: 240
+steps, more than a hundred redraws, more than ten caret reports, at least one write, and a document
+that is still non-empty at the end. Green on `main`.
 
 ### M3 — A real shaper (Block 8, the half Block 5 waits on)
 
@@ -147,5 +159,5 @@ deliberately renderer-agnostic: they survive that fallback untouched.
 
 ## Where we are
 
-M0 done. M1 done. M2 next: one entry point for a window — `Intent` and `Effect` — proved
-behaviour-preserving against the direct method calls before any window exists to call them.
+M0, M1 and M2 done. M3 next: `holonomy-shape` — a real font, real metrics, real clusters — which is
+also the shaper Block 5 gate 2's timing half has been waiting for.
