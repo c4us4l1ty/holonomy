@@ -139,6 +139,40 @@ impl<'a> Line<'a> {
             .map(|cluster| (cluster.x, cluster.byte));
         starts.chain(self.has_end.then_some((self.end_x, self.end_byte)))
     }
+
+    /// The x where the cluster holding `byte` begins, or the line's own start when `byte` is before
+    /// its first cluster.
+    ///
+    /// A selection paints whole clusters, so the answer for a byte inside a cluster is that
+    /// cluster's left edge, and the answer for a byte at or past the line's content is where the
+    /// line's content ends.
+    #[must_use]
+    pub fn x_at(&self, byte: u64) -> Fixed {
+        let mut x = self.clusters.first().map_or(Fixed::ZERO, |cluster| cluster.x);
+        for cluster in &self.clusters {
+            if cluster.byte > byte {
+                break;
+            }
+            x = cluster.x;
+        }
+        if byte >= self.end_byte {
+            self.end_x
+        } else {
+            x
+        }
+    }
+
+    /// The x just past the cluster holding `byte` — a cluster is painted whole — or the line's end
+    /// when `byte` is at or past its last cluster.
+    #[must_use]
+    pub fn x_after(&self, byte: u64) -> Fixed {
+        for cluster in &self.clusters {
+            if byte < cluster.byte_end() {
+                return cluster.end();
+            }
+        }
+        self.end_x
+    }
 }
 
 /// A window of text, laid out.

@@ -50,8 +50,8 @@
 
 use holonomy_eye::{
     byte_window, layout_styled, layout_styled_continuing, window_text, Caret, ClusterContext,
-    Clusters, Fixed, HeightModel, Layout, Point, ShapedWindow, Shaper, StyledText, View, Window,
-    WindowText, WindowTextError,
+    Clusters, Fixed, HeightModel, Layout, Picture, Point, ShapedWindow, Shaper, StyledText, View,
+    Window, WindowText, WindowTextError,
 };
 use holonomy_text::{
     LiveSpan, ResidentSet, SegmentSink, SegmentSource, Selection, Typing, TypingError,
@@ -102,6 +102,7 @@ pub struct Frame<'a> {
     shaped: usize,
     provisional: bool,
     caret: Option<Caret>,
+    selection: Option<(u64, u64)>,
 }
 
 impl<'a> Frame<'a> {
@@ -153,6 +154,29 @@ impl<'a> Frame<'a> {
     #[must_use]
     pub fn caret(&self) -> Option<Caret> {
         self.caret
+    }
+
+    /// The selection this frame was drawn for, as ordered byte ends, when it is not empty.
+    ///
+    /// A frame carries the selection as well as the caret because a renderer paints both from one
+    /// picture; it never re-derives a selection from the editor between a frame and its paint.
+    #[must_use]
+    pub fn selection(&self) -> Option<(u64, u64)> {
+        self.selection
+    }
+
+    /// This frame as a picture: an owned, drawable view model (ROADMAP Block 5, `docs/TO-APP.md`
+    /// M1).
+    ///
+    /// Nothing is recomputed here — the clusters' x and advances are the layout's, the caret is
+    /// [`Layout::paint_point`]'s, and the selection's runs come from the same walk that places
+    /// carets. A renderer drops the frame, keeps the picture, and draws it later.
+    #[must_use]
+    pub fn picture(&self) -> Picture {
+        self.layout.picture(
+            self.caret.map(|caret| caret.byte),
+            self.selection,
+        )
     }
 }
 
@@ -733,7 +757,15 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             .locate(self.typing.spine(), start)
             .is_some_and(|hit| hit.within() == 0);
         let first = leaves.first();
-        let measured = measure_window(&layout, text, &spans, start, end, document_end, head_whole);
+        let measured = measure_window(
+            &layout,
+            text,
+            &spans,
+            start,
+            end,
+            document_end,
+            head_whole,
+        );
         for (index, height, carry) in measured {
             self.measured.set(first + index, height, carry);
         }
@@ -745,6 +777,8 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             .map(|line| line.clusters().len())
             .sum();
         let caret = layout.paint_point(self.typing.caret());
+        let (anchor, focus) = self.selection.normalised();
+        let selection = (anchor != focus).then_some((anchor, focus));
         Ok(Frame {
             text,
             origin: start,
@@ -754,6 +788,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             shaped,
             provisional,
             caret,
+            selection,
         })
     }
 
