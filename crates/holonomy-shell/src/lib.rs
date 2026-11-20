@@ -48,6 +48,10 @@
 //! produced — which is the check OQ-15 said was missing, and which `tests/editing.rs` now performs
 //! over every caret a frame offers.
 
+mod intent;
+
+pub use crate::intent::{Effect, Intent};
+
 use holonomy_eye::{
     byte_window, layout_styled, layout_styled_continuing, window_text, Caret, ClusterContext,
     Clusters, Fixed, HeightModel, Layout, Picture, Point, ShapedWindow, Shaper, StyledText, View,
