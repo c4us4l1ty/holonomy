@@ -285,10 +285,12 @@ fn a_monospace_hit_test_would_disagree_with_paint() {
         "HOLONOMY_ONE_GEOMETRY_CONTROL boundaries={boundaries} \
          monospace_disagreements={disagreements}"
     );
+    // One boundary before each cluster, plus the line's own end: a document's last line offers a
+    // caret after its final glyph whether or not a hard break follows it.
     assert_eq!(
         boundaries,
-        text.chars().count(),
-        "one boundary per cluster on a line with no hard break"
+        text.chars().count() + 1,
+        "one boundary per cluster plus the line's end"
     );
     assert!(
         disagreements >= boundaries / 2,
@@ -306,14 +308,22 @@ fn a_monospace_hit_test_would_disagree_with_paint() {
 }
 
 #[test]
-fn an_empty_document_has_nothing_to_hit() {
+fn an_empty_document_offers_exactly_one_caret_and_it_round_trips() {
+    // Written as a positive property after the first version asserted None and was wrong: an empty
+    // document is one empty line with exactly one caret position, byte zero, and both consumers
+    // must answer it identically. A caret paint cannot draw and hit-test cannot reach would be the
+    // two-geometry bug in miniature.
     for width in widths() {
         let laid = layout_window("", 0, Fixed::units(width), &Fake);
         let view = View::IDENTITY;
-        assert_eq!(view.paint_point(&laid, 0), None);
-        assert_eq!(
-            view.hit_test(&laid, Point::new(Fixed::ZERO, Fixed::ZERO)),
-            None
-        );
+        let painted = view.paint_point(&laid, 0).expect("an empty line's caret");
+        assert_eq!(painted.byte, 0);
+        assert_eq!(painted.x, Fixed::ZERO);
+        let back = view
+            .hit_test(&laid, painted.point())
+            .expect("its own point hits");
+        assert_eq!(back, painted, "the empty document's caret round trip");
+        // And nothing else paints: byte 1 is past the end of an empty document.
+        assert_eq!(view.paint_point(&laid, 1), None);
     }
 }
