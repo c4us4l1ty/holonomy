@@ -210,9 +210,13 @@ were faked with newline padding) and any structure that walks the document on a 
   view exactly. What is still missing is the editor itself: caret, selection and paint are Block
   5's Eye, and the policy that decides *when* to commit is not made in this crate.
 
-**GATES** — gates 1–2 open; gate 3 **passed 2026-11-19**, by a runner that earned it
-*(the keystroke *deliverable* is measured; these gates are document-scale, latency and fuzz
-measurements on reference hardware and share nothing with it)*
+**GATES** — **all three passed, and the block is closed (2026-11-19).** Gate 1 was earned by
+amending its clause to the two claims it actually makes (AUDIT D-36, run `44579774910`); gate 2 by
+giving "statistically identical latency curves" an operational definition it can be falsified
+against (AUDIT D-37, run `44665191051`); gate 3 by the million-keystroke fuzz, which was earned by
+failing first and found D-31, D-32, OQ-21/22/23 and D-34. Each was claimed on the run that
+measured it, and none of the three certificates says more than its harness proves. The workspace
+moves to `6.0.0-block.4`, one bump per closed block.
 - [x] **Amended 2026-11-19 (AUDIT D-36) — the clause is two claims, and the measurement split
       them.** Open a synthetic 30 M-word document: **resident plaintext** at open is within a fixed
       bound that identical input of 1 page also satisfies (the memory L-2 bounds — it holds), and
