@@ -130,29 +130,48 @@ fn snapshot(shell: &mut Editor<Recorder, Repeated, Fake>) -> Snapshot {
     }
 }
 
+/// Every leaf's measured height, in leaf order.
+fn heights(shell: &Editor<Recorder, Repeated, Fake>) -> Vec<Fixed> {
+    let model = shell.heights();
+    (0..model.len()).map(|leaf| model.height(leaf)).collect()
+}
+
+/// The first leaf whose measurement differs between two snapshots, with both numbers.
+fn first_difference(before: &[Fixed], after: &[Fixed]) -> Option<(usize, i64, i64)> {
+    before
+        .iter()
+        .zip(after)
+        .position(|(one, other)| one != other)
+        .map(|leaf| (leaf, before[leaf].sixtyfourths(), after[leaf].sixtyfourths()))
+}
+
 #[test]
 fn framing_a_screen_does_not_move_the_geometry_it_measured() {
     // The sharpest form of the question, and the one that failed first: a frame writes the heights
     // of the leaves it measured back into the index. After a full `reflow` every leaf is already
-    // measured, so a frame has nothing to add — if the total moves anyway, the two measurement
-    // paths disagree about the same leaves, and the scroll geometry depends on where the user has
-    // scrolled rather than on the document.
+    // measured and the *total* is preserved — so if anything moves, it is the distribution, and the
+    // distribution is exactly what `leaf_at` reads to answer "which leaf is under this scroll
+    // position". A document whose per-leaf heights depend on where the user has scrolled would put
+    // a different line at the top of the screen for the same scroll offset.
     let mut shell = measured();
     for top in [0, 40, 400, 20_000] {
         shell.scroll_to(Fixed::units(top));
-        let before = shell.heights().total();
+        let before = heights(&shell);
+        let total = shell.heights().total();
         let first = snapshot(&mut shell);
-        let after = shell.heights().total();
-        assert_eq!(
-            after.sixtyfourths(),
-            before.sixtyfourths(),
-            "at scroll {top}: one frame moved the measured total"
-        );
+        let after_one = heights(&shell);
+        if let Some((leaf, was, now)) = first_difference(&before, &after_one) {
+            panic!("at scroll {top}: the frame moved leaf {leaf} from {was} to {now}");
+        }
         let second = snapshot(&mut shell);
+        let after_two = heights(&shell);
+        if let Some((leaf, was, now)) = first_difference(&after_one, &after_two) {
+            panic!("at scroll {top}: the second frame moved leaf {leaf} from {was} to {now}");
+        }
         assert_eq!(
             shell.heights().total().sixtyfourths(),
-            before.sixtyfourths(),
-            "at scroll {top}: the second frame moved it again"
+            total.sixtyfourths(),
+            "at scroll {top}: framing twice moved the measured total"
         );
         assert_eq!(
             first, second,
