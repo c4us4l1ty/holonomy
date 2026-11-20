@@ -84,13 +84,7 @@ type Window = App<Store, Store, Fake, CellSurface>;
 fn window() -> Window {
     let store = Store::default();
     let residency = ResidentSet::new(store.clone(), 256, 0).expect("a workable budget");
-    let editor = Editor::new(
-        Typing::new(store, 64),
-        residency,
-        Fake,
-        WIDTH,
-        VIEWPORT,
-    );
+    let editor = Editor::new(Typing::new(store, 64), residency, Fake, WIDTH, VIEWPORT);
     App::new(
         editor,
         Keymap::new(VIEWPORT),
@@ -176,8 +170,7 @@ fn typing_is_visible_before_the_bytes_are_written_through() {
     let document = window.document_len();
     let shown = window.frame_text().expect("a frame");
     assert_eq!(
-        shown,
-        "hello",
+        shown, "hello",
         "the document holds {document} bytes and the frame shows {shown:?}"
     );
 }
