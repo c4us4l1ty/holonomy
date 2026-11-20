@@ -237,7 +237,7 @@ fn the_caret_lands_on_a_cluster_it_owns() {
         let picture = frame.picture();
         let mut places = Vec::new();
         for index in 0..picture.lines.len().min(2) {
-            let line = picture.lines[index];
+            let line = &picture.lines[index];
             for cluster in picture.clusters_on(index) {
                 places.push((index, cluster.x, line.top + Fixed::ONE));
             }
@@ -259,7 +259,7 @@ fn the_caret_lands_on_a_cluster_it_owns() {
             shown.byte, caret.byte,
             "the picture's caret is not the one the click made"
         );
-        let line = picture.lines[shown.line];
+        let line = &picture.lines[shown.line];
         if let Some(cluster) = cluster_at(&picture, shown.line, shown.byte) {
             assert_eq!(
                 shown.x, cluster.x,

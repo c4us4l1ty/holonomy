@@ -64,7 +64,10 @@ impl PictureCluster {
 }
 
 /// One line's box and the range of [`Picture::clusters`] it owns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Clone but not `Copy`: the range into [`Picture::clusters`] is not a copyable value, and a
+/// renderer that keeps a line keeps its cluster range with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PictureLine {
     /// Top of the line box, in logical units from the window's top.
     pub top: Fixed,
