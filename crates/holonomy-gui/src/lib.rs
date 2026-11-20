@@ -451,6 +451,12 @@ where
         self.editor.caret()
     }
 
+    /// How many bytes the document holds — what is *in* the document, which a frame may not yet
+    /// show (AUDIT D-41).
+    pub fn document_len(&mut self) -> u64 {
+        self.editor.document_len()
+    }
+
     /// The selection, as ordered ends, when it is not empty.
     pub fn selection(&mut self) -> Option<(u64, u64)> {
         let selection = self.editor.selection();

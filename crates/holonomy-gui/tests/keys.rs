@@ -41,16 +41,19 @@ impl Shaper for Fake {
     }
 }
 
-/// A sink that mints distinct segment ids and stores nothing.
-#[derive(Debug, Default)]
-struct Recorder {
-    next: u64,
-}
+/// A world-line in memory: the sink appends segments, the source reads them back.
+///
+/// The first version of this harness stored nothing and served nothing, which is fine for a
+/// document that is never read back — and wrong here: moving the caret seals the open leaf, so the
+/// next frame reads it from the source. A window test needs a source that actually holds the bytes.
+#[derive(Debug, Clone, Default)]
+struct Store(std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
 
-impl SegmentSink for Recorder {
+impl SegmentSink for Store {
     fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
-        let id = self.next;
-        self.next += 1;
+        let mut segments = self.0.lock().expect("a lock");
+        let id = segments.len() as u64;
+        segments.push(plaintext.to_vec());
         Ok(Appended {
             segment: SegmentId::new(id),
             witness_sequence: id + 1,
@@ -60,13 +63,13 @@ impl SegmentSink for Recorder {
     }
 }
 
-/// A world-line with one leaf, so a small document fits in it.
-#[derive(Debug)]
-struct One;
-
-impl SegmentSource for One {
+impl SegmentSource for Store {
     fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
-        Err(format!("no {segment}"))
+        let segments = self.0.lock().expect("a lock");
+        segments
+            .get(usize::try_from(segment.get()).unwrap_or(usize::MAX))
+            .cloned()
+            .ok_or_else(|| format!("no {segment}"))
     }
 }
 
@@ -76,12 +79,13 @@ const CCLS: usize = 240;
 const ROWS: usize = 8;
 const SCALE: i64 = 4;
 
-type Window = App<Recorder, One, Fake, CellSurface>;
+type Window = App<Store, Store, Fake, CellSurface>;
 
 fn window() -> Window {
-    let residency = ResidentSet::new(One, 256, 0).expect("a workable budget");
+    let store = Store::default();
+    let residency = ResidentSet::new(store.clone(), 256, 0).expect("a workable budget");
     let editor = Editor::new(
-        Typing::new(Recorder::default(), 64),
+        Typing::new(store, 64),
         residency,
         Fake,
         WIDTH,
@@ -92,6 +96,14 @@ fn window() -> Window {
         Keymap::new(VIEWPORT),
         CellSurface::new(CCLS, ROWS, SCALE),
     )
+}
+
+/// Writes the open bytes through, which is also what makes them visible in a frame today
+/// (AUDIT D-41).
+fn flush(window: &mut Window) {
+    window
+        .press(Key::Character('s'), Modifiers::control())
+        .expect("saved");
 }
 
 fn type_keys(window: &mut Window, text: &str) -> u64 {
@@ -109,9 +121,11 @@ fn type_keys(window: &mut Window, text: &str) -> u64 {
 }
 
 #[test]
-fn typing_reaches_the_frame_and_the_surface() {
+fn typing_reaches_the_surface_after_the_bytes_are_written_through() {
     let mut window = window();
     let keys = type_keys(&mut window, "hello");
+    assert_eq!(window.document_len(), 5, "the document lost bytes");
+    flush(&mut window);
     assert_eq!(window.frame_text().expect("a frame"), "hello");
     assert_eq!(window.caret(), 5, "the caret is not after the text");
 
@@ -147,10 +161,32 @@ fn typing_reaches_the_frame_and_the_surface() {
     println!("HOLONOMY_WINDOW keys={keys} clusters={clusters} caret_column={caret_column}");
 }
 
+/// **AUDIT D-41, open.** Typing reaches the document at once, and a frame does not show it until
+/// the open leaf is written through. On this window, five keystrokes leave a document of five bytes
+/// and a frame of two: the frame's window ends where the *measured* leaf ended, and no keystroke
+/// re-measures the leaf it is typed into. A user would type and see nothing — the first thing a
+/// window must never do — which is why this is a blocker for M4 rather than a footnote on it.
+///
+/// The numbers are in the failure message: run `cargo test -p holonomy-gui --test keys -- --ignored`.
+#[test]
+#[ignore = "AUDIT D-41: a frame does not show bytes typed since the open leaf was measured"]
+fn typing_is_visible_before_the_bytes_are_written_through() {
+    let mut window = window();
+    type_keys(&mut window, "hello");
+    let document = window.document_len();
+    let shown = window.frame_text().expect("a frame");
+    assert_eq!(
+        shown,
+        "hello",
+        "the document holds {document} bytes and the frame shows {shown:?}"
+    );
+}
+
 #[test]
 fn arrows_move_a_caret_and_keep_the_column() {
     let mut window = window();
     type_keys(&mut window, "ab\ncd\nef");
+    flush(&mut window);
     assert_eq!(window.caret(), 8);
 
     // Left steps one cluster; Ctrl+Home goes to the document's start.
@@ -187,6 +223,7 @@ fn arrows_move_a_caret_and_keep_the_column() {
 fn shift_selects_and_the_next_key_replaces() {
     let mut window = window();
     type_keys(&mut window, "hello");
+    flush(&mut window);
     // Shift+Left twice: bytes 3..5 selected, anchored at 5.
     window.press(Key::Left, Modifiers::shift()).expect("moved");
     window.press(Key::Left, Modifiers::shift()).expect("moved");
@@ -206,6 +243,7 @@ fn shift_selects_and_the_next_key_replaces() {
 
     // Typing replaces the selection: "hel" + "p".
     type_keys(&mut window, "p");
+    flush(&mut window);
     assert_eq!(window.frame_text().expect("a frame"), "help");
     assert_eq!(window.selection(), None, "typing left a selection behind");
     println!(
@@ -218,26 +256,22 @@ fn shift_selects_and_the_next_key_replaces() {
 fn shortcuts_are_the_loops_own() {
     let mut window = window();
     type_keys(&mut window, "abc");
-    assert_eq!(window.frame_text().expect("a frame"), "abc");
+    assert_eq!(window.document_len(), 3, "typing lost bytes");
 
     let effects = window
         .press(Key::Character('z'), Modifiers::control())
         .expect("undid");
     assert!(!effects.is_empty(), "undo said nothing changed");
-    assert_eq!(
-        window.frame_text().expect("a frame"),
-        "",
-        "undo did not undo"
-    );
+    assert_eq!(window.document_len(), 0, "undo did not undo the burst");
+    flush(&mut window);
+    assert_eq!(window.frame_text().expect("a frame"), "");
 
     window
         .press(Key::Character('z'), Modifiers::control_shift())
         .expect("redid");
-    assert_eq!(
-        window.frame_text().expect("a frame"),
-        "abc",
-        "redo did not redo"
-    );
+    assert_eq!(window.document_len(), 3, "redo did not redo the burst");
+    flush(&mut window);
+    assert_eq!(window.frame_text().expect("a frame"), "abc");
 
     let effects = window
         .press(Key::Character('s'), Modifiers::control())
