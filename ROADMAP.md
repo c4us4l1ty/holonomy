@@ -284,7 +284,10 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
   property data is generated from UCD 18.0.0 rather than typed out (D-27), one run tree both
   consumers walk, zoom/DPI as a single exact view transform with no inverse to round against, and
   style runs as layout data. L-8's property test exists and passes over a corpus of scripts at 8
-  zooms × 5 DPIs, on a fake shaper.
+  zooms × 5 DPIs, on a fake shaper — and as of 2026-11-19 over **generated** documents too:
+  `tests/one_geometry.rs` draws 12 documents from the four seeds, at three wrap widths and the
+  same 8 × 5 view sweep, and checks every painted caret and every click it can make, with a
+  monospace control that measures how far the v3 geometry would sit from paint.
 - A Fenwick height model over leaf heights exists, and its cost is *counted* rather than asserted
   (a viewport over 2^18 leaves costs < 160 index reads; 16× the leaves costs < 2× the reads).
 - The Spine wiring exists: `byte_window` turns a leaf range into a byte range, `window_text` reads it
@@ -297,7 +300,11 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
 
 **GATES**
 - [ ] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
-      shaped glyph — the v3 regression made impossible, proven.
+      shaped glyph — the v3 regression made impossible, proven. **Measured 2026-11-19 by
+      `crates/holonomy-eye/tests/one_geometry.rs`**: generated documents, every painted caret,
+      clicks on and between boundaries, 8 zooms × 5 DPIs, with printed counts
+      (`HOLONOMY_ONE_GEOMETRY`) and a monospace control; the checkbox waits for the run that
+      enforces those counts.
 - [ ] Layout cost on a 30 M-word doc is invariant in document length (viewport-shape cost only).
 - [ ] Bi-directional and multi-script text handle cluster boundaries correctly (no caret
       grapheme-splitting).
