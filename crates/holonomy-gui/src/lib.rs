@@ -24,7 +24,7 @@
 //! the advances the Eye measured, so a GPU backend draws exactly the picture the tests assert.
 
 use holonomy_eye::{Fixed, Picture, Style};
-use holonomy_shell::{Effect, Editor, Intent, Move};
+use holonomy_shell::{Editor, Effect, Intent, Move};
 use holonomy_text::{SegmentSink, SegmentSource};
 
 /// The keyboard modifiers that change what a keystroke means.
@@ -250,8 +250,8 @@ impl CellSurface {
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::new();
-        for row in 0..self.rows {
-            let line: String = self.cells[row].iter().collect();
+        for row in &self.cells {
+            let line: String = row.iter().collect();
             out.push_str(&line);
             out.push('\n');
         }
@@ -283,11 +283,9 @@ impl CellSurface {
     /// Whether a cell is inside a selection run.
     #[must_use]
     pub fn selected(&self, column: usize, row: usize) -> bool {
-        self.selections
-            .iter()
-            .any(|(x, y, width, height)| {
-                column >= *x && column < x + width && row >= *y && row < y + height
-            })
+        self.selections.iter().any(|(x, y, width, height)| {
+            column >= *x && column < x + width && row >= *y && row < y + height
+        })
     }
 }
 

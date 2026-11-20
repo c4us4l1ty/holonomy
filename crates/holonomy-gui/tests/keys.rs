@@ -119,29 +119,32 @@ fn typing_reaches_the_frame_and_the_surface() {
     assert!(window.draw().expect("drew"), "nothing was drawn");
     assert!(!window.dirty(), "a draw left the window dirty");
 
-    let surface = window.surface();
-    assert_eq!(surface.clusters(), 5, "the surface drew the wrong clusters");
-    for (column, character) in "hello".chars().enumerate() {
+    let (clusters, caret_column) = {
+        let surface = window.surface();
+        assert_eq!(surface.clusters(), 5, "the surface drew the wrong clusters");
+        for (column, character) in "hello".chars().enumerate() {
+            assert_eq!(
+                surface.at(column * SCALE as usize, 0),
+                character,
+                "column {column} is not {character:?}"
+            );
+        }
+        let (caret_column, caret_row) = surface.caret_cell().expect("a caret was drawn");
+        assert_eq!(caret_row, 0, "the caret is not on the first row");
         assert_eq!(
-            surface.at(column * SCALE as usize, 0),
-            character,
-            "column {column} is not {character:?}"
+            caret_column,
+            5 * SCALE as usize,
+            "the caret is not after the last cluster"
         );
-    }
-    let (caret_column, caret_row) = surface.caret_cell().expect("a caret was drawn");
-    assert_eq!(caret_row, 0);
-    assert_eq!(
-        caret_column,
-        5 * SCALE as usize,
-        "the caret is not after the last cluster"
-    );
+        (surface.clusters(), caret_column)
+    };
 
     // Nothing changed, so nothing is painted twice.
-    assert!(!window.draw().expect("drew"), "an unchanged window repainted");
-    println!(
-        "HOLONOMY_WINDOW keys={keys} clusters={} caret_column={caret_column}",
-        surface.clusters()
+    assert!(
+        !window.draw().expect("drew"),
+        "an unchanged window repainted"
     );
+    println!("HOLONOMY_WINDOW keys={keys} clusters={clusters} caret_column={caret_column}");
 }
 
 #[test]
@@ -185,12 +188,8 @@ fn shift_selects_and_the_next_key_replaces() {
     let mut window = window();
     type_keys(&mut window, "hello");
     // Shift+Left twice: bytes 3..5 selected, anchored at 5.
-    window
-        .press(Key::Left, Modifiers::shift())
-        .expect("moved");
-    window
-        .press(Key::Left, Modifiers::shift())
-        .expect("moved");
+    window.press(Key::Left, Modifiers::shift()).expect("moved");
+    window.press(Key::Left, Modifiers::shift()).expect("moved");
     assert_eq!(window.selection(), Some((5, 3)), "the selection is wrong");
     assert_eq!(window.caret(), 3);
 
@@ -225,12 +224,20 @@ fn shortcuts_are_the_loops_own() {
         .press(Key::Character('z'), Modifiers::control())
         .expect("undid");
     assert!(!effects.is_empty(), "undo said nothing changed");
-    assert_eq!(window.frame_text().expect("a frame"), "", "undo did not undo");
+    assert_eq!(
+        window.frame_text().expect("a frame"),
+        "",
+        "undo did not undo"
+    );
 
     window
         .press(Key::Character('z'), Modifiers::control_shift())
         .expect("redid");
-    assert_eq!(window.frame_text().expect("a frame"), "abc", "redo did not redo");
+    assert_eq!(
+        window.frame_text().expect("a frame"),
+        "abc",
+        "redo did not redo"
+    );
 
     let effects = window
         .press(Key::Character('s'), Modifiers::control())
@@ -242,7 +249,9 @@ fn shortcuts_are_the_loops_own() {
     );
 
     // A key the map does not use is silence, not an edit.
-    let effects = window.press(Key::Escape, Modifiers::none()).expect("pressed");
+    let effects = window
+        .press(Key::Escape, Modifiers::none())
+        .expect("pressed");
     assert!(effects.is_empty(), "escape edited the document");
     println!("HOLONOMY_WINDOW_KEYS applied=13");
 }
