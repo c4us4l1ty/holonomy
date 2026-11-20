@@ -36,8 +36,26 @@ use holonomy_eye::{layout_window, Fixed, Layout, Point, Shaper, Style, View};
 /// marks that share a position, emoji sequences and scripts that segment differently, and all three
 /// hard-break spellings.
 const PIECES: [&str; 20] = [
-    "a", "b", "m", "i", "l", "o", "m", " ", "  ", "xyz", "é", "e\u{301}", "中", "山田", "ß", "…",
-    "👩\u{200d}👩\u{200d}👧", "🇳🇵", "\n", "\r\n",
+    "a",
+    "b",
+    "m",
+    "i",
+    "l",
+    "o",
+    "m",
+    " ",
+    "  ",
+    "xyz",
+    "é",
+    "e\u{301}",
+    "中",
+    "山田",
+    "ß",
+    "…",
+    "👩\u{200d}👩\u{200d}👧",
+    "🇳🇵",
+    "\n",
+    "\r\n",
 ];
 
 /// A deterministic generator: xorshift64*, so a seed reproduces a document exactly.
@@ -130,10 +148,7 @@ fn one_geometry(view: &View, laid: &Layout<'_>, shown: &str) -> (u64, u64) {
         let back = view
             .hit_test(laid, painted.point())
             .unwrap_or_else(|| panic!("{shown}: paint's own point must hit-test, byte {byte}"));
-        assert_eq!(
-            back.line, painted.line,
-            "{shown}: byte {byte} changed line"
-        );
+        assert_eq!(back.line, painted.line, "{shown}: byte {byte} changed line");
         assert_eq!(back.top, painted.top, "{shown}: byte {byte} changed top");
         assert_eq!(
             back.height, painted.height,
@@ -146,10 +161,7 @@ fn one_geometry(view: &View, laid: &Layout<'_>, shown: &str) -> (u64, u64) {
             .map(|(x, at)| (view.to_device(x), at))
             .collect();
         if distinct(&boundaries) {
-            assert_eq!(
-                back.byte, painted.byte,
-                "{shown}: byte {byte} came back as"
-            );
+            assert_eq!(back.byte, painted.byte, "{shown}: byte {byte} came back as");
         }
         carets += 1;
     }
@@ -204,7 +216,8 @@ fn every_glyph_hit_tests_back_to_itself_at_every_zoom_and_dpi() {
     for seed in 0..4u64 {
         let mut rng = Rng::new(seed);
         for _ in 0..3 {
-            let mut text = document(&mut rng, 1 + rng.below(40) as usize);
+            let pieces = 1 + rng.below(40) as usize;
+            let mut text = document(&mut rng, pieces);
             // Non-vacuity: the document must contain both a wide and a narrow letter, so a shaper
             // that became monospace would be caught here rather than passing quietly. The tail is
             // appended when the draw missed one, so the guarantee is the generator's, not chance.
@@ -244,8 +257,7 @@ fn every_glyph_hit_tests_back_to_itself_at_every_zoom_and_dpi() {
 
     // The counts are part of the claim: a green run that checked nothing would still be green.
     assert_eq!(documents, 12, "twelve generated documents");
-    let expected_views =
-        12 * widths().len() as u64 * zooms().len() as u64 * dpis().len() as u64;
+    let expected_views = 12 * widths().len() as u64 * zooms().len() as u64 * dpis().len() as u64;
     assert_eq!(views, expected_views, "every generated view was checked");
     assert!(carets > 1_000, "only {carets} carets checked");
     assert!(clicks > 1_000, "only {clicks} clicks checked");
@@ -258,7 +270,6 @@ fn a_monospace_hit_test_would_disagree_with_paint() {
     // somewhere else entirely, and the count below is how many places it would be wrong.
     let text = "mimimimi";
     let laid = layout_window(text, 0, Fixed::units(40), &Fake);
-    let view = View::IDENTITY;
     let cell = Fake.advance("m", Style::DEFAULT).sixtyfourths();
     let line = &laid.lines()[0];
     let mut disagreements = 0;
