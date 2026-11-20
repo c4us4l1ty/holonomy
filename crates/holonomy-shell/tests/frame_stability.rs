@@ -153,9 +153,9 @@ fn first_difference(before: &[Fixed], after: &[Fixed]) -> Option<(usize, i64, i6
 
 #[test]
 fn framing_a_screen_does_not_move_the_geometry_it_measured() {
-    // What the frame loop does hold: a frame writes heights and carries back into the index, and
-    // the *heights* it writes agree with what a leaf-by-leaf `reflow` measured. This test is the
-    // half of the property that passes; the other half is below, ignored, and is AUDIT D-39.
+    // A frame writes heights and carries back into the index. Whatever it writes, it must not move
+    // the geometry a leaf-by-leaf `reflow` measured: the index is what the next frame reads, so a
+    // write-back that disagrees with the measurement is a scroll position that means two things.
     let mut shell = measured();
     let total = shell.heights().total();
     for top in [0, 40, 400, 20_000] {
@@ -174,25 +174,20 @@ fn framing_a_screen_does_not_move_the_geometry_it_measured() {
     }
 }
 
-/// **AUDIT D-39, open.** Two frames at the same scroll position, with nothing edited between them,
-/// do not agree: on this document the second one starts 16 bytes earlier than the first.
+/// **AUDIT D-39, fixed.** Two frames at the same scroll position, with nothing edited in between,
+/// used to disagree: on this document the second one started 16 bytes earlier than the first.
 ///
-/// What is known. The measured geometry is stable — no leaf's height and no total moves between the
-/// frames (asserted above) — so the disagreement is not in the write-back of heights. It is in what
-/// the *second* frame computes from the same index: at `scroll = 40` units the first frame reports
-/// `origin = 400`, which is where the document's third line starts, and the second reports
-/// `origin = 384`, which is the first byte of the leaf that line starts in — as though the leaf had
-/// been handed an `x` of zero, so that its layout began with a soft wrap at its own first byte
-/// instead of continuing the line that began in the leaf before it (the carry `line_start` reads).
+/// The cause was in the write-back, not in the frame. `Draft::spans_in` clips the leaf a window
+/// begins inside, so the head span's offset is the window's own start rather than the leaf's — and
+/// `measure_window` wrote that span's carries back as though they described the leaf. They do not:
+/// they describe a layout beginning in the middle of it, with its first cluster at x = 0. The
+/// second frame then laid the leaf out from x = 0 and found a line start at the leaf's own first
+/// byte (384) instead of sixteen clusters into it (400). The heights were never wrong — the leaf
+/// holds the same one line either way — which is why this only ever showed as the top line moving.
 ///
-/// What is not known, and is why this is ignored rather than fixed: which of the two is the
-/// disagreement's origin — a carry the first frame writes back for a leaf it measured, a carry it
-/// writes for a leaf it did *not* (the window's first leaf is excluded from the write-back by
-/// design), or state `line_start` leaves behind. The numbers above are the whole trace so far.
-///
-/// Running it: `cargo test -p holonomy-shell --test frame_stability -- --ignored`.
+/// The fix: a head span is written back only when it begins on the leaf's own first byte. Its
+/// heights are still written, because the lines it holds start inside it wherever the window began.
 #[test]
-#[ignore = "AUDIT D-39: a second frame at the same scroll disagrees with the first; open"]
 fn a_second_frame_at_the_same_scroll_is_the_first_frame() {
     let mut shell = measured();
     for top in [0, 40, 400, 20_000] {
