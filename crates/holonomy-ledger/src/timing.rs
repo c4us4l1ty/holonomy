@@ -42,6 +42,26 @@ pub fn measure<T>(samples: usize, mut f: impl FnMut() -> T) -> Summary {
         std::hint::black_box(f());
         runs.push(start.elapsed());
     }
+    summarise(runs)
+}
+
+/// Summarise samples the caller timed itself.
+///
+/// This exists for the measurements that cannot be made in one loop: Block 4's second gate
+/// compares a keystroke at the start of a document with one at its end, and the honest way to
+/// compare two curves is to measure them **alternately**, in blocks, so that a machine drifting
+/// under load moves both of them together instead of being blamed on whichever ran second. The
+/// caller owns the timing loop; the ledger owns the distribution, so there is one definition of a
+/// percentile in the workspace rather than one per harness.
+///
+/// # Panics
+///
+/// Panics if `runs` is empty.
+pub fn summarise(mut runs: Vec<Duration>) -> Summary {
+    assert!(
+        !runs.is_empty(),
+        "a distribution over zero runs measures nothing"
+    );
     runs.sort_unstable();
     let total: Duration = runs.iter().sum();
     let count = runs.len();
@@ -77,6 +97,27 @@ mod tests {
         assert!(s.p50 <= s.p99);
         assert!(s.p99 <= s.max);
         assert!(s.mean <= s.max);
+    }
+
+    #[test]
+    fn summarising_collected_samples_agrees_with_measuring_them() {
+        let samples = vec![
+            Duration::from_nanos(30),
+            Duration::from_nanos(10),
+            Duration::from_nanos(20),
+            Duration::from_nanos(40),
+        ];
+        let summary = summarise(samples);
+        assert_eq!(summary.samples, 4);
+        assert_eq!(summary.p50, Duration::from_nanos(20));
+        assert_eq!(summary.max, Duration::from_nanos(40));
+        assert_eq!(summary.mean, Duration::from_nanos(25));
+    }
+
+    #[test]
+    fn zero_samples_are_refused() {
+        let result = std::panic::catch_unwind(|| summarise(Vec::new()));
+        assert!(result.is_err());
     }
 
     #[test]

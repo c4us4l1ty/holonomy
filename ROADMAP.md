@@ -223,7 +223,16 @@ measurements on reference hardware and share nothing with it)*
       2026-11-19 on the measuring run**: CI run `44579774910` (test job green) enforced every clause — the
       resident bound equal at one page and at thirty million words, eviction under four thousand
       faults, the per-leaf band, and the index under five percent.
-- [ ] Keystroke at offset 0 and at offset `N-1`: statistically identical latency curves.
+- [ ] **Amended 2026-11-19 (AUDIT D-37) — the clause now has an operational definition.** Keystroke
+      at offset 0 and at offset `N-1`: statistically identical latency curves, measured **interleaved**
+      (blocks of 256 at each offset, 4,096 samples each, so a drifting runner moves both curves),
+      one timed keystroke per sample on a 180 MB, 43,945-leaf document, both viewports warm. The band
+      is p50 within 2× and p99 within 4×, which rejects offset-proportional work; L-4's 8 ms is
+      asserted as a ceiling and not claimed as a reference-hardware echo measurement. A
+      whole-document walk is timed in the same process as the control (must exceed the keystroke's
+      price 100×). `crates/holonomy-text/tests/keystroke_latency.rs` prints
+      `HOLONOMY_KEYSTROKE_LATENCY` and `HOLONOMY_KEYSTROKE_CONTROL`; the checkbox waits for the run
+      that enforces those lines.
 - [x] 1 M random-keystroke fuzz run: zero leaks, zero residency blowups, undo past every
       point in the log. **`crates/holonomy-text/tests/keystroke_fuzz.rs`.** A seeded generator over
       a real `Typing` session, a real `ResidentSet` and one shared segment store, with an
