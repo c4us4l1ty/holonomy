@@ -123,9 +123,8 @@ fn a_keystroke_costs_the_same_at_the_start_and_at_the_end_of_thirty_million_word
     // The document, as geometry: one leaf per segment, a leaf of ordinary text each.
     let leaves = WORDS * BYTES_PER_WORD / u64::from(LEAF_BYTES);
     let bytes = leaves * u64::from(LEAF_BYTES);
-    let spine = Spine::from_slabs(
-        (0..leaves).map(|leaf| Slab::new(SegmentId::new(leaf), 0, LEAF_BYTES)),
-    );
+    let spine =
+        Spine::from_slabs((0..leaves).map(|leaf| Slab::new(SegmentId::new(leaf), 0, LEAF_BYTES)));
     assert_eq!(
         spine.slab_count() as u64,
         leaves,

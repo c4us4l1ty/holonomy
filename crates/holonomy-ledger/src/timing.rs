@@ -109,7 +109,11 @@ mod tests {
         ];
         let summary = summarise(samples);
         assert_eq!(summary.samples, 4);
-        assert_eq!(summary.p50, Duration::from_nanos(20));
+        // With an even number of samples p50 is the **upper** of the two middle ones, exactly as
+        // `measure` has always taken it: sorted, that is `runs[count / 2]`, not the mean of the
+        // middle pair. Pinned here because a difference between the two entry points would make
+        // one harness's percentile incomparable with another's.
+        assert_eq!(summary.p50, Duration::from_nanos(30));
         assert_eq!(summary.max, Duration::from_nanos(40));
         assert_eq!(summary.mean, Duration::from_nanos(25));
     }
