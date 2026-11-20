@@ -12,6 +12,10 @@ Reading order for prior art: `holonomy-old/` (H1, the working editor whose UI fa
 *what to redo*), `holonomy-v5-1-0/` (the trusted core that never shipped = *what to keep*).
 Each block below names which of those it salvages and which mistake it exists to prevent.
 
+For the order these blocks are *delivered* in — cut small enough that one CI cycle settles a step,
+with a headless acceptance for each — see `docs/TO-APP.md`. The blocks remain the contract; that
+document is the march.
+
 ---
 
 ## Block 1 — The Ground

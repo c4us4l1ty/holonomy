@@ -80,30 +80,29 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
-- **2026-11-20 — D-39 — two frames at the same scroll position disagree, and the second one starts
-  16 bytes early. OPEN, not fixed.** Found by the frame-stability hunt
-  (`crates/holonomy-shell/tests/frame_stability.rs`), which asks the confluence questions no gate
-  had asked yet. On a four-thousand-leaf document, at `scroll = 40` logical units — the top of the
-  document's third line — the first `frame()` reports `origin = 400`, which is where that line
-  starts, and an immediately following `frame()` with nothing edited in between reports
-  `origin = 384`, the first byte of the leaf the line starts 16 bytes into. The second frame's text
-  is consequently 16 bytes longer and its layout begins with a soft wrap at the leaf's own first
-  byte. **The heights are not the drift**: every leaf's measured height and the measured total are
-  asserted unchanged across both frames, so the write-back of heights agrees with `reflow` exactly.
-  What moves is what the frame does with the same index on the second pass — the leaf being laid
-  out with an `x` of zero, as though the carry that says "this leaf begins sixteen clusters into a
-  line that started earlier" (which `line_start` reads to find the line's own byte) had been lost or
-  overwritten. The candidates, none yet eliminated, are: a carry the first frame writes back for a
-  leaf **after** the one it began in; a carry it writes for a leaf it did *not* measure (the
-  window's first leaf is excluded from the write-back by design, and its `contexts`/`skips` are
-  computed anyway); or state `line_start` itself leaves behind. The test that reproduces it is
-  `a_second_frame_at_the_same_scroll_is_the_first_frame`, `#[ignore]`d with this number as its
-  name, so CI runs it on request (`-- --ignored`) rather than failing on an open defect. What is
-  *not* open: the parts of the property that do hold — heights stable across frames, a scroll
-  round trip returning the same frame, a width round trip returning the same frame after a reflow,
-  undo surviving a resize, and every caret a frame offers lying inside its own text — are asserted
-  in the same file and green. This is a defect on the **read** path, so nothing is at risk of being
-  lost; it is the screen's top line moving under the user for a scroll offset that did not change.
+- **2026-11-20 — D-39 — a frame wrote a clipped leaf's carry back as the leaf's own, so the
+  second frame at a scroll position started 16 bytes early. FIXED.** Found by the frame-stability
+  hunt (`crates/holonomy-shell/tests/frame_stability.rs`). On a four-thousand-leaf document at
+  `scroll = 40` units — the top of the third line — the first `frame()` reported `origin = 400`,
+  where that line starts, and an immediately following frame with nothing edited reported
+  `origin = 384`, the first byte of the leaf the line starts sixteen clusters into. The heights
+  were never involved: every leaf's measured height and the measured total were asserted unchanged
+  across both frames, which is what pointed at the *carries* rather than the heights. The
+  mechanism: `Spine::spans_in` returns spans **clipped** to the requested range, so the leaf a
+  window begins inside arrives as a head span whose offset is the window's own start, not the
+  leaf's; `measure_window` treated every span whose offset is at or after the window's start as
+  wholly measured and wrote its `Carry` back, and for that head the carry is the geometry of a
+  layout beginning in the *middle* of the leaf — first cluster at x = 0, no skip. The next frame
+  read that carry, laid the leaf out from x = 0, and found a line start at the leaf's own first
+  byte. The fix: `frame` decides whether the window's first byte is a leaf's first byte
+  (`Draft::locate` → `LiveHit::within`), and `measure_window` writes a head span's carries back only
+  when it is — heights are written either way, because the lines a clipped head holds start inside
+  it wherever the window began. A clipped span at the window's *end* was already excluded. The
+  regression is `a_second_frame_at_the_same_scroll_is_the_first_frame`, which asserts the whole
+  `Snapshot` — text, origin, height, lines, caret — is identical across two consecutive frames at
+  four scroll positions, and the companion test asserts no leaf's height or the total moves.
+  Nothing could be lost by this defect: it was the screen's top line moving under a scroll offset
+  that had not changed.
 - **2026-11-19 — D-38 — Block 5 gate 1 is claimed, and proving it corrected two beliefs about
   layout — one of them in the code's own documentation.** The gate reads *"for arbitrary documents,
   `hit_test(paint_to_point(g)) == g` for every shaped glyph"*. `crates/holonomy-eye/tests/

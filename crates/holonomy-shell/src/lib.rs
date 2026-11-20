@@ -719,8 +719,21 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             .typing
             .draft()
             .spans_in(self.typing.spine(), start, end);
+        // A window that begins mid-leaf is handed that leaf **clipped**: `spans_in` returns the
+        // overlapping slice, so the head span's offset is the window's own start rather than the
+        // leaf's. Its carries describe a layout that begins in the middle of the leaf, so they say
+        // nothing about the leaf, and writing them back overwrites the carry the leaf was measured
+        // with: the next frame then lays the leaf out from x = 0, its first line starts at its own
+        // first byte, and the screen's top line moves for a scroll offset that did not (AUDIT
+        // D-39). Only a head that begins on the leaf's own first byte is written back; its heights
+        // still are, because the lines it holds start inside it wherever the window began.
+        let head_whole = self
+            .typing
+            .draft()
+            .locate(self.typing.spine(), start)
+            .is_some_and(|hit| hit.within() == 0);
         let first = leaves.first();
-        let measured = measure_window(&layout, text, &spans, start, end, document_end);
+        let measured = measure_window(&layout, text, &spans, start, end, document_end, head_whole);
         for (index, height, carry) in measured {
             self.measured.set(first + index, height, carry);
         }
@@ -1226,6 +1239,7 @@ fn measure_window(
     start: u64,
     end: u64,
     document_end: u64,
+    head_whole: bool,
 ) -> Vec<(usize, Fixed, Carry)> {
     if spans.is_empty() {
         return Vec::new();
@@ -1314,7 +1328,14 @@ fn measure_window(
     spans
         .iter()
         .enumerate()
-        .filter(|(_, span)| span.offset() >= start && span.offset() + span.len() <= end)
+        // A span at the window's end is clipped to it and left alone; so is the head span, unless
+        // it begins on the leaf's own first byte (`head_whole`). See `frame` for why the head's
+        // carries are not the leaf's (AUDIT D-39).
+        .filter(|(index, span)| {
+            (*index > 0 || head_whole)
+                && span.offset() >= start
+                && span.offset() + span.len() <= end
+        })
         .map(|(index, span)| {
             // The **predecessor's** last byte, read out of the window the frame already holds: a CR
             // there is what the leaf before this one hands it, so it is the byte before the leaf's
