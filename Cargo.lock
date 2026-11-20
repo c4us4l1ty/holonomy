@@ -252,18 +252,18 @@ dependencies = [
 
 [[package]]
 name = "holonomy-eye"
-version = "6.0.0-block.3"
+version = "6.0.0-block.4"
 dependencies = [
  "holonomy-text",
 ]
 
 [[package]]
 name = "holonomy-ledger"
-version = "6.0.0-block.3"
+version = "6.0.0-block.4"
 
 [[package]]
 name = "holonomy-line"
-version = "6.0.0-block.3"
+version = "6.0.0-block.4"
 dependencies = [
  "holonomy-seal",
  "libc",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "holonomy-seal"
-version = "6.0.0-block.3"
+version = "6.0.0-block.4"
 dependencies = [
  "argon2",
  "blake2",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "holonomy-shell"
-version = "6.0.0-block.3"
+version = "6.0.0-block.4"
 dependencies = [
  "holonomy-eye",
  "holonomy-text",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "holonomy-text"
-version = "6.0.0-block.3"
+version = "6.0.0-block.4"
 dependencies = [
  "holonomy-ledger",
  "holonomy-line",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "6.0.0-block.3"
+version = "6.0.0-block.4"
 dependencies = [
  "holonomy-ledger",
 ]
