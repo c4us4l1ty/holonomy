@@ -9,6 +9,7 @@
 resolver = "2"
 members = [
     "crates/holonomy-eye",
+    "crates/holonomy-gui",
     "crates/holonomy-ledger",
     "crates/holonomy-line",
     "crates/holonomy-seal",

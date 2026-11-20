@@ -1,0 +1,19 @@
+[package]
+name = "holonomy-gui"
+description = "The window's half of Block 6: keys in, intents out, a picture on a surface — with no GPU in the crate yet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The editor loop: intents in, a frame out. This crate adds no editing rule of its own.
+holonomy-shell = { path = "../holonomy-shell" }
+# The geometry: the picture a surface draws, and the units it is drawn in.
+holonomy-eye = { path = "../holonomy-eye" }
+# The document engine, for building a session — the same one the shell tests use.
+holonomy-text = { path = "../holonomy-text" }

@@ -80,6 +80,20 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-20 — D-40 — typing was not undoable: nothing marked a burst, so undo had no step to
+  return to. FIXED.** Found by M4's keymap test, which typed `abc`, pressed `Ctrl+Z`, and expected
+  an empty document. Undo in this system is a stack of **marks**, not keystrokes: `Typing::undo`
+  returns to the last `Step::Mark`, and nothing in the shell or the loop ever called `Typing::mark`
+  — so a window could type a paragraph and `Ctrl+Z` would report "nothing to undo" while the
+  paragraph stood there. Every headless test that exercised undo did it after a **cut**, and a cut
+  marks on its own, which is why the gap survived three blocks of tests. The fix has two halves: the
+  loop now exposes `Editor::mark`, and the window's half (`holonomy_gui::App`) marks at the start of
+  a typing **burst**, so consecutive keystrokes coalesce into one undo step and `Ctrl+Z` takes back
+  the run — the behaviour every editor has, now stated in one place. The regression is
+  `shortcuts_are_the_loops_own` in `crates/holonomy-gui/tests/keys.rs`: type `abc`, undo, empty,
+  redo, `abc`. Nothing could be lost by this defect — the bytes were always the document's — but a
+  user could not take back a paragraph, which for a writing application is a defect in the first
+  sentence of the manual.
 - **2026-11-20 — OQ-24 — shaping is metrics only, and nothing reads `GSUB`/`GPOS`. OPEN, by
   design for now.** `holonomy_eye::Face` reads `head`, `hhea`, `hmtx`, `maxp` and `cmap` (M3), so
   advances, ascent and descent are the font's own numbers — but a cluster's width is the *sum of

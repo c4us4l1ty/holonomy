@@ -258,6 +258,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "holonomy-gui"
+version = "6.0.0-block.4"
+dependencies = [
+ "holonomy-eye",
+ "holonomy-shell",
+ "holonomy-text",
+]
+
+[[package]]
 name = "holonomy-ledger"
 version = "6.0.0-block.4"
 
