@@ -80,6 +80,33 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-19 — D-37 — what "statistically identical latency curves" means, since no shared
+  machine can certify that two nanosecond figures are equal.** Block 4's second gate reads:
+  *"Keystroke at offset 0 and at offset `N-1`: statistically identical latency curves."* Taken
+  literally it is unfalsifiable in CI (two equal figures would be a rounder of the clock, not a
+  result) and, if measured naively, it measures the machine: two curves taken one after the other
+  differ whenever the runner changes speed between them. The gate is therefore given an operational
+  definition, and `crates/holonomy-text/tests/keystroke_latency.rs` implements it.
+  **Interleaved, not sequential:** blocks of 256 samples at offset 0, then 256 at `N-1`, repeated to
+  4,096 each, so drift under load moves both curves and a difference that survives belongs to the
+  code. **One keystroke per sample:** `Spine::locate` then an in-place edit of the resident slab —
+  D-2's keystroke path — on a 180 MB, 43,945-leaf document; insert and backspace alternate with the
+  same parity at both ends, so the sampled mixes are identical and the fixture cannot drift. Both
+  viewports are warmed first, because a fault-in is slab-boundary work and not the keystroke.
+  **The band, stated rather than implied:** p50 within a factor of two and p99 within a factor of
+  four, which rejects the failure mode the clause exists to catch — cost proportional to the offset,
+  a factor of thousands — and does not pretend to certify equality a shared runner cannot deliver.
+  **A ceiling, not a certificate:** L-4's 8 ms p99 is asserted as an upper bound, not claimed as an
+  echo measurement on reference hardware (Block 6 owns that). **A control:** a whole-document walk
+  is timed by the same clock and must cost the keystroke's price a hundred times over, so a fake
+  clock or an idle fixture fails loudly. The numbers are printed as `HOLONOMY_KEYSTROKE_LATENCY`
+  and `HOLONOMY_KEYSTROKE_CONTROL`, and every one of them is also an assertion — so the run that
+  claims the gate is the run that enforced the numbers. Claimed on CI run `44665191051` (`32c58c9`), test job
+  green: the interleaving ran, both bands held, the echo ceiling held at both ends, and the
+  whole-document walk cost the keystroke's price more than a hundred times over. The first attempt
+  failed, and its failure was the harness's own: `summarise` and `measure` must agree that p50 is
+  the **upper** median, which is now pinned by a unit test at the entry point that takes the
+  caller's samples.
 - **2026-11-19 — D-36 — "memory at open" is two claims, and only one of them is fixed.** Block 4's
   first gate reads *"Open a synthetic 30 M-word document: memory at open is within a fixed bound
   that identical input of 1 page also satisfies."* Measured, the sentence splits in half.
