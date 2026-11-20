@@ -24,7 +24,7 @@
 //! SIL Open Font License, licence beside it). It is compiled into this test binary, so the test
 //! does not depend on the working directory.
 
-use holonomy_eye::{Fixed, Face, Shaper, Style};
+use holonomy_eye::{Face, Fixed, Shaper, Style};
 
 const FONT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -188,7 +188,11 @@ fn a_paragraph_laid_out_with_a_real_face_keeps_the_law() {
             let back = laid.hit_test(painted.point()).unwrap_or_else(|| {
                 panic!("byte {byte} painted at a point that hit-tests to nothing")
             });
-            assert_eq!(back.byte, byte, "byte {byte} round-tripped to {}", back.byte);
+            assert_eq!(
+                back.byte, byte,
+                "byte {byte} round-tripped to {}",
+                back.byte
+            );
             roundtrips += 1;
         }
     }

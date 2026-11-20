@@ -112,7 +112,9 @@ impl Face {
             let advance = u16::at(hmtx, index * 4).ok_or(FaceError::BadTable("hmtx"))?;
             advances.push(advance);
         }
-        let cmap = tables.get(bytes, b"cmap").and_then(|cmap| read_cmap(cmap))?;
+        let cmap = tables
+            .get(bytes, b"cmap")
+            .and_then(|cmap| read_cmap(cmap))?;
         Ok(Self {
             units_per_em,
             ascender,
@@ -198,9 +200,8 @@ impl TableDirectory {
     fn parse(bytes: &[u8]) -> Result<Self, FaceError> {
         let version = u32::at(bytes, 0).ok_or(FaceError::Truncated)?;
         // TrueType (`0x00010000`), CFF (`OTTO`), and Apple's `true`/`ttcf` are all sfnt containers.
-        let sfnt = version == 0x0001_0000
-            || bytes.starts_with(b"OTTO")
-            || bytes.starts_with(b"true");
+        let sfnt =
+            version == 0x0001_0000 || bytes.starts_with(b"OTTO") || bytes.starts_with(b"true");
         if !sfnt {
             return Err(FaceError::NotSfnt);
         }
@@ -224,7 +225,7 @@ impl TableDirectory {
         Ok(Self(tables))
     }
 
-    fn get(&self, bytes: &[u8], tag: &[u8; 4]) -> Result<&[u8], FaceError> {
+    fn get<'a>(&self, bytes: &'a [u8], tag: &[u8; 4]) -> Result<&'a [u8], FaceError> {
         let missing = match tag {
             b"head" => "head",
             b"hhea" => "hhea",
@@ -352,6 +353,8 @@ impl ReadAt for i16 {
 impl ReadAt for u32 {
     fn at(bytes: &[u8], offset: usize) -> Option<Self> {
         let slice = bytes.get(offset..offset.checked_add(4)?)?;
-        Some(Self::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+        Some(Self::from_be_bytes([
+            slice[0], slice[1], slice[2], slice[3],
+        ]))
     }
 }
