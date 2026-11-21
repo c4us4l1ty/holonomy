@@ -118,6 +118,123 @@ pub const LAWS: &[Law] = &[
     },
 ];
 
+/// How a constitutive budget is measured today, which is the only question VISION.md §4 leaves
+/// open once the number is written down.
+///
+/// The §4 table and `LAWS` say the same targets in two voices — VISION's prose ("under one
+/// display refresh") and the law's bound ("\u{2264} 8 ms p99"). Neither says *whether anything
+/// measures it*, and that gap is where a project starts claiming numbers it never took. Every row
+/// here names the harness that runs the measurement on every push, or says plainly that none
+/// exists yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    /// The VISION.md §4 budget, in VISION's own words.
+    pub vision: &'static str,
+    /// The law that carries the number, by id.
+    pub law: &'static str,
+    /// What CI runs today. Naming a harness is a claim that it runs green in CI; `None` means no
+    /// harness exists and the bound is unmeasured.
+    pub measured_by: Option<&'static str>,
+    /// What is still owed before the law can be `gated`, stated so it cannot be mistaken for done.
+    pub owes: &'static str,
+}
+
+/// The constitutive budgets as data (VISION.md §4 \u2192 `LAWS` \u2192 harness).
+///
+/// Read the `measured_by` column as the answer to "is this number real yet?" — and note that
+/// **no row is fully `gated`**: a row with a green harness measures a *component*, not the shipped
+/// app on reference hardware, which is what every one of these laws actually promises.
+pub const BUDGETS: &[Budget] = &[
+    Budget {
+        vision: "Document size: \u{2265} 30,000,000 words, \u{2265} 10,000 pages, 60-year growth",
+        law: "L-1",
+        measured_by: Some(
+            "`holonomy-text` tests::open_memory and tests::keystroke_latency both build a \
+             30 M-word / 44,000-leaf spine, so the scale is exercised, not argued",
+        ),
+        owes: "the surviving-life requirement: growth, seal, reopen and re-verify over simulated \
+               decades, which is Block 8's history scrub",
+    },
+    Budget {
+        vision: "Open: cold open of a maximum-size document in seconds, not minutes",
+        law: "L-3",
+        measured_by: Some(
+            "`holonomy-text` tests::open_memory prints HOLONOMY_OPEN_MEMORY per size, with the \
+             index asserted",
+        ),
+        owes: "an actual clock on a cold open of a sealed 30 M-word file, which needs the real \
+               reader and reference hardware",
+    },
+    Budget {
+        vision: "Resident plaintext: bounded by viewport neighborhood, independent of length",
+        law: "L-2",
+        measured_by: Some(
+            "`holonomy-text` tests::open_memory asserts the ResidentSet bound at two sizes; \
+             tests::keystroke_allocations counts zero allocations on the keystroke path",
+        ),
+        owes: "nothing for the plaintext bound itself — this is the one row whose measured half \
+               is the whole claim, and the index is separate (D-36)",
+    },
+    Budget {
+        vision: "Character echo: under one display refresh, at any offset, at any size",
+        law: "L-4",
+        measured_by: Some(
+            "`holonomy-text` tests::keystroke_latency interleaves offset 0 and N-1 and prints \
+             HOLONOMY_KEYSTROKE_LATENCY p50/p99",
+        ),
+        owes: "the p99 on reference hardware and the paint half — keystroke-to-*paint*, not \
+               keystroke-to-edit, which needs Block 6's renderer",
+    },
+    Budget {
+        vision: "Idle work: zero repaint, zero background scanning when nothing changes",
+        law: "L-5",
+        measured_by: Some(
+            "`holonomy-gui` bin tests::an_idle_window_writes_nothing, verified by breaking it \
+             (AUDIT D-68)",
+        ),
+        owes: "the same guarantee inside Block 6's GPU paint path; on the character grid it is \
+               tested but the law names Block 6 (D-69)",
+    },
+    Budget {
+        vision: "Save: touches appended segments only; atomic; survives power loss",
+        law: "L-6",
+        measured_by: Some(
+            "L-6 CI job: `scripts/qualify-ext4-enospc.sh` drives a real ext4 image out of space \
+             and checks the refusal is clean",
+        ),
+        owes: "a controlled power cut at arbitrary instants, controller-cache evaluation and a \
+               supported-device matrix — Block 10, and the job name says so",
+    },
+    Budget {
+        vision: "Wipe: everything readable, wiped in milliseconds and *proven* gone",
+        law: "L-7",
+        measured_by: None,
+        owes: "Block 9 entirely: the reaper fire test, the canary ghosts and the counted wipe",
+    },
+    Budget {
+        vision: "Portability: one passphrase, one file, any machine, no account",
+        law: "L-9",
+        measured_by: None,
+        owes: "a copied file opened on a second machine and platform, which needs a release \
+               build — Block 10",
+    },
+    Budget {
+        vision: "Tail-only sync: backing up after a save transfers O(appended bytes)",
+        law: "L-10",
+        measured_by: Some(
+            "L-10 CI job: the ignored rsync harness measures one named client over TCP and \
+             prints HOLONOMY_RSYNC_MEASUREMENT",
+        ),
+        owes: "every other client and backend — Block 10's matrix — or an explicit \
+               narrowing of the law (ROADMAP Block 3)",
+    },
+];
+
+/// The budget row for a law id, if VISION §4 names one.
+pub fn budget(id: &str) -> Option<&'static Budget> {
+    BUDGETS.iter().find(|b| b.law == id)
+}
+
 /// Find a law by exact id (`L-3`), if it exists.
 pub fn find(id: &str) -> Option<&'static Law> {
     LAWS.iter().find(|law| law.id == id)
@@ -160,5 +277,74 @@ mod tests {
     fn lookup_works() {
         assert!(find("L-1").is_some());
         assert!(find("L-99").is_none());
+    }
+
+    #[test]
+    fn every_budget_names_a_law_that_exists() {
+        // A budget pointing at a law id that is not in `LAWS` would render a contract row nobody
+        // enforces — the failure D-65 found in prose, prevented here by construction.
+        for budget in BUDGETS {
+            let law = find(budget.law)
+                .unwrap_or_else(|| panic!("budget names {} which is not a law", budget.law));
+            assert!(
+                !budget.vision.is_empty() && !budget.owes.is_empty(),
+                "{} must say what it budgets and what it still owes",
+                budget.law
+            );
+            // The two tables must not disagree about who enforces the number.
+            assert!(!law.block.is_empty(), "{} has no block", law.id);
+        }
+    }
+
+    #[test]
+    fn every_budget_is_recorded_once() {
+        let mut seen: Vec<&str> = BUDGETS.iter().map(|b| b.law).collect();
+        let count = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), count, "a law appears in the budget table twice");
+    }
+
+    #[test]
+    fn the_budget_table_covers_vision_section_four() {
+        // VISION.md §4 lists nine budgets; each one must map to a law. If a budget is added there
+        // and not here, this is the test that says so rather than a reader noticing months later.
+        assert_eq!(BUDGETS.len(), 9, "VISION §4 names nine constitutive budgets");
+        let mut laws: Vec<&str> = BUDGETS.iter().map(|b| b.law).collect();
+        laws.sort_unstable();
+        // Every law except L-8 has a VISION §4 budget: L-8 is the geometry invariant, which is a
+        // correctness property rather than a budget, and it is claimed by Block 5's gate instead.
+        assert_eq!(
+            laws,
+            vec!["L-1", "L-2", "L-3", "L-4", "L-5", "L-6", "L-7", "L-9", "L-10"],
+            "the budget table must map VISION §4 onto the law table exactly"
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_budget_says_so() {
+        // `measured_by: None` is the honest way to record "nothing measures this yet". What is not
+        // allowed is a row that has neither a harness nor an admission of what it owes.
+        for budget in BUDGETS {
+            if let Some(harness) = budget.measured_by {
+                assert!(
+                    !harness.trim().is_empty(),
+                    "{} claims a harness but names none",
+                    budget.law
+                );
+            } else {
+                assert!(
+                    budget.owes.len() > 20,
+                    "{} has no harness and must say what it owes",
+                    budget.law
+                );
+            }
+        }
+        let unmeasured = BUDGETS.iter().filter(|b| b.measured_by.is_none()).count();
+        assert_eq!(
+            unmeasured, 2,
+            "exactly two budgets (L-7 wipe, L-9 portability) have no harness; if one gains or \
+             loses one, update this count and the prose that quotes it"
+        );
     }
 }
