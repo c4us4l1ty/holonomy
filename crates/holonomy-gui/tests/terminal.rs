@@ -114,8 +114,8 @@ fn a_session_types_and_the_screen_shows_it() {
 fn editing_keys_reach_the_document_and_the_screen() {
     let mut window = window();
     type_bytes(&mut window, b"helo");
-    // Backspace, then the missing letter: 0x7f is what a tty sends.
-    type_bytes(&mut window, b"\x7fo");
+    // Backspace, then the two letters it was missing: 0x7f is what a tty sends.
+    type_bytes(&mut window, b"\x7flo");
     assert_eq!(window.document_len(), 5);
     window.draw().expect("drew");
     let drawn = screen(window.surface(), COLUMNS, "status");
@@ -149,9 +149,11 @@ fn a_resized_terminal_redraws_within_its_new_columns() {
     window.draw().expect("drew");
     let drawn = screen(window.surface(), 10, "status");
     for line in drawn.split("\r\n") {
-        let visible: String = line.chars().filter(|c| !c.is_control()).collect();
+        // The text of a row is what precedes its escape sequence; the sequences themselves are not
+        // columns.
+        let visible = line.split('\x1b').next().unwrap_or_default();
         assert!(
-            visible.chars().count() <= 12,
+            visible.chars().count() <= 10,
             "a row is wider than the terminal: {visible:?}"
         );
     }
