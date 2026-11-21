@@ -215,6 +215,22 @@ fn arrows_move_a_caret_and_keep_the_column() {
     window
         .press(Key::Home, Modifiers::control())
         .expect("moved");
+    // The frame's own line boxes: `Down` is answered by a hit test against them.
+    let geometry: Vec<(u64, i64, i64)> = {
+        let frame = window.editor().frame().expect("a frame");
+        frame
+            .layout()
+            .lines()
+            .iter()
+            .map(|line| {
+                (
+                    line.start_byte(),
+                    line.top().sixtyfourths(),
+                    line.height().sixtyfourths(),
+                )
+            })
+            .collect()
+    };
     let mut trail = vec![window.caret()];
     let down = window.press(Key::Down, Modifiers::none()).expect("moved");
     trail.push(window.caret());
@@ -223,7 +239,8 @@ fn arrows_move_a_caret_and_keep_the_column() {
     assert_eq!(
         window.caret(),
         4,
-        "down+right is not column 1 of line 2: trail={trail:?} down={down:?} right={right:?}"
+        "down+right is not column 1 of line 2: trail={trail:?} down={down:?} right={right:?} \
+         lines={geometry:?}"
     );
     window.press(Key::Up, Modifiers::none()).expect("moved");
     assert_eq!(window.caret(), 1, "up did not keep the column");

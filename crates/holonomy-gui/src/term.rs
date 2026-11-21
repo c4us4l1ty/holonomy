@@ -466,7 +466,7 @@ mod tests {
         for rows in 1..=10usize {
             let fitted = panel_fits(&panel, rows);
             assert!(
-                1 + fitted.len() + 1 <= rows.max(2),
+                1 + fitted.len() < rows.max(2),
                 "{rows} rows held {} panel lines",
                 fitted.len()
             );
