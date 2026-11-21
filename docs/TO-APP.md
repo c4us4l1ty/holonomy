@@ -211,5 +211,11 @@ deliberately renderer-agnostic: they survive that fallback untouched.
 
 ## Where we are
 
-M0, M1, M2 and M3 done. M4 next: the window itself — GPUI, the event loop, the keymap, the IME
-path — drawing M1's picture and speaking M2's intents, with M3's metrics behind the text.
+M0, M1, M2 and M3 done. M4a done: keymap, caret navigation, bursts, app loop, a surface. **D-41
+fixed**, so a frame shows every byte typed into the open leaf. M4b — the GPUI adapter and the
+platform event loop — is blocked in this environment: adding the dependency needs registry access to
+regenerate `Cargo.lock`, which nothing here has. M5 to M8 are untouched.
+
+The distance left, plainly: one backend file (M4b), then open/save/unlock (M5), chrome and the
+security panel (M6), the remaining gates (M7), packaging (M8). `ROADMAP.md` counts 15 gates claimed
+and 18 open.
