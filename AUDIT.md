@@ -66,6 +66,34 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-62 — a document still inside its buffer had no height at all. FIXED.**
+  `Measured` keeps one height per **spine slab**, and the bytes a user is typing are in the open
+  leaf — which is in the spine, so it has an entry, but nothing measures it until a frame draws it.
+  Every other entry was fine and the total was still wrong for the commonest state in the product:
+  a new document. `reflow` laid out no leaves at all when nothing had been sealed, `scroll_to`
+  clamped every scroll against a total of zero, and Page Down did nothing on a document several
+  screens long. The same zero made `caret_place` report a caret in an unmeasured run at the top of
+  the document, which is how D-53's reveal scrolled to a fraction of the right line: the failure
+  was found by pushing the branch through CI and reading `caret=166 scroll=23040` against a frame
+  covering bytes 40..65.
+  Two fixes, at the two places the missing measurement was read. `measure_through` measures the
+  unmeasured run a geometry question depends on — one leaf at a time, carrying the line as `reflow`
+  does — so a prefix sum is exact before it is used; the leaf before the run is re-measured rather
+  than trusted through `carry_after`, because the index stores the carry a leaf was *measured with*
+  and the cluster tail it placed past its own end differs by one advance, an error `is_measured`
+  would then make permanent. And `Editor::tail` keeps the open leaf's height beside the index,
+  invalidated by a length change, a width change, or a reflow, so `scroll_to` and `reflow` see the
+  whole document. The tail is kept out of `Measured` on purpose: `byte_window` asserts that the
+  index's leaf *i* is the spine's leaf *i*.
+  A third fault fell out of the same investigation: `caret_place` read `prefix(leaf)` with a leaf
+  number from the spine while the index was a snapshot only `frame` kept in step, so a reveal asked
+  for between a keystroke and a frame indexed past the end of the model and panicked with "prefix
+  past the model". It syncs first now — the invariant it was silently relying on.
+  Pinned by `typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret`
+  (`crates/holonomy-gui/tests/keys.rs`) and by `editing`'s two tail-leaf tests. **Verified by CI run
+  44906611678 on `e898979`: every job green** — rustfmt, clippy `-D warnings`, the workspace test
+  suite, the gates contract, the million-keystroke walk, the rsync measurement, and the ext4
+  rehearsal.
 - **2026-11-21 — D-61 — `Escape` was documented as dismissing and dismissed nothing. FIXED.**
   `Key::Escape` carries the doc line "dismisses, never edits", and the keymap does the second half
   correctly: it refuses to turn Escape into an edit. Nothing did the first half, so the key was
