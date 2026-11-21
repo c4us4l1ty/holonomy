@@ -934,7 +934,21 @@ fn a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it() {
     }
     shell.type_text("X").expect("typed");
     let _ = shell.frame().expect("a frame");
-    assert_eq!(shell.heights().len(), 10, "the split added a leaf");
+    // Nine sealed leaves, and the byte holding "X" registered one more where the cut fell: the
+    // spine is eleven slabs. The *index* has ten, because the open leaf has no measurement until a
+    // frame draws it — `sync_measured` counts the spine, and the frame that just ran wrote what it
+    // could measure. So both numbers are right, about different things, and the assertion says
+    // which.
+    assert_eq!(
+        shell.typing().spine().slab_count(),
+        11,
+        "the split added a leaf"
+    );
+    assert_eq!(
+        shell.heights().len(),
+        10,
+        "the index covers the ten sealed leaves, not the open one"
+    );
 
     shell.reflow().expect("measured again");
     let document = {
