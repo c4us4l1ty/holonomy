@@ -300,9 +300,27 @@ moved to `AUDIT.md` with an owner and a reason.
 
 ### M8 — Packaging
 
-A release binary per platform, an install line that works, a smoke script that opens, types, saves
-and reopens a document under a temporary home, and a README that tells the truth about what is and
-is not protected.
+**Partially done (2026-11-21).** The parts that need one Linux machine and no distribution are
+built; the parts that need signing, a second platform, or a release pipeline are not.
+
+**Done — the smoke test (D-72, D-73, D-74).** `scripts/smoke-install.sh` builds the release binary
+and drives it through a real pty, giving it a passphrase, a sentence and `Ctrl+Q`. It asserts that
+the document is created and sealed, that it begins with the `HOLWAV6` magic, that **no fragment** of
+the typed sentence is readable in its bytes, that the same passphrase reopens it with the sentence
+on screen, that a wrong passphrase is refused without touching the file, and that an empty one is
+refused without creating a file. It runs in CI on every push as its own job, and it is the first
+check in the project that runs the binary a user runs rather than a library under it. The pty comes
+from `scripts/drive-pty.py` because `script(1)` hangs (D-73).
+
+**Not done — and each needs something this environment does not have:**
+
+- **A release artefact per platform.** macOS and Windows builds need runner time and code signing;
+  the workspace has no release workflow at all, which is honest rather than hidden: there is nothing
+  to install yet because nothing is published.
+- **An install line that works.** `cargo install --path crates/holonomy-gui` would work for someone
+  with the toolchain; a user without one has no path, and the README says so.
+- **L-9's portability claim.** It needs the same file opened on a second machine, which is the only
+  way that law can be measured. Until then L-9's row in `GATES.md` reads **nothing yet**.
 
 ## What could derail this, and the fallback
 

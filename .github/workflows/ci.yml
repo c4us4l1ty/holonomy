@@ -241,6 +241,51 @@ jobs:
           { echo '### L-6 ext4 loop-filesystem ENOSPC evidence (not a device power-cut test)'; echo '```text'; cat "$RUNNER_TEMP/ext4-enospc-measurement.txt"; echo '```'; } > "$RUNNER_TEMP/ext4-enospc-comment.md"
           gh issue comment 51 --body-file "$RUNNER_TEMP/ext4-enospc-comment.md"
 
+  smoke:
+    name: M8 smoke — the shipped binary through a real terminal
+    runs-on: ubuntu-latest
+    # A smoke test that hangs is worse than one that fails: the first run of this job sat for 25
+    # minutes because the pty driver could not deliver Ctrl+Q. The cap turns a hang into a failure.
+    timeout-minutes: 10
+    # Push-only, like the other jobs that need a terminal or a loop device: pull-request runs from
+    # forks get no secrets and the evidence is posted back to the diag issue, which needs write.
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The pty comes from `scripts/drive-pty.py`, not from `script(1)`. `script` was the first
+      # attempt and it hangs: it cannot reliably feed a pty non-interactively, so a program that
+      # reads one byte at a time sees end-of-input before the piped bytes are readable and then
+      # waits on a terminal nobody is typing into — this job sat for 25 minutes on its first run.
+      # A pty the driver owns, with a deadline and a kill, has no such ambiguity.
+      - name: Ensure python3 is available for the pty driver
+        run: |
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "no python3: cannot drive a pty" >&2; exit 1
+          fi
+          python3 --version
+      - name: Build the binary the way a user would
+        run: cargo build --locked --release -p holonomy-gui --bin holonomy
+      - name: Drive it — create, reopen, refuse wrong and empty passphrases
+        run: |
+          set -o pipefail
+          HOLONOMY_BINARY="$(pwd)/target/release/holonomy" \
+            scripts/smoke-install.sh 2>&1 | tee "$RUNNER_TEMP/smoke.log"
+          grep 'HOLONOMY_SMOKE' "$RUNNER_TEMP/smoke.log"
+      - name: Record the smoke evidence in the audit issue
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { echo '### M8 smoke — the shipped binary through a real terminal'; echo '```text'; \
+            grep -E 'HOLONOMY_SMOKE|^smoke: ' "$RUNNER_TEMP/smoke.log"; echo '```'; } \
+            > "$RUNNER_TEMP/smoke-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/smoke-comment.md"
+
   gates:
     name: gates contract
     runs-on: ubuntu-latest

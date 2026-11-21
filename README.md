@@ -99,17 +99,40 @@ M0–M6 are done and M7/M8 are not: the build is not packaged, and the gates tha
 about a shipped app on reference hardware. Block 6's deliverable — a GPUI window with quiet-md's
 page — is **not** met; its terminal half is.
 
+## Installing it
+
+**There is no packaged release.** Nothing is published and there is no installer, so the only way to
+run the app today is from source with a Rust toolchain — clone the repository and run it from there:
+
+```text
+cargo run --release -p holonomy-gui --bin holonomy -- notes.wavefunction
+```
+
+The binary is named `holonomy` if you want to install it yourself
+(`cargo install --path crates/holonomy-gui`); note that the crate is marked `publish = false` and
+that command is **not exercised by CI**, so treat it as untested. The `cargo run` line above is the
+one the smoke test uses and the one this README can stand behind.
+
+That is a real gap rather than a stylistic one: a per-platform artifact needs signing and release
+infrastructure this project does not have yet, and L-9's "opens on any machine" claim cannot be
+measured until the same file has been opened on a second one.
+
 ## Verifying it yourself
 
-The same three commands CI runs, in order:
+The same commands CI runs, in order:
 
 ```text
 cargo test --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo run -p xtask -- gates --check
+scripts/smoke-install.sh
 ```
 
+The last one builds the release binary and drives it through a real terminal — a passphrase, a
+sentence, `Ctrl+Q` — then reopens it, and checks that a wrong and an empty passphrase are both
+refused. It is the only check here that runs the binary you run, not a library underneath it.
+
 `.github/workflows/ci.yml` is the compiler of record (AUDIT OQ-1): it runs `fmt`, `clippy`, `test`,
-the gates contract, the L-6 and L-10 qualifications, the million-keystroke walk, and posts
-diagnostics to issue #51 when a step fails. A change is verified when that run is green, not when it
-reads correctly.
+the gates contract, the L-6 and L-10 qualifications, the million-keystroke walk, the smoke test, and
+posts diagnostics to issue #51 when a step fails. A change is verified when that run is green, not
+when it reads correctly.
