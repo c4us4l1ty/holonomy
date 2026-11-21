@@ -16,10 +16,10 @@
 //! `Ctrl+Z`, so `Ctrl+Y` is the redo this window can actually offer (D-45).
 //!
 //! `Ctrl+G` asks the document for the security panel: what is resident, how the memory is locked,
-//! what the file itself says. `Esc` dismisses it. What is still not here: the GPU backend (M4b-ii — it needs crates
-//! this environment cannot fetch) and the blocks after this one. What *is* here is the thing the
-//! question in `docs/TO-APP.md` asked: you can open the app and start writing, and what you write
-//! is still there when you open it again.
+//! what the file itself says. `Esc` dismisses it. What is still not here: the GPU backend
+//! (M4b-ii — it needs crates this environment cannot fetch) and the blocks after this one. What
+//! *is* here is the thing the question in `docs/TO-APP.md` asked: you can open the app and start
+//! writing, and what you write is still there when you open it again.
 
 use holonomy_eye::Fixed;
 use holonomy_gui::panel::Facts;
