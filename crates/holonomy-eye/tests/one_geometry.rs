@@ -26,6 +26,8 @@
 //! No font, no GPU, no shaper: the shaper is a deterministic fake (Block 8 owns the real one), so
 //! what is proven is the *geometry*. BiDi reordering is not implemented (OQ-11, gate 3), so the
 //! generated text is left-to-right or direction-neutral — this gate is L-8, not the script gate.
+//! The script gate's measured half has its own harness, `tests/script_gate.rs` (AUDIT D-66), which
+//! covers RTL grapheme honesty and prints the size of the ordering deferral.
 //!
 //! The numbers are printed as `HOLONOMY_ONE_GEOMETRY`, and the counts asserted, so a green run is
 //! the measurement.

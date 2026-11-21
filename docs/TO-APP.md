@@ -270,9 +270,15 @@ what can be said, and the panel says only that.
 
 ### M7 — The gates that remain
 
-Block 5 gate 3 (BiDi): decide — implement runs, or record the deferral with the reason; it is
-OQ-11. Block 3's two deferred clauses. Zero-CPU-repaint-while-idle. The full VISION budget table.
-Each one either prints its numbers green or moves to `AUDIT.md` as an open question with a reason.
+Block 5 gate 3 (BiDi): **decided 2026-11-21 (D-66).** The caret half is met — no caret lands
+inside a grapheme in any RTL script, asserted over 14 corpus lines in `tests/script_gate.rs` — and
+visual reordering is **deferred to Block 6** with its displacement printed on every push as
+`HOLONOMY_SCRIPT_GATE_ORDER`. OQ-11 carries the decision and the reason: it is a paint-order change
+and there is no pixel surface yet to paint it on.
+
+Remaining: Block 3's two deferred clauses. Zero-CPU-repaint-while-idle. The full VISION budget
+table. Each one either prints its numbers green or moves to `AUDIT.md` as an open question with a
+reason.
 
 ### M8 — Packaging
 

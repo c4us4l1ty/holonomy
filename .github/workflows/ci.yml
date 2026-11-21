@@ -165,6 +165,21 @@ jobs:
             a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement \
             2>&1 | tee "$RUNNER_TEMP/keystroke-fuzz.log"
           grep 'HOLONOMY_KEYSTROKE_FUZZ' "$RUNNER_TEMP/keystroke-fuzz.log"
+      # Block 5's third gate has two halves and only one of them is true. Cluster-boundary
+      # honesty for RTL scripts is measured here and asserted; visual reordering is not built
+      # (OQ-11) and the displacement is *printed* rather than asserted away, so the size of the
+      # deferral is on the record every push instead of in a comment.
+      - name: Measure Block 5's script gate (RTL grapheme honesty, BiDi deferred)
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-eye --test script_gate -- --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/script-gate.log"
+          echo "--- grapheme honesty (asserted):"
+          grep 'HOLONOMY_SCRIPT_GATE_HONESTY' "$RUNNER_TEMP/script-gate.log"
+          echo "--- L-8 round trip for RTL text (asserted):"
+          grep 'HOLONOMY_SCRIPT_GATE_L8' "$RUNNER_TEMP/script-gate.log"
+          echo "--- BiDi displacement (measured, not asserted away):"
+          grep 'HOLONOMY_SCRIPT_GATE_ORDER' "$RUNNER_TEMP/script-gate.log"
 
   sync:
     name: L-10 rsync transfer measurement

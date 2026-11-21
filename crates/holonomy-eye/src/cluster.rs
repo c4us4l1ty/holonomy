@@ -51,6 +51,13 @@
 //! reordering** — the other half of the RFC's caret claim. It decides paint order rather than
 //! segmentation, so it belongs beside the run tree, not here.
 //!
+//! What is inside it, and was measured rather than assumed (AUDIT D-66): segmentation is already
+//! honest for right-to-left scripts. Arabic harakat and Hebrew niqqud are `gcb=Extend` in the
+//! generated tables, so a mark joins its base and no caret is offered inside a grapheme;
+//! `tests/script_gate.rs` asserts that over fourteen corpus lines in seven RTL scripts. The claim
+//! that used to sit here — that RTL text was an untested gap — was about the *cut*, and the cut
+//! was right before anyone measured it.
+//!
 //! What the crate does own is that segmentation is a pure function of the text **and of the state
 //! carried into it**: the same point answers the same way however the text was split into windows,
 //! which is what L-8 requires.
