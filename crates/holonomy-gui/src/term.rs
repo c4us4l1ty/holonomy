@@ -85,12 +85,15 @@ impl Decoder {
     pub fn feed(&mut self, byte: u8) -> Option<Input> {
         if let Some(sequence) = &mut self.escape {
             sequence.push(byte);
-            if sequence.len() > 16 {
-                self.escape = None;
-                return Some(Input::Ignored);
-            }
-            // A CSI sequence ends at the first byte in '@'..='~'.
-            if (0x40..=0x7e).contains(&byte) && sequence.len() > 1 {
+            // The second byte is the introducer — `[` for CSI, `O` for SS3 — and `[` is itself in
+            // the final-byte range, so it must not be read as one (D-42). After it, a CSI sequence
+            // ends at the first byte in '@'..='~'.
+            let complete = if sequence.len() == 2 {
+                !matches!(byte, b'[' | b'O')
+            } else {
+                (0x40..=0x7e).contains(&byte)
+            };
+            if complete || sequence.len() > 16 {
                 let sequence = self.escape.take().unwrap_or_default();
                 return Some(interpret(&sequence));
             }

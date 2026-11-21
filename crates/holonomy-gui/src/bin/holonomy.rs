@@ -158,10 +158,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         let mut quit = false;
+        let mut inputs = Vec::new();
         for byte in &bytes[..read] {
-            let Some(input) = decoder.feed(*byte) else {
-                continue;
-            };
+            if let Some(input) = decoder.feed(*byte) {
+                inputs.push(input);
+            }
+        }
+        // A read that ends mid-sequence leaves a lone Escape behind: deliver it.
+        inputs.extend(decoder.flush_escape());
+        for input in inputs {
             if let Input::Key(key, modifiers) = input {
                 if modifiers.control {
                     match key {

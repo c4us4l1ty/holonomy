@@ -66,13 +66,17 @@ fn window() -> Window {
 fn type_bytes(window: &mut Window, bytes: &[u8]) -> u64 {
     let mut decoder = Decoder::new();
     let mut keys = 0;
-    for byte in bytes {
-        let input = decoder.feed(*byte).or_else(|| decoder.flush_escape());
+    let mut press = |input: Option<Input>, keys: &mut u64| {
         if let Some(Input::Key(key, modifiers)) = input {
             window.press(key, modifiers).expect("pressed");
-            keys += 1;
+            *keys += 1;
         }
+    };
+    for byte in bytes {
+        press(decoder.feed(*byte), &mut keys);
     }
+    // A read that ends mid-sequence is a lone Escape, exactly as the binary flushes it.
+    press(decoder.flush_escape(), &mut keys);
     keys
 }
 
@@ -115,10 +119,7 @@ fn editing_keys_reach_the_document_and_the_screen() {
     assert_eq!(window.document_len(), 5);
     window.draw().expect("drew");
     let drawn = screen(window.surface(), COLUMNS, "status");
-    assert!(
-        drawn.contains("hello"),
-        "backspace did not edit:\n{drawn}"
-    );
+    assert!(drawn.contains("hello"), "backspace did not edit:\n{drawn}");
 
     // Arrow keys are escape sequences; Ctrl+Z is one byte.
     type_bytes(&mut window, b"\x1b[D\x1b[D");

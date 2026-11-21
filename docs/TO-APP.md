@@ -153,7 +153,7 @@ surface; arrows move a caret and keep the column; shift selects and the next key
 are the loop's own; an unchanged window does not repaint. Counts asserted and printed as
 `HOLONOMY_WINDOW*`.
 
-**M4b, blocked in this environment: the pixels.** `ROADMAP.md` names GPUI, and GPUI is what the
+**M4b-ii, blocked in this environment: the pixels.** `ROADMAP.md` names GPUI, and GPUI is what the
 real window will be drawn with. It cannot be compiled where this was written: the workspace lockfile
 is committed and CI builds `--locked`, so a new dependency needs registry access to resolve and
 checksum ~200 transitive crates, and this environment has none — `Cargo.lock` cannot be regenerated
@@ -161,6 +161,28 @@ here at all. The crate is therefore backend-free by construction: a GPUI adapter
 implementation of `Surface` plus an event loop that turns platform keys into `Key` and platform
 resize into `App::resize`. That is a small file, and it is the first task for a machine that can
 fetch crates. Recorded rather than faked.
+
+**M4b-i, done: the terminal window.** The window this environment *can* build. `holonomy-gui`
+gains `term.rs` — a `CellShaper` whose unit is one grid cell (so the Eye's geometry and the screen are
+the same thing, and paint, hit-test and caret agree to the last cell), a byte→key `Decoder` for what
+ttys actually send (UTF-8, `ESC [ A`, xterm modifier parameters, `ESC [ 3~`, control bytes), and an
+ANSI renderer that is a pure function of what was drawn, so tests assert exactly what a terminal
+prints. `cargo run -p holonomy-gui --bin holonomy` opens it: raw mode via `libc::tcgetattr`, the
+window size via `ioctl(TIOCGWINSZ)`, a read loop into `App::press`, `Ctrl+S` to flush, `Ctrl+Q` or
+`Ctrl+C` to quit, and a status line. It adds no dependency — `libc` is already in the lockfile for the
+seal's page locking.
+
+What it is: an app you can open and type in. Text appears on the measured geometry, arrows move the
+caret (with shift to extend), `Ctrl+Z` takes back a burst, `Ctrl+S` writes the open leaf through. What
+it is not: durable. The document lives in memory for the session, so closing the window loses it —
+that is M5, and the memory store in the binary is exactly the socket M5 replaces with
+`holonomy_line::WorldLine`. GPUI (M4b-ii) stays one `Surface` implementation, for a machine that can
+fetch crates; this file is not that machine.
+
+The acceptance is `crates/holonomy-gui/tests/terminal.rs`: tty bytes → `Decoder` → `App` →
+`CellSurface` → ANSI renderer, asserting the letters in the cells, the caret after them, the status
+line underneath, backspace, arrows, `Ctrl+Z`, and a resize. It found **D-42** on its first run (see
+`AUDIT.md`).
 
 **D-41, fixed.** A frame used to stop at the *sealed* spine's end, so bytes typed into the open leaf
 were invisible until something sealed them — a window that showed nothing while you typed. The frame
@@ -212,10 +234,12 @@ deliberately renderer-agnostic: they survive that fallback untouched.
 ## Where we are
 
 M0, M1, M2 and M3 done. M4a done: keymap, caret navigation, bursts, app loop, a surface. **D-41
-fixed**, so a frame shows every byte typed into the open leaf. M4b — the GPUI adapter and the
-platform event loop — is blocked in this environment: adding the dependency needs registry access to
-regenerate `Cargo.lock`, which nothing here has. M5 to M8 are untouched.
+fixed**, so a frame shows every byte typed into the open leaf. M4b-i — the terminal window — is done:
+the app opens, takes keys, and draws through `term.rs`. M4b-ii, the GPUI adapter, is blocked in this
+environment: adding the dependency needs registry access to regenerate `Cargo.lock`, which nothing
+here has. M5 to M8 are untouched.
 
-The distance left, plainly: one backend file (M4b), then open/save/unlock (M5), chrome and the
-security panel (M6), the remaining gates (M7), packaging (M8). `ROADMAP.md` counts 15 gates claimed
+The distance left, plainly: open/save/unlock (M5 — the window is live but a session is not yet
+durable), chrome and the security panel (M6), the remaining gates (M7), packaging (M8), plus the GPUI
+backend (M4b-ii) for a machine with registry access. `ROADMAP.md` counts 15 gates claimed
 and 18 open.
