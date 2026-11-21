@@ -83,29 +83,33 @@ Listed so they stay dead.
 - **2026-11-21 — D-43 — one arrow key threw the whole undo history away. FIXED.** Found by
   `tests/terminal.rs` the moment it drove `Ctrl+Z` through the bytes a terminal actually sends:
   after `helo`, a backspace, `lo` and two Left presses, sixteen `Ctrl+Z` presses each came back with
-  no effects and the document still five bytes — the undo stack was not merely at the wrong state,
-  it was empty. The mechanism: moving the caret goes through `Editor::move_caret` →
-  `Typing::insert_at(at, b"")`, which `flush`es whenever the caret leaves its current offset, and a
-  flush is a **seal** — the open leaf is appended to the world-line and the resident buffer it lived
-  in is dropped. `seal` ended with `steps.clear(); undone.clear()`, on the reasoning that no mark
-  could promise bytes the buffer no longer held; true, but the consequence is that every caret move
-  (an arrow, Home, End, a click, and the shell's own selection work) silently ended undo for
-  everything typed into the open leaf. The window made it visible; the defect was in the session
-  layer, and it would have been there in any front end (D-40 and D-41 had each closed a neighbour of
-  it — typing was undoable, and typing was visible — without noticing that *moving* cancelled the
-  first). The fix: a seal keeps exactly one state, `Step::Root { spine: settled, at, pending, held:
-  Some(copy of the open bytes) }`, pushed instead of the clear. `Step::Root` gained `held`, the copy
-  an undo re-attaches the leaf from now that the buffer is gone (`restore_root` rebuilds the buffer
-  from it and attaches `pending` bytes under a new provisional source); the marks behind the seal
-  boundary are kept, because undoing that boundary puts the same leaf back at the same offset with
-  the same bytes, which is the state each of them was recorded against; redo stays dropped, since a
-  redo would name a state the append has already moved past; and `cap_roots` now drops the whole
-  prefix behind the root it evicts, because a mark behind a root cannot be honoured until that root
-  has been restored. One extra undo step per sealing move is the cost, and it is the honest one: the
-  first `Ctrl+Z` returns to the open leaf the move committed (same text, now live again), the second
-  takes the typing back. Proven by `a_caret_move_does_not_throw_the_undo_history_away` in
-  `crates/holonomy-text/src/typing.rs` and by the end-to-end terminal test that found it; the
-  million-keystroke walk and its undo/redo rewind are the regression net.- **2026-11-21 — D-42 — every arrow key typed a letter into the document. FIXED.** Found by the
+  no effects and the document still five bytes — the undo stack was not at the wrong state, it was
+  empty. The mechanism: moving the caret goes through `Editor::move_caret` → `Typing::insert_at(at,
+  b"")`, which flushes whenever the caret leaves its offset, and a flush is a **seal** — the open
+  leaf is appended to the world-line and the resident buffer it lived in is dropped. `seal` ended
+  with `steps.clear(); undone.clear()` on the reasoning that no mark could promise bytes the buffer
+  no longer held; true, and the consequence was that every caret move — an arrow, Home, End, a click
+  — silently ended undo for everything typed into the open leaf. The window made it visible; the
+  defect was in the session layer and would have been in any front end (D-40 and D-41 had each
+  closed a neighbour of it — typing was undoable, and typing was visible — without noticing that
+  *moving* cancelled the first). The fix: a seal keeps exactly **one** state, `Step::Root { spine:
+  settled, at, pending, held: Some(copy of the open bytes) }`, whose `pending` is the top mark's
+  length when the top step is a mark — so one `Ctrl+Z` after a move takes back the burst that was
+  being typed, or the whole typing when the mark named an empty document — and the leaf's own length
+  when there is no mark at all. `Step::Root` gained `held`, the copy an undo re-attaches from now
+  that the buffer is gone; every root step carries it whenever it has open bytes, because a redo can
+  land after a seal has replaced the buffer with another leaf's. Two wrong versions died on the way,
+  both caught by the suite rather than by review: keeping *all* the marks behind the seal left marks
+  of older leaves applying lengths to a buffer a later leaf had become — the million-keystroke walk
+  reported it as a document cut inside a character (`valid_up_to: 114`, a lone `\xe2` where a ZWJ
+  belonged) — and a first version without `held` panicked slicing fourteen bytes out of a four-byte
+  buffer. Keeping one state is what makes the remaining history sound: a mark is a *length*, two
+  leaves can start at the same offset, and a length is only meaningful against the bytes it was
+  measured on. Residual, recorded rather than hidden: history deeper than the last mark does not
+  survive a sealing move — that is the floor the seal was, narrowed to one step. Pinned by
+  `a_caret_move_does_not_throw_the_undo_history_away` and `a_seal_keeps_the_last_burst_undoable`
+  (`crates/holonomy-text/src/typing.rs`), by the end-to-end terminal test that found it, and by the
+  million-keystroke walk's rewind.- **2026-11-21 — D-42 — every arrow key typed a letter into the document. FIXED.** Found by the
   terminal backend's own unit test, on the first run that reached it: `keys(b"\x1b[A")` came back as
   `[Ignored, Character('A')]` instead of `[Up]`, and `keys(b"\x1b[C")` as `[Ignored,
   Character('C')]`. The mechanism, in `Decoder::feed` (`crates/holonomy-gui/src/term.rs`): while an

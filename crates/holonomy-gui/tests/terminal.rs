@@ -124,38 +124,21 @@ fn editing_keys_reach_the_document_and_the_screen() {
     // Arrow keys are escape sequences; Ctrl+Z is one byte.
     type_bytes(&mut window, b"\x1b[D\x1b[D");
     assert_eq!(window.caret(), 3, "left did not move the caret");
-    // One burst is one step, so unwinding the session takes several — as many as there were
-    // bursts, and not one more.
-    let mut undos = 0;
-    let mut trace = String::new();
-    while window.document_len() > 0 && undos < 16 {
-        let effects = window
-            .press(Key::Character('z'), Modifiers::control())
-            .expect("undid");
-        trace.push_str(&format!(
-            " {undos}:len={}/effects={}",
-            window.document_len(),
-            effects.len()
-        ));
-        undos += 1;
-    }
-    assert_eq!(
-        window.document_len(),
-        0,
-        "Ctrl+Z did not unwind the session;{trace}"
-    );
-    assert!(
-        undos <= 4,
-        "one undo per keystroke would be no burst marking: {undos}"
-    );
+    // The arrows sealed the open leaf, and before D-43 that seal cleared the undo stack: this
+    // press did nothing, sixteen times. It takes back the burst that was being typed now.
+    let effects = window
+        .press(Key::Character('z'), Modifiers::control())
+        .expect("undid");
+    assert!(!effects.is_empty(), "Ctrl+Z said nothing changed");
+    assert_eq!(window.document_len(), 3, "the burst was not taken back");
     window.draw().expect("drew");
     let after = screen(window.surface(), COLUMNS, "status");
     assert!(
-        !after.contains("hello"),
+        after.contains("hel") && !after.contains("hello"),
         "the screen still shows the undone text:\n{after}"
     );
     println!(
-        "HOLONOMY_TERMINAL_EDIT undos={undos} text={:?}",
+        "HOLONOMY_TERMINAL_EDIT text={:?}",
         window.frame_text().expect("a frame")
     );
 }
