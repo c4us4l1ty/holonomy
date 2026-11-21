@@ -66,6 +66,35 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-72 — nothing tested the binary a user actually runs.** Every check in this
+  project called a library: `holonomy-text`, `holonomy-eye`, `holonomy-gui`'s `App`, the shell's
+  intents. Not one of them ran `main()`, so argument handling, raw mode, the passphrase prompt and
+  the save-on-quit path had no end-to-end coverage at all — a regression in any of them would have
+  passed every gate. `scripts/smoke-install.sh` closes that: it builds the release binary, drives it
+  through a **real pty** under a throwaway `HOME`, and asserts five things — a document is created
+  by typing and saved on `Ctrl+Q`; the file begins with the `HOLWAV6` header magic read from
+  `format.rs`; no fragment of the typed sentence appears in its bytes; the same passphrase reopens
+  it and the sentence is on screen; a wrong passphrase is refused leaving the file byte-identical,
+  and an empty one is refused without creating a file (D-63). Verified by **CI run 44930021440 on
+  `64899f5`**, where the job passed and posted the real binary's run to issue #51: a 5,629-byte
+  sealed document, `HOLONOMY_SMOKE binary=holonomy ... reopen=ok`.
+- **2026-11-21 — D-73 — `script(1)` cannot drive a pty, and a smoke test that hangs hides that.**
+  The first version of the smoke job used `script -qec` to give the child a terminal. It hung on CI
+  for 25 minutes and had to be left to time out. Reproduced locally with a stand-in before changing
+  anything: the child printed `EOF at prompt` having never received the passphrase, because `script`
+  delivers end-of-input before the piped bytes are readable and a program reading one byte at a time
+  then blocks on a terminal nobody is typing into. The fix is `scripts/drive-pty.py`, which owns the
+  pty, writes keys on a schedule, and enforces its deadline with a `SIGKILL` — reporting `exit=None`
+  so a hang is distinguishable from a failure. Verified on three paths locally: success, a hanging
+  child killed at the deadline, and a non-zero child passed through. The job is capped at 10 minutes
+  as well, because a smoke test that hangs is worse than one that fails.
+- **2026-11-21 — D-74 — my own leak check passed a leaking file.** The smoke script's plaintext
+  assertion searched the document's bytes for the whole 43-byte sentence. A negative control — a
+  stand-in writing `the quick brown fox jumps`, a truncated form — **passed it**, which is the check
+  failing at the thing it exists for. It now searches four fragments, and the same control fails.
+  Recorded because it is the second time this session a test verified itself rather than the code,
+  and because the pattern is specific: an assertion that matches one exact long string is weaker
+  than it looks, since a partial leak is still a leak.
 - **2026-11-21 — D-70 — L-6 physical qualification: deferred by scope, with an owner and a named
   test.** What is *evidenced*: short-write injection at every append byte, both synchronous failure
   modes, torn-tail recovery, and a real ext4 loop filesystem driven out of space
