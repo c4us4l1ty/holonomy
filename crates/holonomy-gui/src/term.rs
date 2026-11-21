@@ -100,6 +100,14 @@ impl Decoder {
             return None;
         }
         if byte == 0x1b {
+            // D-56: an escape can arrive in the middle of a multi-byte character — a tty whose
+            // writer was interrupted, a paste that was cut, garbage on a serial line. The UTF-8
+            // state was left standing, and the next bytes fed after the escape sequence completed
+            // a character out of a lead byte that no longer had one: `0xe4` then `ESC [ A` then
+            // `0xb8` typed a character nobody pressed, or swallowed a keystroke that should have
+            // been text. An escape starts a new token, so the half-character is abandoned.
+            self.utf8.clear();
+            self.expect = 0;
             self.escape = Some(vec![byte]);
             return None;
         }
@@ -174,6 +182,10 @@ impl Decoder {
     /// A lone `ESC` is indistinguishable from the start of a sequence until the read blocks, so the
     /// terminal wrapper flushes with this when a read comes back with nothing else.
     pub fn flush_escape(&mut self) -> Option<Input> {
+        // D-56: `flush_escape` is called at the end of a read, so a half-character left over from
+        // an interrupted stream must not survive to the next one either.
+        self.utf8.clear();
+        self.expect = 0;
         self.escape.take().map(|sequence| {
             if sequence.len() == 1 {
                 Input::Key(Key::Escape, Modifiers::none())
@@ -460,6 +472,37 @@ mod tests {
         }
         assert_eq!(panel_fits(&panel, 10).len(), 6, "a tall terminal keeps it all");
         assert_eq!(panel_fits(&panel, 6).len(), 4, "rows - 1 surface - 1 status");
+    }
+
+    #[test]
+    fn an_escape_mid_character_does_not_swallow_the_bytes_after_it() {
+        // D-56: the lead byte of `中` (`0xe4`), then an arrow key, then the rest of the character.
+        // The escape path used to leave `expect = 3` standing, so the two continuation bytes and
+        // whatever came after them were glued onto the abandoned lead: the arrow key was `Up` and
+        // the next real keystroke was eaten by a character nobody typed.
+        // The orphaned continuation bytes are not text on their own, so they are ignored rather
+        // than stitched onto the next character. The escape is the only key in the stream.
+        let inputs = keys(b"\xe4\x1b[A\xb8\xad");
+        assert_eq!(
+            inputs,
+            vec![
+                Input::Key(Key::Up, Modifiers::none()),
+                Input::Ignored,
+                Input::Ignored,
+            ],
+            "the escape must abandon the half character, not join it"
+        );
+        // The whole character arriving without interruption still types.
+        assert_eq!(
+            keys("中".as_bytes()),
+            vec![Input::Key(Key::Character('中'), Modifiers::none())]
+        );
+
+        // And a read that ends mid-character leaves nothing behind for the next read.
+        let (mut decoder, inputs) = decoder_receiving(b"\xe4\xe4", false);
+        assert!(inputs.is_empty());
+        let later = decoder.feed_all(b"\x1b[A");
+        assert_eq!(later, vec![Input::Key(Key::Up, Modifiers::none())]);
     }
 
     #[test]
