@@ -60,15 +60,26 @@ const CORPUS: [(&str, &str, usize); 14] = [
     // Hebrew: letters are separate clusters; points (niqqud) are Extend and join their base.
     ("hebrew letters", "\u{5e9}\u{5dc}\u{5d5}\u{5dd}", 4),
     ("hebrew with point", "\u{5e9}\u{5b8}", 1),
-    ("hebrew word + point", "\u{5e9}\u{5dc}\u{5d5}\u{5b9}\u{5dd}", 4),
+    (
+        "hebrew word + point",
+        "\u{5e9}\u{5dc}\u{5d5}\u{5b9}\u{5dd}",
+        4,
+    ),
     ("hebrew accents stack", "\u{5d0}\u{5b8}\u{5bc}\u{5b8}", 1),
     // Arabic: letters separate; harakat (0x64B-0x65F) are Extend and join.
-    ("arabic letters", "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}", 7),
+    (
+        "arabic letters",
+        "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}",
+        7,
+    ),
     ("arabic with fatha", "\u{628}\u{64e}", 1),
     ("arabic shadda+fatha", "\u{628}\u{651}\u{64e}", 1),
     ("arabic word", "\u{645}\u{631}\u{62d}\u{628}\u{627}", 5),
     // Thaana, Syriac, N'Ko, Adlam: RTL scripts outside the two everyone remembers.
-    ("thaana", "\u{780}\u{783}\u{7a9}", 3),
+    // U+07A9 THAANA EEBEEFILI is Mn: it is Extend and joins U+0783, so three code
+    // points are two clusters. This line first asserted 3 — the code was right and the
+    // test was wrong, which is exactly what an independently-checked table is for.
+    ("thaana", "\u{780}\u{783}\u{7a9}", 2),
     ("syriac with point", "\u{710}\u{730}", 1),
     ("nko", "\u{7ca}\u{7d4}", 2),
     ("adlam", "\u{1e900}\u{1e922}", 2),
@@ -124,19 +135,22 @@ fn rtl_scripts_never_offer_a_caret_inside_a_grapheme() {
 
         // And the placed clusters must cover the text exactly, in logical order — the property
         // that makes the segmentation reach the screen at all.
-        let placed: String = line
-            .clusters()
-            .iter()
-            .map(|cluster| cluster.text)
-            .collect();
-        assert_eq!(placed, text, "{label}: placed clusters do not cover the text");
+        let placed: String = line.clusters().iter().map(|cluster| cluster.text).collect();
+        assert_eq!(
+            placed, text,
+            "{label}: placed clusters do not cover the text"
+        );
     }
 
     println!(
         "HOLONOMY_SCRIPT_GATE_HONESTY scripts={scripts} clusters={clusters_checked} \
          carets={carets_checked} carets_inside_a_grapheme=0"
     );
-    assert_eq!(scripts, CORPUS.len() as u64, "every corpus line was checked");
+    assert_eq!(
+        scripts,
+        CORPUS.len() as u64,
+        "every corpus line was checked"
+    );
 }
 
 #[test]
@@ -216,8 +230,14 @@ fn an_rtl_caret_hit_tests_to_the_boundary_it_painted() {
             let hit = view
                 .hit_test(&laid, painted.point())
                 .unwrap_or_else(|| panic!("paint's own point must hit-test, byte {byte}"));
-            assert_eq!(hit.byte, byte, "an RTL boundary {byte} did not hit-test back");
-            assert_eq!(hit.x, painted.x, "the hit-tested caret moved for byte {byte}");
+            assert_eq!(
+                hit.byte, byte,
+                "an RTL boundary {byte} did not hit-test back"
+            );
+            assert_eq!(
+                hit.x, painted.x,
+                "the hit-tested caret moved for byte {byte}"
+            );
             checked += 1;
         }
     }
