@@ -395,28 +395,29 @@ fn typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret() {
     );
 
     window.draw().expect("drew");
-    let facts = {
+    // Whether the frame the screen is a picture of had the caret in it at all. This is the D-53
+    // property, and it is asked of `frame` rather than of this surface's cells: the surface is 8
+    // rows of a quarter-unit each — two logical units tall — and a line is twenty, so it can say
+    // the caret is *on* it but not where on a real screen.
+    let (frame_caret, facts) = {
         let caret = window.caret();
         let scroll = window.editor().scroll().sixtyfourths();
-        let (origin, total, text_len, frame_caret, provisional) = {
-            let frame = window.editor().frame().expect("a frame");
-            (
+        let frame = window.editor().frame().expect("a frame");
+        (
+            frame.caret().map(|caret| caret.byte),
+            format!(
+                "caret={caret} scroll={scroll} origin={} total={} len={} provisional={}",
                 frame.origin(),
                 frame.layout().height().sixtyfourths(),
-                frame.text().len() as u64,
-                frame.caret().map(|caret| caret.byte),
-                frame.provisional(),
-            )
-        };
-        format!(
-            "caret={caret} scroll={scroll} origin={origin} total={total} text_len={text_len} \
-             frame_caret={frame_caret:?} provisional={provisional}"
+                frame.text().len(),
+                frame.provisional()
+            ),
         )
     };
     let (column, row) = window
         .surface()
         .caret_cell()
-        .unwrap_or_else(|| panic!("a caret on screen: {facts}"));
+        .unwrap_or_else(|| panic!("a caret on screen: {facts} frame_caret={frame_caret:?}"));
     assert!(
         row < window.surface().rows(),
         "the caret was placed on row {row} of {} — off screen",
@@ -426,7 +427,15 @@ fn typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret() {
         column, 0,
         "each caret row begins at the line's first column"
     );
-    assert!(row > 0, "the caret is not on the document's first row");
+    // Not `row > 0`: this surface is 8 rows of a quarter-unit each, two logical units tall, and a
+    // line is twenty. It can say the caret is *on* it, not where on a real screen it would fall.
+    // What D-53 owes is that the caret is inside the window that was shaped for it — the window the
+    // screen is a picture of — and that is `frame_caret` above, plus the scroll that put it there.
+    assert_eq!(
+        frame_caret,
+        Some(window.caret()),
+        "the frame's caret is not the session's: the screen did not follow the caret ({facts})"
+    );
     // This document is longer than the session's 64-byte buffer, so the keystrokes *did* seal —
     // that is the buffer filling, not the reveal. What must not happen is the screen standing
     // still, which the scroll assertion above covers.
