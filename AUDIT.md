@@ -77,8 +77,8 @@ Listed so they stay dead.
   gone false — "M5 to M8 are untouched" and "a session is not yet durable" — when M5 and M6 landed.
   All three are rewritten to what the code does, and `README.md` now leads its Status section with
   the count that is true: **zero of ten**. Found while re-reading the docs for this merge, which is
-  the point of reading the code rather than the prose. Docs only; the CI run for this commit is
-  what verifies it, and `AUDIT.md` names the run once it is green (OQ-1).
+  the point of reading the code rather than the prose. Docs only; **verified by CI run 44909881863
+  on `e4c193e`, every job green.**
 - **2026-11-21 — D-64 — the durability claim was stronger than the durability.** The window's
   autosave comment read "nothing is lost if the machine dies between keystrokes", and the module
   documentation promised that "what you write is still there when you open it again". The first is
