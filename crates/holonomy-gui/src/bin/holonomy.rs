@@ -20,6 +20,12 @@
 //! (M4b-ii — it needs crates this environment cannot fetch) and the blocks after this one. What
 //! *is* here is the thing the question in `docs/TO-APP.md` asked: you can open the app and start
 //! writing, and what you write is still there when you open it again.
+//!
+//! Durability, stated as it is rather than as it sounds: a **seal** appends and witnesses the
+//! moment the buffer fills, so text survives a crash once it has sealed. Text still in the open
+//! buffer is written by `Ctrl+S`, by the autosave 1.5 s after typing stops, and on quit — so a
+//! crash between keystrokes can lose up to one `store::CAPACITY` of the most recent typing, and
+//! nothing older (D-64).
 
 use holonomy_eye::Fixed;
 use holonomy_gui::panel::Facts;
@@ -289,7 +295,11 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
         }
         stdout.flush()?;
 
-        // A pause is a save: nothing is lost if the machine dies between keystrokes.
+        // A pause is a save. What is at risk between saves is the **open buffer** — a seal appends
+        // to the world-line the moment the buffer fills, so nothing before that is ever lost, and
+        // the exposure is bounded by `store::CAPACITY` rather than by how long someone types. The
+        // first version of this comment said "nothing is lost if the machine dies between
+        // keystrokes", which is true of every sealed byte and false of the ones just typed (D-64).
         if !readable(PAUSE_MILLIS) {
             if app.has_pending() && save(&mut app) {
                 message.clear();
