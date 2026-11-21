@@ -813,7 +813,18 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     pub fn frame(&mut self) -> Result<Frame<'_>, ShellError> {
         self.sync_measured();
         self.measured.heights.reset_reads();
-        let (start, end, leaves, provisional) = self.choose_window()?;
+        let (start, mut end, leaves, mut provisional) = self.choose_window()?;
+        // The open tail is live document. A window that stopped at the sealed spine's end would
+        // show nothing of what the user is typing — the bytes are in the draft, one leaf past the
+        // last sealed one (AUDIT D-41) — so a window that reaches the sealed end reaches the
+        // document's end instead, and the frame is provisional because the leaf holding that tail
+        // has no measured height yet.
+        let sealed = self.typing.spine().len();
+        let document_end = self.typing.document_len();
+        if end == sealed && document_end > sealed {
+            end = document_end;
+            provisional = true;
+        }
 
         // The window ends at a leaf, and a leaf cut is a byte count, so the window can end inside
         // a cluster. A frame draws *and* hit tests, so it has to end where the document has a
@@ -821,7 +832,6 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         // is never asked to offer a boundary the document does not have (AUDIT D-26, OQ-19). A
         // cluster longer than the leaf after the cut cannot be finished here; that bound is
         // `legal_caret`'s, and D-25's residual.
-        let document_end = self.typing.document_len();
         let look = self.leaf_range(end).map_or(end, |(_, next_end)| next_end);
         let read = self.read(start, look)?;
         self.window = Some(read);
@@ -852,6 +862,12 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let first = leaves.first();
         let measured = measure_window(&layout, text, &spans, start, end, document_end, head_whole);
         for (index, height, carry) in measured {
+            // The index has one entry per **sealed** leaf; the open tail's leaf has none until it
+            // is sealed, so its measurement is dropped here and taken again next frame rather than
+            // being written past the end of the index (AUDIT D-41).
+            if first + index >= self.measured.len() {
+                continue;
+            }
             self.measured.set(first + index, height, carry);
         }
 

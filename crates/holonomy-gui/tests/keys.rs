@@ -163,7 +163,6 @@ fn typing_reaches_the_surface_after_the_bytes_are_written_through() {
 ///
 /// The numbers are in the failure message: run `cargo test -p holonomy-gui --test keys -- --ignored`.
 #[test]
-#[ignore = "AUDIT D-41: a frame does not show bytes typed since the open leaf was measured"]
 fn typing_is_visible_before_the_bytes_are_written_through() {
     let mut window = window();
     type_keys(&mut window, "hello");
