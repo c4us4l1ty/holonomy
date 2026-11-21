@@ -886,19 +886,41 @@ fn an_empty_document_frames_without_reading_anything() {
 }
 
 #[test]
-fn typing_into_the_middle_of_a_sealed_document_remeasures_the_leaves_after_it() {
-    // D-50: `sync_measured` used to treat *any* one-leaf growth as a tail append and `push` a
-    // zero height. A caret moved into sealed text inserts its leaf where the caret is, so every
-    // measured height after the caret stayed on a leaf that had moved, and the document's own tail
-    // was a leaf the index never measured. Both are silent: the index is the spine's length.
+fn a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it() {
+    // D-50: `sync_measured` treated *any* one-leaf growth as a tail append and `push`ed a zero
+    // height. The difference the fix rests on is byte-anchored — the new leaf must begin where the
+    // document ended — so the two cases are asserted against each other here.
     let mut shell = session();
     shell.type_text(&repeat_leaf().repeat(8)).expect("typed");
     shell.flush().expect("sealed");
     shell.reflow().expect("measured");
-    let before = shell.heights().total();
-    assert_eq!(before, Fixed::units(80), "eight leaves, one line each");
+    assert_eq!(
+        shell.heights().total(),
+        Fixed::units(20),
+        "one wrapped line of 512 letters"
+    );
 
-    // The caret goes into the middle of the first leaf, and a keystroke opens a leaf there.
+    // A tail append: one new leaf at the document's end. Every earlier height is still true.
+    shell
+        .move_caret_to(holonomy_shell::Move::DocumentEnd, false)
+        .expect("moved");
+    shell.type_text(&repeat_leaf()).expect("typed");
+    let _ = shell.frame().expect("a frame");
+    assert_eq!(
+        shell.heights().len(),
+        9,
+        "the index grew by one leaf, not a rebuild"
+    );
+    assert_eq!(
+        shell.heights().height(0),
+        Fixed::units(20),
+        "and the heights before the append were not thrown away"
+    );
+
+    // A mid-document insert: the leaf splits and every height after the caret described a document
+    // that no longer exists. The index is rebuilt and the re-measure agrees with one layout.
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
     shell
         .move_caret_to(holonomy_shell::Move::DocumentStart, false)
         .expect("moved");
@@ -908,23 +930,20 @@ fn typing_into_the_middle_of_a_sealed_document_remeasures_the_leaves_after_it() 
             .expect("moved");
     }
     shell.type_text("X").expect("typed");
+    let _ = shell.frame().expect("a frame");
+    assert_eq!(shell.heights().len(), 10, "the split added a leaf");
 
-    let frame = shell.frame().expect("a frame");
-    assert_eq!(frame.text().len(), 65, "the frame is a screen, not a leaf");
-    // The document is still nine lines — one per leaf, and the new leaf shares its line with the
-    // leaf it split. A pushed zero and stale heights after the caret put the total at 80 + one
-    // unmeasured line, which is what this catches.
-    let after = shell.heights().total();
-    assert_eq!(shell.heights().len(), 9, "one height per leaf");
-    assert!(
-        after > Fixed::ZERO && after <= Fixed::units(90),
-        "nine lines at most, and not a phantom row of zero: {after:?}"
-    );
-    // And the last leaf is measured, not left at the zero a tail `push` would have written.
-    let last = shell.heights().height(8);
-    assert!(
-        last > Fixed::ZERO,
-        "the document's last leaf was never laid out"
+    shell.reflow().expect("measured again");
+    let document = {
+        let mut text = repeat_leaf().repeat(9);
+        text.insert(30, 'X');
+        text
+    };
+    let whole = layout_styled(StyledText::plain(&document), 0, WIDTH, &Fake);
+    assert_eq!(
+        shell.heights().total(),
+        whole.height(),
+        "the leaf walk and one continuous layout must agree"
     );
 }
 
