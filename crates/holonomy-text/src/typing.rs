@@ -1086,7 +1086,11 @@ mod tests {
         typing.mark();
         typing.insert(b"hello").expect("typed");
         typing.insert_at(1, b"").expect("moved");
-        assert_eq!(typing.sealed_bytes(), 5, "the move should seal the open leaf");
+        assert_eq!(
+            typing.sealed_bytes(),
+            5,
+            "the move should seal the open leaf"
+        );
         assert_eq!(typing.document_len(), 5);
 
         // One undo takes the typing back, and a redo puts it back: the seal kept the state the
@@ -1115,7 +1119,11 @@ mod tests {
         assert_eq!(top.kind, "root");
         assert_eq!(top.len, 3, "the start of the burst, not the whole leaf");
         assert!(typing.undo().expect("undo"));
-        assert_eq!(typing.pending(), b"hel", "the burst came back as open bytes");
+        assert_eq!(
+            typing.pending(),
+            b"hel",
+            "the burst came back as open bytes"
+        );
         assert_eq!(typing.document_len(), 3);
     }
 
@@ -1382,7 +1390,9 @@ mod tests {
         let written = typing.sink.written().len();
         typing.delete(2, 4).expect("deleted");
         assert_eq!(typing.document_len(), 8);
-        let top = typing.top_undo().expect("the cut recorded the root before it");
+        let top = typing
+            .top_undo()
+            .expect("the cut recorded the root before it");
         assert_eq!(top.kind, "root");
         assert_eq!(top.at, 2, "the root is the state the cut started from");
         assert!(typing.undo().expect("undone"));
@@ -1425,7 +1435,11 @@ mod tests {
         // own state is what is left (D-43).
         typing.insert(b"abcdefghi").expect("typed");
         assert_eq!(typing.sealed_bytes(), 18);
-        assert_eq!(typing.undo_depth(), 1, "the seal's state, and no cut behind it");
+        assert_eq!(
+            typing.undo_depth(),
+            1,
+            "the seal's state, and no cut behind it"
+        );
         assert_eq!(typing.top_undo().expect("the seal").len, 8);
         assert!(typing.undo().expect("the sealed leaf comes back"));
         // Sixteen: the eight sealed bytes the cut left, plus the eight the seal wrote, live again.
