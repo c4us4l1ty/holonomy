@@ -66,6 +66,33 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-68 — an idle window rewrote its whole screen every 1.5 seconds.** GATES law L-5
+  is "zero repaint and zero text-path timers while the view is unchanged", and the window broke the
+  first clause on every loop iteration. `Window::draw` already returns `Ok(false)` when nothing is
+  dirty, and `crates/holonomy-gui/tests/keys.rs` asserts exactly that ("an unchanged window
+  repainted") — but the binary wrote `app.draw()?;` and discarded the bool. The loop then blocks
+  1.5 s in `readable(PAUSE_MILLIS)` for input; on a timeout it saves if needed and `continue`s
+  straight back to a complete `screen_with` render and `flush`. So a window left open and idle
+  emitted the full surface — every cell of an 80×24 grid, `\x1b[K` and `\r\n` per row — every
+  1.5 s, for as long as it stayed open. Not a few cells: a whole screen, string-built, on a window
+  where nothing had happened. The library was honest and tested; the front end was not. Fixed by
+  comparing what `screen_with` actually reads — size, status line, caret, panel — and skipping the
+  write when all of it matches and `draw` reported no repaint. The size is compared because a
+  taller terminal repaints no cell and would otherwise keep the old frame until a keystroke came.
+  **The harness was verified by breaking it, not by reading it**: a throwaway commit made
+  `unchanged` return true unconditionally, CI run 44920267815 failed with
+  `tests::an_idle_window_writes_nothing ... panicked at "a repaint must reach the terminal"`, and
+  the sabotage was reverted (`c17c3b7` → revert `git revert`). Verified green by **CI run
+  44919655611 on `914bbd1`**.
+- **2026-11-21 — D-69 — L-5 stays `spec`, and the reason is a scope, not a failure.** With D-68
+  fixed, both of L-5's clauses hold for the window that exists: no repaint while unchanged (D-68's
+  harness now fails the build on regression) and no text-path timer, because the crate starts none —
+  `intent.rs` notes that "IME, timers and the paint callback are the window's". The law is still not
+  promoted to `gated`, because L-5 names **Block 6**, and Block 6's deliverable is the GPUI window
+  with real glyph painting. A benchmark on the character-grid window would measure the absence of a
+  renderer, not the absence of repaint in the shipped app. What the promotion owes is named: the
+  same decision, enforced inside the GPU paint path when M4b-ii lands, on a window that can actually
+  paint. Recorded so the next reader does not mistake "the test is green" for "the law is met".
 - **2026-11-21 — D-66 — the crate had no RTL coverage at all, and OQ-11 was describing one
   problem as two.** Block 5's third gate was written as a single unmet item, "Bi-directional and
   multi-script text handle cluster boundaries correctly". Reading `layout.rs` and the generated

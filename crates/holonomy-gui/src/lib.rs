@@ -571,6 +571,12 @@ where
 
     /// Paints the current frame into the surface, and only paints when a repaint is owed.
     ///
+    /// The answer is whether anything was painted, and callers are expected to use it: L-5 is
+    /// "zero repaint while the view is unchanged", and the terminal front end broke it by
+    /// discarding this bool and rewriting the whole screen every loop iteration — a full-screen
+    /// escape dump every 1.5 s on an idle window (AUDIT D-68). `false` means the surface still
+    /// holds the last frame, so a backend that trusts it writes nothing.
+    ///
     /// # Errors
     ///
     /// [`GuiError`] when the editor refuses a frame.
