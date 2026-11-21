@@ -205,6 +205,15 @@ fn a_page_is_the_screen_the_window_is_showing_now() {
     // document nobody has laid out: with no measured height the total is zero and every scroll
     // clamps to it, so Page Down would be a no-op for a reason that has nothing to do with D-60.
     window.editor().reflow().expect("measured the document");
+    // Typing reveals the caret (D-53), and this document is taller than the four rows the window
+    // was born with, so the scroll is not at the top when the typing stops. Put it there: the
+    // question this test asks is how far *one page* moves, not where the caret left the screen.
+    window.editor().scroll_to(Fixed::ZERO);
+    assert_eq!(
+        window.editor().scroll(),
+        Fixed::ZERO,
+        "the test starts at the top of the document"
+    );
 
     window
         .press(Key::PageDown, Modifiers::none())
@@ -213,6 +222,18 @@ fn a_page_is_the_screen_the_window_is_showing_now() {
         window.editor().scroll(),
         Fixed::units(2),
         "a page is the screen the window shows, not the one it had when it was built"
+    );
+    // A page back up is one screen too. Five units of document on a two-unit viewport can scroll
+    // to three, so from two a page up must land on zero — a window still paging by the four rows it
+    // was built with would clamp to zero as well, but a page size that had *grown* or a page that
+    // moved by something other than the viewport would not come back here.
+    window
+        .press(Key::PageUp, Modifiers::none())
+        .expect("paged up");
+    assert_eq!(
+        window.editor().scroll(),
+        Fixed::ZERO,
+        "a page up is one screen, not two"
     );
     println!(
         "HOLONOMY_TERMINAL_PAGE scroll={} viewport={}",
