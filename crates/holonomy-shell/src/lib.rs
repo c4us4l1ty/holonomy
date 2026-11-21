@@ -663,6 +663,14 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let Some(leaf) = self.leaf_of(probe) else {
                 continue;
             };
+            // D-53/D-58: the y below is a **prefix of measured heights**, so a leaf the index has
+            // not reached reads as zero and the caret's line is reported far higher than it is.
+            // Typing a screenful past a frame leaves exactly that hole: `sync_measured` pushes one
+            // zero-height leaf per seal, and nothing measures them until a frame draws them. The
+            // reveal then scrolled to a fraction of the caret's line and the caret went off screen,
+            // which is the failure D-53 is about. Measuring the gap is the cost of knowing where
+            // the caret is; it is the same one-leaf-at-a-time walk `reflow` and `bootstrap` do.
+            self.measure_through(leaf)?;
             let Some((start, end)) = self.leaf_bounds(leaf) else {
                 continue;
             };
@@ -720,6 +728,45 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         // carry the tail leaf would be measured with is the carry `at` ends at.
         carried.skip = 0;
         Ok(carried)
+    }
+
+    /// Measures every unmeasured leaf up to and including `leaf`, so its prefix height is exact.
+    ///
+    /// The index is a prefix of measured leaves and a tail of zero-height placeholders, which is
+    /// fine for a frame — it measures what it draws — and not fine for anything that asks where a
+    /// leaf *is*, because a zero height understates every position after it. The walk starts at the
+    /// first leaf of the unmeasured run, carries the line the way [`Self::reflow`] does, and writes
+    /// each measurement back, so the next question about the same leaf costs nothing.
+    ///
+    /// One leaf is faulted in at a time, like every other measurement in this file.
+    fn measure_through(&mut self, leaf: usize) -> Result<(), ShellError> {
+        if self.measured.is_measured(leaf) {
+            return Ok(());
+        }
+        // The run of unmeasured leaves ending at `leaf`: `from` is its first member, because
+        // `from - 1` is measured or does not exist.
+        let mut from = leaf;
+        while from > 0 && !self.measured.is_measured(from - 1) {
+            from -= 1;
+        }
+        let mut carried = if from == 0 {
+            Carry::default()
+        } else {
+            // The leaf before the run is re-measured to recover the carry it hands on. The index
+            // stores the carry a leaf is measured **with**, not the one it ends at, and the
+            // difference is the cluster tail it looked past its own end to place (AUDIT D-25) —
+            // which `carry_after` sets to zero. Guessing there would write a height off by one
+            // advance into the index, where `is_measured` then makes it permanent.
+            let inherited = self.measured.carry(from - 1);
+            let (_, next) = self.measure_leaf((from - 1) as u32, inherited)?;
+            next
+        };
+        for index in from..=leaf {
+            let (height, next) = self.measure_leaf(index as u32, carried)?;
+            self.measured.set(index, height, carried);
+            carried = next;
+        }
+        Ok(())
     }
 
     /// The carry `leaf` ended at: the state the leaf after it is measured from.
