@@ -197,6 +197,11 @@ fn a_page_is_the_screen_the_window_is_showing_now() {
         .resize(Fixed::units(COLUMNS as i64), Fixed::units(2))
         .expect("resized to two rows");
     assert_eq!(window.editor().viewport(), Fixed::units(2));
+    // The window is measured before it can be scrolled, which is what the binary does when it
+    // opens a document and what this test has to do to be a test of paging rather than of a
+    // document nobody has laid out: with no measured height the total is zero and every scroll
+    // clamps to it, so Page Down would be a no-op for a reason that has nothing to do with D-60.
+    window.editor().reflow().expect("measured the document");
 
     window
         .press(Key::PageDown, Modifiers::none())
