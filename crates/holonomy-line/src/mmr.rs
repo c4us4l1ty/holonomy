@@ -157,11 +157,13 @@ mod tests {
         for leaf in [[7u8; 32], [8u8; 32], [9u8; 32]] {
             mmr.append(leaf).unwrap();
         }
-        let before = mmr.clone();
-        let root_before = mmr.root();
         // Break the invariant the way a corrupt-but-authenticated witness would: three segments
-        // are recorded, but the peak the merge would consume is gone.
+        // are recorded, but the peak the merge would consume is gone. The snapshot is taken
+        // **after** the break, because the claim is about what the refused append does — that it
+        // leaves the accumulator exactly as it found it, holes and all, so the fault is reported
+        // every time rather than half-consumed the first time.
         mmr.peaks[0] = None;
+        let before = mmr.clone();
         assert!(
             matches!(mmr.append([1u8; 32]), Err(LineError::InvalidRecord)),
             "a merge that cannot find its peak is refused, not half-applied"
@@ -175,7 +177,12 @@ mod tests {
             mmr.peaks, before.peaks,
             "and consumes no other peak: the merge is computed into a scratch copy"
         );
-        assert_eq!(root_before, before.root());
+        // And it is still refused the second time: a walk that had eaten the higher peak would
+        // report success now, or a different error, on an accumulator with the same count.
+        assert!(
+            matches!(mmr.append([1u8; 32]), Err(LineError::InvalidRecord)),
+            "the same broken witness is refused again"
+        );
     }
 
     #[test]
