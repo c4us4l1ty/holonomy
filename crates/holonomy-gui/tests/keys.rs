@@ -395,7 +395,27 @@ fn typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret() {
     );
 
     window.draw().expect("drew");
-    let (column, row) = window.surface().caret_cell().expect("a caret on screen");
+    let facts = {
+        let caret = window.caret();
+        let scroll = window.editor().scroll().sixtyfourths();
+        let (origin, total, text_len, frame_caret) = {
+            let frame = window.editor().frame().expect("a frame");
+            (
+                frame.origin(),
+                frame.layout().height().sixtyfourths(),
+                frame.text().len() as u64,
+                frame.caret().map(|caret| caret.byte),
+            )
+        };
+        format!(
+            "caret={caret} scroll={scroll} origin={origin} total={total} text_len={text_len} \
+             frame_caret={frame_caret:?} provisional={}"
+        )
+    };
+    let (column, row) = window
+        .surface()
+        .caret_cell()
+        .unwrap_or_else(|| panic!("a caret on screen: {facts}"));
     assert!(
         row < window.surface().rows(),
         "the caret was placed on row {row} of {} — off screen",
