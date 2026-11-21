@@ -255,6 +255,36 @@ fn save(app: &mut Window) -> bool {
     }
 }
 
+/// What the screen was last written as: its size, its status line, its caret and its panel.
+type Shown = ((usize, usize), String, Option<(usize, usize)>, Vec<String>);
+
+/// Whether the next frame would put the same bytes on the terminal as the last one did.
+///
+/// This is L-5 in the only place the window itself can break it. `Window::draw` already answers
+/// "did anything change" for the surface, and the binary used to ignore it and rewrite the whole
+/// screen on every loop iteration — a full-screen escape dump every 1.5 s on an idle window
+/// (D-68). The four things compared here are what `screen_with` actually reads, so equal inputs
+/// mean identical output and the write can be skipped.
+///
+/// The size is part of it because a taller terminal repaints no cell: without it a window that
+/// grew in rows would keep the old frame until a keystroke arrived.
+fn unchanged(
+    shown: Option<&Shown>,
+    repainted: bool,
+    size: (usize, usize),
+    line: &str,
+    caret: Option<(usize, usize)>,
+    panel: &[String],
+) -> bool {
+    shown.is_some_and(|(old_size, old_line, old_caret, old_panel)| {
+        !repainted
+            && size == *old_size
+            && line == old_line.as_str()
+            && caret == *old_caret
+            && panel == old_panel.as_slice()
+    })
+}
+
 fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Error>> {
     let (columns, rows) = size();
     let text_rows = rows.saturating_sub(1).max(1);
@@ -266,6 +296,9 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
     let mut message = String::new();
     let mut panel: Option<Vec<String>> = None;
     print!("\x1b[?25l\x1b[2J");
+    // What the screen currently shows, so an unchanged view is not written again (D-68).
+    // `None` means "nothing has been written yet", which is what makes the first pass paint.
+    let mut shown: Option<Shown> = None;
     loop {
         let (now_columns, now_rows) = size();
         // The panel gives way, never the surface: `1 + panel + 1` lines that do not fit make the
@@ -277,7 +310,14 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
             Fixed::units(now_columns as i64),
             Fixed::units(surface_rows as i64),
         )?;
-        app.draw()?;
+        // L-5, "idle is idle": `draw` answers whether anything changed, and this loop used to
+        // throw that answer away and rewrite the whole screen every iteration — a full-screen
+        // escape dump every 1.5 s for as long as the window sat open (D-68). The write is skipped
+        // nothing the screen shows has changed. The status line, the caret and the panel are
+        // tracked alongside the surface because they change without dirtying the editor: a save
+        // clears `has_pending`, a keystroke can move the caret over unchanged text, and Ctrl+G
+        // swaps the panel.
+        let repainted = app.draw()?;
         let line = status(
             path,
             document,
@@ -285,15 +325,29 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
             app.has_pending(),
             message.as_str(),
         );
-        write!(
-            stdout,
-            "{}",
-            term::screen_with(app.surface(), now_columns, &panel_lines, &line)
-        )?;
-        if let Some((column, row)) = app.surface().caret_cell() {
-            write!(stdout, "\x1b[?25h\x1b[{};{}H", row + 1, column + 1)?;
+        let caret = app.surface().caret_cell();
+        // The terminal's own size is part of what is on screen: a taller window with the same
+        // width repaints no cell and would otherwise never be filled at its new height.
+        let size_now = (now_columns, surface_rows);
+        if !unchanged(
+            shown.as_ref(),
+            repainted,
+            size_now,
+            &line,
+            caret,
+            &panel_lines,
+        ) {
+            write!(
+                stdout,
+                "{}",
+                term::screen_with(app.surface(), now_columns, &panel_lines, &line)
+            )?;
+            if let Some((column, row)) = caret {
+                write!(stdout, "\x1b[?25h\x1b[{};{}H", row + 1, column + 1)?;
+            }
+            stdout.flush()?;
+            shown = Some((size_now, line, caret, panel_lines.clone()));
         }
-        stdout.flush()?;
 
         // A pause is a save. What is at risk between saves is the **open buffer** — a seal appends
         // to the world-line the moment the buffer fills, so nothing before that is ever lost, and
@@ -457,5 +511,55 @@ mod tests {
         let line = closing(Path::new("/tmp/notes.wavefunction"), 3, 4, "saved");
         assert!(line.contains("3 segments"), "{line}");
         assert!(line.contains("4 witnesses"), "{line}");
+    }
+
+    #[test]
+    fn an_idle_window_writes_nothing() {
+        // D-68: L-5 is "zero repaint while the view is unchanged", and the loop broke it by
+        // rewriting the full screen on every iteration regardless of what `draw` answered.
+        let size = (80, 24);
+        let line = "holonomy · notes · 0 bytes".to_owned();
+        let caret = Some((0, 0));
+        let panel: Vec<String> = Vec::new();
+        let shown: Shown = (size, line.clone(), caret, panel.clone());
+
+        // Nothing changed: skip the write. This is the case that used to burn a full screen
+        // of escapes every 1.5 s for as long as the window sat open.
+        assert!(
+            unchanged(Some(&shown), false, size, &line, caret, &panel),
+            "an idle window must not rewrite the screen"
+        );
+
+        // The first pass has written nothing yet, so it must paint.
+        assert!(
+            !unchanged(None, false, size, &line, caret, &panel),
+            "the first frame must be written"
+        );
+        // A redraw is a change even when every other input matches.
+        assert!(
+            !unchanged(Some(&shown), true, size, &line, caret, &panel),
+            "a repaint must reach the terminal"
+        );
+        // A save clears `has_pending`, which changes the status line and nothing else.
+        assert!(
+            !unchanged(Some(&shown), false, size, "saved", caret, &panel),
+            "a changed status line must reach the terminal"
+        );
+        // A keystroke can move the caret over text that did not change.
+        assert!(
+            !unchanged(Some(&shown), false, size, &line, Some((7, 2)), &panel),
+            "a moved caret must reach the terminal"
+        );
+        // Ctrl+G swaps the panel without dirtying the document.
+        let opened = vec!["residency: 16 KiB".to_owned()];
+        assert!(
+            !unchanged(Some(&shown), false, size, &line, caret, &opened),
+            "an opened panel must reach the terminal"
+        );
+        // A taller terminal repaints no cell but needs the rows filled.
+        assert!(
+            !unchanged(Some(&shown), false, (80, 30), &line, caret, &panel),
+            "a resized terminal must be repainted at its new height"
+        );
     }
 }

@@ -276,9 +276,15 @@ visual reordering is **deferred to Block 6** with its displacement printed on ev
 `HOLONOMY_SCRIPT_GATE_ORDER`. OQ-11 carries the decision and the reason: it is a paint-order change
 and there is no pixel surface yet to paint it on.
 
-Remaining: Block 3's two deferred clauses. Zero-CPU-repaint-while-idle. The full VISION budget
-table. Each one either prints its numbers green or moves to `AUDIT.md` as an open question with a
-reason.
+Zero-CPU-repaint-while-idle: **the defect is fixed and the harness enforces it (D-68, D-69).** An
+idle window used to rewrite its entire screen on every loop iteration; it now compares what
+`screen_with` reads and skips the write, `tests::an_idle_window_writes_nothing` pins every way that
+decision can be wrong, and the harness was verified by deliberately breaking the guard and watching
+CI fail. L-5 itself stays `spec` because it names Block 6's GPU window — D-69 records what the
+promotion still owes rather than letting a green test stand in for a met law.
+
+Remaining: Block 3's two deferred clauses. The full VISION budget table. Each one either prints its
+numbers green or moves to `AUDIT.md` as an open question with a reason.
 
 ### M8 — Packaging
 
