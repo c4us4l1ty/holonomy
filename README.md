@@ -38,41 +38,77 @@ security panel — the part you actually run, as
 law reads `spec` in `GATES.md`; that column is the honest one and nothing is promoted to `gated`
 without a measurement in CI.
 
-## What is real, and what is not
+## What works today
 
-Said here rather than only in `AUDIT.md`, because this is the page a reader meets first.
-
-**Real, and run by CI on every push:** the sealed world-line and its append/witness path
-(`holonomy-line`, with the L-6 crash rehearsal and the L-10 transfer measurement as separate CI
-jobs); the Spine — slab tree, history, capacity-bounded resident set, a keystroke path whose
-zero-allocation claim is measured by a counting allocator, and the commit boundary that seals an
-edited slab into the world-line; the Eye's geometry — clusters, run tree, zoom/DPI, a counted
-height index; the editor loop; and a **working terminal window** you can open and type into:
+You can open a document and write in it, and what you write survives closing the app and opening
+it again.
 
 ```text
 cargo run -p holonomy-gui --bin holonomy -- notes.wavefunction
 ```
 
-You will be asked for a passphrase, and the file is created if the path does not exist. Text types,
-the caret moves, `Ctrl+S` writes through, `Ctrl+Z`/`Ctrl+Y` undo and redo a burst, `Ctrl+G` shows
-what the process can honestly claim about its own memory, and what you typed is there when you open
-it again.
+The file is created if it does not exist and opened if it does; either way it asks for a
+passphrase. Then: printable text types, arrows and Home/End/PageUp/PageDown move the caret
+(`Shift` extends), backspace and delete remove, `Ctrl+Z` undoes a burst and `Ctrl+Y` redoes one,
+`Ctrl+A` selects all, `Ctrl+S` writes through, `Ctrl+G` shows what the process can honestly claim
+about its own memory, `Esc` dismisses that panel, and `Ctrl+Q` or `Ctrl+C` quits after sealing what
+is open — if that last save is refused, the window says so and exits non-zero rather than claiming
+success (D-49).
 
-**Not real yet, in the order it would bite a user:**
+A **seal** is the unit of durability: when the 16 KiB buffer fills, its bytes are appended to the
+world-line and witnessed, so text is on disk once it has sealed. The open buffer is written by
+`Ctrl+S`, by an autosave 1.5 s after typing stops, and on quit.
 
-- **No GPU backend.** The window draws into a grid of characters. The Eye's geometry is the real
-  measured one and the terminal is a surface over it, but there is no font shaping or pixel
-  rendering: wide characters are not modelled (a `中` claims one cell and the terminal draws two —
-  OQ-25), and there is no selection painting beyond what the cell grid can show.
-- **A crash can lose up to 16 KiB of the most recent typing** (`store::CAPACITY`). Sealed text is
-  durable the moment its buffer fills; the open buffer is written by `Ctrl+S`, by the autosave
-  after 1.5 s of no typing, and on quit (D-64).
-- **One document at a time**, one window, one caret. No panes, no search, no settings.
-- **The DEM key of every opened document is leaked** for the life of the process (OQ-27), and the
-  passphrase typed at the prompt is zeroed but was never a `Zeroizing` buffer (OQ-28).
-- **The height index is exact only for what has been measured.** `Editor::reflow` measures the whole
-  document — one leaf at a time, never more than one faulted in — and is called when a document is
-  opened; a reveal on a document nobody measured measures the run to the caret instead (D-62).
-- **No power-loss qualification.** The L-6 rehearsal drives a real ext4 filesystem out of space and
-  checks the refusal is clean; it says so in its own job name because it is not a power-cut test,
-  which is Block 10's.
+## What is real, and what is not
+
+Said here, in a table, because this is the page a reader meets first and `AUDIT.md` is where the
+detail lives.
+
+| Area | State | Where the truth is |
+| ---- | ----- | ------------------ |
+| Sealed world-line, append + witness | **Real, measured in CI** | `holonomy-line`; L-6 and L-10 are separate CI jobs |
+| Slab spine, history, resident set | **Real, measured in CI** | `holonomy-text`; zero-allocation keystroke claim counted by an allocator in CI |
+| Commit boundary (seal → world-line) | **Real, measured in CI** | `holonomy-text`; proven against the real container |
+| Eye geometry: clusters, run tree, zoom/DPI, height index | **Real, measured in CI** | `holonomy-eye` |
+| Editor loop: intents in, measured frames out | **Real, measured in CI** | `holonomy-shell` |
+| Terminal window: open, type, save, unlock, panel | **Real — this is the app you run** | `holonomy-gui` |
+| GPU backend, font shaping, IME | **Not built** — the window is a grid of characters | `docs/TO-APP.md` M4b-ii |
+| Wide characters (`中`, most emoji) | **Wrong** — claims one cell, terminal draws two | OQ-25 |
+| Crash before a save | **Loses up to 16 KiB** of the most recent typing; nothing older | D-64 |
+| Documents open at once | **One**, one window, one caret. No panes, search, or settings | — |
+| DEM key of each opened document | **Leaked** for the process lifetime | OQ-27 |
+| Passphrase at the prompt | Zeroed, but never held in a `Zeroizing` buffer | OQ-28 |
+| Height index | Exact for measured leaves; a reveal measures the run to the caret | D-62 |
+| Power-loss safety | **Not qualified** — L-6 is an ENOSPC rehearsal and says so in its job name | Block 10 |
+
+Nothing in this table is aspirational. Every **real** row is exercised by a CI job on every push;
+every **not built** or **wrong** row names an `AUDIT.md` entry, except the one that is a scope
+decision rather than a defect — one document per window — which is the shape of the app and not
+owed to anyone.
+
+## Status
+
+**Zero of the ten laws are `gated`.** `docs/GATES.md` lists all ten as `spec`; that file is
+generated from `crates/holonomy-ledger/src/laws.rs`, and `xtask gates --check` fails the build if
+the two ever disagree. A law becomes `gated` when an enforcing block lands and CI measures it — not
+before, and not by editing prose.
+
+`docs/TO-APP.md` tracks the app in milestones; `ROADMAP.md` tracks the ten construction blocks.
+M0–M6 are done and M7/M8 are not: the build is not packaged, and the gates that remain are the ones
+about a shipped app on reference hardware. Block 6's deliverable — a GPUI window with quiet-md's
+page — is **not** met; its terminal half is.
+
+## Verifying it yourself
+
+The same three commands CI runs, in order:
+
+```text
+cargo test --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo run -p xtask -- gates --check
+```
+
+`.github/workflows/ci.yml` is the compiler of record (AUDIT OQ-1): it runs `fmt`, `clippy`, `test`,
+the gates contract, the L-6 and L-10 qualifications, the million-keystroke walk, and posts
+diagnostics to issue #51 when a step fails. A change is verified when that run is green, not when it
+reads correctly.

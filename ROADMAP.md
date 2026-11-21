@@ -323,13 +323,19 @@ Everything before this block is plumbing. This is the first thing a user can hol
 already obeys every constitutional law: viewport plaintext, one file, password-only,
 world-line history internal (no history UI yet), smooth at any size.
 
-**Status (2026-11-18) — none of this block's gates claimed, and no pixel drawn.** Its *headless
-half* exists as `holonomy-shell` (D-19): intents (type, backspace, delete, select, click, drag,
-undo, redo, scroll, resize, zoom) produce frames, the frames measure the heights the Eye indexes,
-and the caret-boundary check OQ-15 asked for passes over every caret a frame offers. What is not
-here: GPUI, quiet-md's page, a font, a palette, IME, autosave, the unlock screen, and every gate
-in this block — which are about a shipped app on reference hardware and cannot be faked by a
-headless loop.
+**Status (2026-11-21) — no pixel, but it opens and it keeps what you write.** Its *headless half*
+exists as `holonomy-shell` (D-19): intents produce frames, the frames measure the heights the Eye
+indexes, and the caret-boundary check OQ-15 asked for passes over every caret a frame offers. The
+window over it (`holonomy-gui`) is **real and runnable today**: a terminal in raw mode, keys decoded
+from the bytes a tty actually sends, a `.wavefunction` created or opened under a passphrase,
+autosave on pause, a seal on quit, the security panel on `Ctrl+G`, and a run that died mid-append
+recovered on the next open. M5 and M6 are done in `docs/TO-APP.md`.
+
+What is not here: **GPUI**, quiet-md's page, a font, a palette, IME — so the deliverable this block
+describes is still not met, and **none of this block's gates is claimed**, because they are about a
+shipped app on reference hardware and cannot be faked by a character-grid window. The terminal
+window is M4b-i in `docs/TO-APP.md`: the thing this environment can build, not a substitute for the
+block.
 
 **Deliverables**
 - GPUI shell built on **quiet-md** ([s1dashu/quiet-md](https://github.com/s1dashu/quiet-md), MIT):

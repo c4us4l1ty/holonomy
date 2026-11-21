@@ -66,6 +66,19 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-65 — `docs/TO-APP.md` counted gates that were never claimed.**
+  "Where we are" ended "`ROADMAP.md` counts 15 gates claimed and 18 open". Both numbers are
+  invented. `crates/holonomy-ledger/src/laws.rs` holds **ten** laws and every one is
+  `LawStatus::Spec`; `docs/GATES.md`, which `xtask gates` generates from that table, shows the same
+  ten rows all reading `spec`, and no other document in the repo repeats the figure. The claim was
+  worse than a stale count because of what it asserted: a `gated` law is one an enforcing block has
+  measured in CI, so "15 claimed" said the opposite of the standing rule that a law is called
+  `gated` only when a harness ran green on it. Two nearby statements in the same section had also
+  gone false — "M5 to M8 are untouched" and "a session is not yet durable" — when M5 and M6 landed.
+  All three are rewritten to what the code does, and `README.md` now leads its Status section with
+  the count that is true: **zero of ten**. Found while re-reading the docs for this merge, which is
+  the point of reading the code rather than the prose. Docs only; the CI run for this commit is
+  what verifies it, and `AUDIT.md` names the run once it is green (OQ-1).
 - **2026-11-21 — D-64 — the durability claim was stronger than the durability.** The window's
   autosave comment read "nothing is lost if the machine dies between keystrokes", and the module
   documentation promised that "what you write is still there when you open it again". The first is
