@@ -80,6 +80,24 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-21 — OQ-27 — the window leaks one DEM key per opened document. OPEN, by design for
+  now.** `WorldLine<'key>` borrows the `DEMKey` it seals with, so a `Document` that owns both the
+  line and the key would be self-referential. The alternatives were `unsafe` transmutes, a
+  self-reference crate (a new dependency this environment cannot fetch), or leaking the boxed key —
+  and the leak is the smallest of the three: thirty-two bytes, once per open, for as long as the
+  process lives, which is exactly how long the window would have kept it. The cost is not memory but
+  hygiene: a leaked key's `Drop` never runs, so it is not zeroized at exit, and
+  `crates/holonomy-gui/src/store.rs` says so at the leak site. The fix is an owning `WorldLine` (an
+  `Arc<DEMKey>` inside the line, or a key handle the container owns), which removes the leak and the
+  sentence together; it is a change to `holonomy-line`'s public shape, not to any format.
+- **2026-11-21 — OQ-28 — the passphrase typed at the prompt is zeroed, but it was never a
+  `Zeroizing`.** The terminal front end collects the phrase into a `Vec<u8>`, hands it to
+  `MasterKeys::derive_with`, and overwrites the bytes before dropping the vector
+  (`crates/holonomy-gui/src/bin/holonomy.rs`). That is best effort, not the standard the rest of the
+  workspace keeps: a `Vec` that reallocated as it grew leaves earlier copies in allocator slack, and
+  nothing wipes them. `holonomy_seal::PassphraseInput` exists to carry exactly this kind of material
+  and is what the fix should use on the way in — the prompt is the only place in the window a secret
+  exists as bytes at all, and it should exist in the wrapping the seal crate already provides.
 - **2026-11-21 — D-43 — one arrow key threw the whole undo history away. FIXED.** Found by
   `tests/terminal.rs` the moment it drove `Ctrl+Z` through the bytes a terminal actually sends:
   after `helo`, a backspace, `lo` and two Left presses, sixteen `Ctrl+Z` presses each came back with
