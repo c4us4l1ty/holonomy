@@ -80,7 +80,32 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
-- **2026-11-21 — D-42 — every arrow key typed a letter into the document. FIXED.** Found by the
+- **2026-11-21 — D-43 — one arrow key threw the whole undo history away. FIXED.** Found by
+  `tests/terminal.rs` the moment it drove `Ctrl+Z` through the bytes a terminal actually sends:
+  after `helo`, a backspace, `lo` and two Left presses, sixteen `Ctrl+Z` presses each came back with
+  no effects and the document still five bytes — the undo stack was not merely at the wrong state,
+  it was empty. The mechanism: moving the caret goes through `Editor::move_caret` →
+  `Typing::insert_at(at, b"")`, which `flush`es whenever the caret leaves its current offset, and a
+  flush is a **seal** — the open leaf is appended to the world-line and the resident buffer it lived
+  in is dropped. `seal` ended with `steps.clear(); undone.clear()`, on the reasoning that no mark
+  could promise bytes the buffer no longer held; true, but the consequence is that every caret move
+  (an arrow, Home, End, a click, and the shell's own selection work) silently ended undo for
+  everything typed into the open leaf. The window made it visible; the defect was in the session
+  layer, and it would have been there in any front end (D-40 and D-41 had each closed a neighbour of
+  it — typing was undoable, and typing was visible — without noticing that *moving* cancelled the
+  first). The fix: a seal keeps exactly one state, `Step::Root { spine: settled, at, pending, held:
+  Some(copy of the open bytes) }`, pushed instead of the clear. `Step::Root` gained `held`, the copy
+  an undo re-attaches the leaf from now that the buffer is gone (`restore_root` rebuilds the buffer
+  from it and attaches `pending` bytes under a new provisional source); the marks behind the seal
+  boundary are kept, because undoing that boundary puts the same leaf back at the same offset with
+  the same bytes, which is the state each of them was recorded against; redo stays dropped, since a
+  redo would name a state the append has already moved past; and `cap_roots` now drops the whole
+  prefix behind the root it evicts, because a mark behind a root cannot be honoured until that root
+  has been restored. One extra undo step per sealing move is the cost, and it is the honest one: the
+  first `Ctrl+Z` returns to the open leaf the move committed (same text, now live again), the second
+  takes the typing back. Proven by `a_caret_move_does_not_throw_the_undo_history_away` in
+  `crates/holonomy-text/src/typing.rs` and by the end-to-end terminal test that found it; the
+  million-keystroke walk and its undo/redo rewind are the regression net.- **2026-11-21 — D-42 — every arrow key typed a letter into the document. FIXED.** Found by the
   terminal backend's own unit test, on the first run that reached it: `keys(b"\x1b[A")` came back as
   `[Ignored, Character('A')]` instead of `[Up]`, and `keys(b"\x1b[C")` as `[Ignored,
   Character('C')]`. The mechanism, in `Decoder::feed` (`crates/holonomy-gui/src/term.rs`): while an

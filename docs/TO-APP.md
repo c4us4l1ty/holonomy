@@ -181,8 +181,11 @@ fetch crates; this file is not that machine.
 
 The acceptance is `crates/holonomy-gui/tests/terminal.rs`: tty bytes → `Decoder` → `App` →
 `CellSurface` → ANSI renderer, asserting the letters in the cells, the caret after them, the status
-line underneath, backspace, arrows, `Ctrl+Z`, and a resize. It found **D-42** on its first run (see
-`AUDIT.md`).
+line underneath, backspace, arrows, `Ctrl+Z`, and a resize. It found **D-42** on its first run and
+**D-43** on the next (see `AUDIT.md`): the arrows were typing letters, and a single arrow press threw
+the whole undo history away. Both are fixed in the layers that had them — the decoder, and the
+session's seal — which is the argument for driving a front end end to end rather than trusting unit
+tests to compose.
 
 **D-41, fixed.** A frame used to stop at the *sealed* spine's end, so bytes typed into the open leaf
 were invisible until something sealed them — a window that showed nothing while you typed. The frame
