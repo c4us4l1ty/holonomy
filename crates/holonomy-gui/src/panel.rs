@@ -147,7 +147,11 @@ pub fn human(bytes: usize) -> String {
     if bytes < KIB {
         return format!("{bytes} B");
     }
-    let (unit, name) = if bytes < MIB { (KIB, "KiB") } else { (MIB, "MiB") };
+    let (unit, name) = if bytes < MIB {
+        (KIB, "KiB")
+    } else {
+        (MIB, "MiB")
+    };
     let whole = bytes / unit;
     let tenth = (bytes % unit) * 10 / unit;
     if tenth == 0 {
@@ -204,7 +208,10 @@ mod tests {
         let mut changed = base;
         changed.capability = LockCapability::None;
         assert_ne!(base.lock_line(), changed.lock_line());
-        assert_eq!(changed.lock_line(), format!("lock: {}", LockCapability::None.claim()));
+        assert_eq!(
+            changed.lock_line(),
+            format!("lock: {}", LockCapability::None.claim())
+        );
 
         let mut changed = base;
         changed.segments = 7;

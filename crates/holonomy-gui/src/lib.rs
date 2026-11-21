@@ -417,7 +417,7 @@ where
 
     /// The resident set, for a window that reports on what it holds (the security panel).
     #[must_use]
-    pub fn residency(&self) -> &R {
+    pub fn residency(&self) -> &holonomy_text::ResidentSet<R> {
         self.editor.residency()
     }
 

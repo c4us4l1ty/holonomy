@@ -200,9 +200,7 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
     loop {
         let (now_columns, now_rows) = size();
         let panel_lines = panel.clone().unwrap_or_default();
-        let surface_rows = now_rows
-            .saturating_sub(1 + panel_lines.len())
-            .max(1);
+        let surface_rows = now_rows.saturating_sub(1 + panel_lines.len()).max(1);
         app.surface_mut().resize(now_columns, surface_rows);
         app.resize(
             Fixed::units(now_columns as i64),
@@ -272,9 +270,7 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
                                 .verify()
                                 .ok()
                                 .map(|report| report.segments_verified);
-                            Some(
-                                Facts::gather(app.residency(), document, verified).lines(),
-                            )
+                            Some(Facts::gather(app.residency(), document, verified).lines())
                         };
                         continue;
                     }

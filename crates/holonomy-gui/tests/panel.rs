@@ -28,7 +28,10 @@ impl Drop for Temp {
 
 fn temp_path() -> Temp {
     let id = generate_container_id().expect("entropy");
-    let suffix = id.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let suffix = id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     Temp(std::env::temp_dir().join(format!("holonomy-panel-{suffix}.wavefunction")))
 }
 
@@ -45,13 +48,17 @@ impl SegmentSource for Pages {
 #[test]
 fn the_panel_reports_what_the_resident_set_holds() {
     let path = temp_path();
-    let document = Document::create_with(&path.0, PASSPHRASE, store::test_params())
-        .expect("creates");
+    let document =
+        Document::create_with(&path.0, PASSPHRASE, store::test_params()).expect("creates");
     let mut residency = ResidentSet::new(Pages(10), 64 * 1024, 256).expect("a budget");
 
     let empty = Facts::gather(&residency, &document, None);
     assert_eq!(empty.resident_bytes, 0);
-    assert!(empty.resident_line().contains("0 B"), "{}", empty.resident_line());
+    assert!(
+        empty.resident_line().contains("0 B"),
+        "{}",
+        empty.resident_line()
+    );
 
     residency.fault_in(SegmentId::new(0)).expect("faults in");
     let held = Facts::gather(&residency, &document, None);
@@ -71,21 +78,33 @@ fn the_panel_reports_what_the_resident_set_holds() {
 #[test]
 fn the_panel_reports_the_files_own_numbers() {
     let path = temp_path();
-    let document = Document::create_with(&path.0, PASSPHRASE, store::test_params())
-        .expect("creates");
+    let document =
+        Document::create_with(&path.0, PASSPHRASE, store::test_params()).expect("creates");
     let residency = ResidentSet::new(Pages(8), 64 * 1024, 0).expect("a budget");
 
     let fresh = Facts::gather(&residency, &document, None);
     assert_eq!(fresh.segments, document.segment_count());
     assert_eq!(fresh.witnesses, document.witness_count());
-    assert!(fresh.worldline_line().contains("0 segments"), "{}", fresh.worldline_line());
-    assert!(fresh.worldline_line().contains("not verified"), "{}", fresh.worldline_line());
+    assert!(
+        fresh.worldline_line().contains("0 segments"),
+        "{}",
+        fresh.worldline_line()
+    );
+    assert!(
+        fresh.worldline_line().contains("not verified"),
+        "{}",
+        fresh.worldline_line()
+    );
     assert!(fresh.recovery_line().contains("nothing"));
 
     // A real authentication, and the panel must say what it verified — not that it verified.
     let report = document.verify().expect("the file authenticates");
     let verified = Facts::gather(&residency, &document, Some(report.segments_verified));
-    assert_eq!(verified.verified_segments, Some(0), "genesis has no segment bodies");
+    assert_eq!(
+        verified.verified_segments,
+        Some(0),
+        "genesis has no segment bodies"
+    );
     assert!(
         verified.worldline_line().contains("verified 0"),
         "{}",
@@ -100,8 +119,8 @@ fn the_lock_claim_is_the_rungs_own_and_never_a_constant() {
     // The probe is real: whatever this machine achieves is what the panel will show.
     let probed = probe_capability();
     let path = temp_path();
-    let document = Document::create_with(&path.0, PASSPHRASE, store::test_params())
-        .expect("creates");
+    let document =
+        Document::create_with(&path.0, PASSPHRASE, store::test_params()).expect("creates");
     let residency = ResidentSet::new(Pages(8), 64 * 1024, 0).expect("a budget");
     let facts = Facts::gather(&residency, &document, None);
     assert_eq!(facts.capability, probed, "the panel must probe, not assume");
@@ -120,7 +139,10 @@ fn the_lock_claim_is_the_rungs_own_and_never_a_constant() {
         facts.capability = rung;
         let line = facts.lock_line();
         assert!(line.contains(rung.claim()), "{line}");
-        assert!(!seen.contains(&line), "two rungs rendered the same claim: {line}");
+        assert!(
+            !seen.contains(&line),
+            "two rungs rendered the same claim: {line}"
+        );
         seen.push(line);
     }
     assert!(
@@ -136,5 +158,9 @@ fn the_panel_never_claims_more_than_its_bytes() {
     assert_eq!(human(0), "0 B");
     assert_eq!(human(1023), "1023 B");
     assert_eq!(human(1024), "1 KiB");
-    assert_eq!(human(1024 * 1024 - 1), "1023.9 KiB", "no rounding up into a lie");
+    assert_eq!(
+        human(1024 * 1024 - 1),
+        "1023.9 KiB",
+        "no rounding up into a lie"
+    );
 }
