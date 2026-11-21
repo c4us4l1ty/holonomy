@@ -195,7 +195,6 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
     let mut unsaved = false;
     let mut message = String::new();
     let mut panel: Option<Vec<String>> = None;
-    let mut verified: Option<u64> = None;
     print!("\x1b[?25l\x1b[2J");
     loop {
         let (now_columns, now_rows) = size();
@@ -266,7 +265,7 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
                         } else {
                             // A full authentication is what "verified" may claim, so it is asked
                             // for when the panel opens — never assumed.
-                            verified = document
+                            let verified = document
                                 .verify()
                                 .ok()
                                 .map(|report| report.segments_verified);
