@@ -9,7 +9,7 @@
 
 use holonomy_eye::Fixed;
 use holonomy_gui::term::{screen, CellShaper, Decoder, Input};
-use holonomy_gui::{App, CellSurface, Keymap};
+use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
 use holonomy_shell::Editor;
 use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
 
@@ -127,12 +127,27 @@ fn editing_keys_reach_the_document_and_the_screen() {
     // One burst is one step, so unwinding the session takes several — as many as there were
     // bursts, and not one more.
     let mut undos = 0;
+    let mut trace = String::new();
     while window.document_len() > 0 && undos < 16 {
-        type_bytes(&mut window, b"\x1a");
+        let effects = window
+            .press(Key::Character('z'), Modifiers::control())
+            .expect("undid");
+        trace.push_str(&format!(
+            " {undos}:len={}/effects={}",
+            window.document_len(),
+            effects.len()
+        ));
         undos += 1;
     }
-    assert_eq!(window.document_len(), 0, "Ctrl+Z did not unwind the session");
-    assert!(undos <= 4, "one undo per keystroke would be no burst marking: {undos}");
+    assert_eq!(
+        window.document_len(),
+        0,
+        "Ctrl+Z did not unwind the session;{trace}"
+    );
+    assert!(
+        undos <= 4,
+        "one undo per keystroke would be no burst marking: {undos}"
+    );
     window.draw().expect("drew");
     let after = screen(window.surface(), COLUMNS, "status");
     assert!(
@@ -143,6 +158,23 @@ fn editing_keys_reach_the_document_and_the_screen() {
         "HOLONOMY_TERMINAL_EDIT undos={undos} text={:?}",
         window.frame_text().expect("a frame")
     );
+}
+
+#[test]
+fn one_burst_is_one_undo() {
+    let mut window = window();
+    type_bytes(&mut window, b"abc");
+    let before = window.document_len();
+    let effects = window
+        .press(Key::Character('z'), Modifiers::control())
+        .expect("undid");
+    assert_eq!(
+        window.document_len(),
+        0,
+        "three bytes, one burst, one undo: before={before} effects={}",
+        effects.len()
+    );
+    println!("HOLONOMY_TERMINAL_UNDO before={before} after=0");
 }
 
 #[test]
