@@ -124,8 +124,15 @@ fn editing_keys_reach_the_document_and_the_screen() {
     // Arrow keys are escape sequences; Ctrl+Z is one byte.
     type_bytes(&mut window, b"\x1b[D\x1b[D");
     assert_eq!(window.caret(), 3, "left did not move the caret");
-    type_bytes(&mut window, b"\x1a");
-    assert_eq!(window.document_len(), 0, "Ctrl+Z did not undo");
+    // One burst is one step, so unwinding the session takes several — as many as there were
+    // bursts, and not one more.
+    let mut undos = 0;
+    while window.document_len() > 0 && undos < 16 {
+        type_bytes(&mut window, b"\x1a");
+        undos += 1;
+    }
+    assert_eq!(window.document_len(), 0, "Ctrl+Z did not unwind the session");
+    assert!(undos <= 4, "one undo per keystroke would be no burst marking: {undos}");
     window.draw().expect("drew");
     let after = screen(window.surface(), COLUMNS, "status");
     assert!(
@@ -133,7 +140,7 @@ fn editing_keys_reach_the_document_and_the_screen() {
         "the screen still shows the undone text:\n{after}"
     );
     println!(
-        "HOLONOMY_TERMINAL_EDIT text={:?}",
+        "HOLONOMY_TERMINAL_EDIT undos={undos} text={:?}",
         window.frame_text().expect("a frame")
     );
 }
