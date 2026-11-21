@@ -207,6 +207,13 @@ pub struct Editor<S, R: SegmentSource, H> {
     scroll: Fixed,
     view: View,
     selection: Selection,
+    /// The spine's length when the measured index was last brought in step with it (D-50).
+    ///
+    /// Leaf *counts* cannot tell a tail append from a mid-document insert: both add one leaf. What
+    /// tells them apart is where the new leaf begins — at the byte where the document used to end,
+    /// or before it. This records that byte, so `sync_measured` can answer the question instead of
+    /// guessing.
+    len_synced: u64,
 }
 
 impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
@@ -222,7 +229,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         width: Fixed,
         viewport: Fixed,
     ) -> Self {
-        let measured = Measured::new(typing.spine().slab_count() as usize);
+        let leaves = typing.spine().slab_count() as usize;
+        let len = typing.spine().len();
+        let measured = Measured::new(leaves);
         Self {
             typing,
             residency,
@@ -234,6 +243,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             scroll: Fixed::ZERO,
             view: View::IDENTITY,
             selection: Selection::caret(0),
+            len_synced: len,
         }
     }
 
@@ -332,7 +342,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     pub fn resize(&mut self, width: Fixed, viewport: Fixed) {
         if width != self.width {
             // Every measured height and every carried line offset described the old wrap.
-            self.measured = Measured::new(self.typing.spine().slab_count() as usize);
+            let leaves = self.typing.spine().slab_count() as usize;
+            self.measured = Measured::new(leaves);
+            self.len_synced = self.typing.spine().len();
             self.scroll = Fixed::ZERO;
         }
         self.width = width;
@@ -627,10 +639,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let Some(leaf) = self.leaf_of(probe) else {
                 continue;
             };
-            let Some(span) = self.typing.spine().slab_span(leaf as u32) else {
+            let Some((start, end)) = self.leaf_bounds(leaf) else {
                 continue;
             };
-            let (start, end) = (span.offset(), span.offset() + span.len());
             let carried = self.measured.carry(leaf);
             let read = self.read(start, end)?;
             let (text, from) = leaf_text(read.text(), start, carried);
@@ -669,13 +680,24 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         if count == 0 {
             return None;
         }
+        let draft = self.typing.draft();
         let mut low = 0u32;
         let mut high = count;
         while low < high {
             let mid = low + (high - low) / 2;
             match self.typing.spine().slab_span(mid) {
-                Some(span) if span.offset() + span.len() <= at => low = mid + 1,
-                Some(_) => high = mid,
+                // `at` is a **live** offset, and a leaf's live extent is the draft's answer, not
+                // the slab's: an open leaf holding more bytes than it registered moves every leaf
+                // after it, and one holding fewer pulls them left (D-51). Comparing a live offset
+                // with sealed geometry sent a caret in the open leaf to the wrong leaf, so
+                // `reveal_caret` looked for it in a line that did not hold it.
+                Some(span) => {
+                    if draft.live_offset(span.offset() + span.len()) <= at {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
                 None => break,
             }
         }
@@ -707,6 +729,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     pub fn reflow(&mut self) -> Result<(), ShellError> {
         let leaves = self.typing.spine().slab_count();
         self.measured = Measured::new(leaves as usize);
+        self.len_synced = self.typing.spine().len();
         let mut carried = Carry::default();
         for leaf in 0..leaves {
             let (height, next) = self.measure_leaf(leaf, carried)?;
@@ -903,14 +926,30 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// heights described a document that no longer exists, and the next frame is provisional.
     fn sync_measured(&mut self) {
         let leaves = self.typing.spine().slab_count() as usize;
+        let len = self.typing.spine().len();
         if self.measured.len() == leaves {
+            self.len_synced = len;
             return;
         }
+        // D-50: an append is only a **tail** append when the new leaf is the document's last one
+        // *and* it begins where the document used to end. Counting leaves cannot tell that from a
+        // caret moved into sealed text and typed into — both add one leaf — and the index used to
+        // take the second for the first: every measured height after the caret stayed on a leaf
+        // that had moved, and the odd leaf past the end of the index was never measured at all.
         if leaves == self.measured.len() + 1 {
-            self.measured.push();
-            return;
+            let appended_at_tail = self
+                .typing
+                .spine()
+                .slab_span((leaves - 1) as u32)
+                .is_some_and(|span| span.offset() == self.len_synced);
+            if appended_at_tail {
+                self.measured.push();
+                self.len_synced = len;
+                return;
+            }
         }
         self.measured = Measured::new(leaves);
+        self.len_synced = len;
     }
 
     /// The window to shape: its byte range, the leaves the index says are on screen, and whether
@@ -1079,15 +1118,23 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Some((span.offset(), span.offset() + span.len()))
     }
 
-    /// The live byte range of leaf `index`, or `None` past the end of the spine.
+    /// The **live** byte range of leaf `index`, or `None` past the end of the spine.
     ///
-    /// The open leaf's length is the draft's, not the registered one, so the range is asked for by
-    /// a byte inside it and only falls back to the registered geometry.
+    /// Both ends are the live document's, not the spine's. The spine's offsets are sealed and do not
+    /// move while a leaf is open, while every leaf after the open one *does* move by the difference
+    /// between its live length and its registered one (D-51). A caller that asked this for "where
+    /// does leaf 7 start" used to get a sealed offset and hand it to a live lookup, which is the
+    /// same mixed arithmetic that put a revealing caret on the wrong line.
     fn leaf_bounds(&self, index: usize) -> Option<(u64, u64)> {
         let span = self.typing.spine().slab_span(index as u32)?;
-        let start = span.offset();
-        self.leaf_range(start)
-            .or(Some((start, span.offset() + span.len())))
+        let draft = self.typing.draft();
+        let start = draft.live_offset(span.offset());
+        let end = match self.typing.spine().slab_span(index as u32 + 1) {
+            Some(next) => draft.live_offset(next.offset()),
+            // The last leaf runs to the document's end, which is where the open leaf's bytes are.
+            None => self.typing.document_len(),
+        };
+        Some((start, end))
     }
 
     /// Where the cluster before `at` begins, or `None` at the document's start.

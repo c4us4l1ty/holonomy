@@ -454,7 +454,23 @@ where
             self.editor.mark();
         }
         self.typing = typing;
-        let effects = self.editor.apply(intent)?;
+        let mut effects = self.editor.apply(intent)?;
+        // D-53: the caret a keystroke leaves behind is the window's to keep on screen, and nothing
+        // was doing it. A document longer than a screen scrolled nowhere, so typing past the last
+        // visible line moved the caret to a row that was never painted and the screen stopped
+        // following the person typing. The shell already has the policy (the smallest scroll that
+        // shows the caret); the loop just never asked for it.
+        // Best effort: the edit has already landed, and a leaf the reader could not lay out is the
+        // *frame's* problem. Propagating it here would report a keystroke that reached the document
+        // as a refused edit — the same lie D-47 was about, one layer down.
+        if matches!(intent, Intent::Type(_) | Intent::Backspace | Intent::DeleteForward)
+            && self.editor.reveal_caret().unwrap_or(false)
+        {
+            if !effects.contains(&Effect::Redraw) {
+                effects.push(Effect::Redraw);
+            }
+            self.dirty = true;
+        }
         if !effects.is_empty() {
             self.dirty = true;
         }
@@ -467,10 +483,20 @@ where
     ///
     /// [`GuiError`] when the editor refuses the resize.
     pub fn resize(&mut self, width: Fixed, height: Fixed) -> Result<Vec<Effect>, GuiError> {
+        // A different **width** is a different geometry: the shell empties its measured index,
+        // because every height described the old wrap. It does not re-measure — that is a caller's
+        // policy — so a window that resized once could scroll no further than its first screen for
+        // the rest of the session (D-53). The window asks for the measurement it invalidated.
+        let width_changed = self.editor.width() != width;
         let effects = self.editor.apply(Intent::Resize {
             width,
             viewport: height,
         })?;
+        if width_changed {
+            // Best effort on purpose: a document the reader refuses is a provisional frame, not a
+            // dead window, and the refusal has already been reported by whatever drew it.
+            let _ = self.editor.reflow();
+        }
         if !effects.is_empty() {
             self.dirty = true;
         }
@@ -496,6 +522,16 @@ where
     /// show (AUDIT D-41).
     pub fn document_len(&mut self) -> u64 {
         self.editor.document_len()
+    }
+
+    /// Whether the document holds bytes the file does not have yet — what "unsaved" means.
+    ///
+    /// This is read from the session, not remembered in a flag: a caret move **seals** the open
+    /// leaf, so an arrow key commits what was typed, and a window that tracked "unsaved" itself
+    /// said the opposite of the truth about bytes that already had a witness (D-47).
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        !self.editor.typing().pending().is_empty()
     }
 
     /// The selection, as ordered ends, when it is not empty.

@@ -11,13 +11,15 @@
 //! through the same commit path the L-6 rehearsal measures.
 //!
 //! Keys: printable text types; arrows, Home, End, PageUp and PageDown move the caret (hold shift to
-//! extend); `Ctrl+Z` undoes a burst, `Ctrl+Shift+Z` or `Ctrl+Y` redoes; `Ctrl+A` selects all;
-//! `Ctrl+S` saves now; `Ctrl+Q` or `Ctrl+C` saves and quits.
+//! extend); `Ctrl+Z` undoes a burst and `Ctrl+Y` redoes one; `Ctrl+A` selects all; `Ctrl+S` saves
+//! now; `Ctrl+Q` or `Ctrl+C` saves and quits. A terminal sends `Ctrl+Shift+Z` as the same byte as
+//! `Ctrl+Z`, so `Ctrl+Y` is the redo this window can actually offer (D-45).
 //!
-//! What is still not here: the GPU backend (M4b-ii — it needs crates this environment cannot
-//! fetch), chrome and the security panel (M6), and the remaining gates (M7). What *is* here is the
-//! thing the question in `docs/TO-APP.md` asked: you can open the app and start writing, and what
-//! you write is still there when you open it again.
+//! `Ctrl+G` asks the document for the security panel: what is resident, how the memory is locked,
+//! what the file itself says. What is still not here: the GPU backend (M4b-ii — it needs crates
+//! this environment cannot fetch) and the blocks after this one. What *is* here is the thing the
+//! question in `docs/TO-APP.md` asked: you can open the app and start writing, and what you write
+//! is still there when you open it again.
 
 use holonomy_eye::Fixed;
 use holonomy_gui::panel::Facts;
@@ -32,6 +34,11 @@ use std::path::{Path, PathBuf};
 
 /// How long a pause counts as a pause, for the autosave.
 const PAUSE_MILLIS: i32 = 1_500;
+
+/// How long a begun escape sequence waits for its remaining bytes before a lone `ESC` is taken as
+/// the Escape key. A terminal may split `ESC [ A` across reads; 25 ms is longer than a local write
+/// and shorter than a person notices (D-46).
+const ESCAPE_GRACE_MILLIS: i32 = 25;
 
 type Window = App<store::DocumentSink, store::DocumentSource, CellShaper, CellSurface>;
 
@@ -144,13 +151,19 @@ fn window(
     let spine = document.spine()?;
     let residency = ResidentSet::new(document.source(), store::BUDGET, store::SLACK)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let editor = Editor::new(
+    let mut editor = Editor::new(
         Typing::resume(document.sink(), spine, store::CAPACITY),
         residency,
         CellShaper,
         Fixed::units(columns as i64),
         Fixed::units(rows as i64),
     );
+    // D-53: nothing measured the document, so the scroll limit was the first screen and Page Down
+    // could not leave it. `Editor::reflow` is written for exactly this moment — it faults one leaf
+    // at a time, so opening a long document costs its leaf count and not its text — and no caller
+    // was making it. A document that cannot be measured yet is still openable, so a refusal here is
+    // the frame's answer, not the window's: the panel reports what a reader can see.
+    let _ = editor.reflow();
     Ok(App::new(
         editor,
         Keymap::new(Fixed::units(rows as i64)),
@@ -159,6 +172,11 @@ fn window(
 }
 
 /// What the status line says.
+///
+/// `unsaved` is read from the session (`App::has_pending`), not remembered: a caret move seals the
+/// open leaf, so an arrow key *writes* the bytes, and the window used to say "unsaved" about text
+/// that already had a witness while saying nothing about bytes a refused save had left behind
+/// (D-47).
 fn status(path: &Path, document: &Document, bytes: u64, unsaved: bool, message: &str) -> String {
     let name = path.file_name().map_or_else(
         || path.display().to_string(),
@@ -176,6 +194,40 @@ fn status(path: &Path, document: &Document, bytes: u64, unsaved: bool, message: 
     )
 }
 
+/// How a session ended — which is what the window says on the way out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// Nothing was left open, so there was nothing to write.
+    NothingToWrite,
+    /// Everything open was sealed and committed.
+    Saved,
+    /// The last save was refused: the bytes are in memory and the file does not have them.
+    SaveFailed,
+}
+
+/// How the session ended, in the window's own words.
+///
+/// The first version printed "saved" whenever the run itself returned `Ok` — and the final save's
+/// result was thrown away (`let _ = save(...)`), so a session whose last append failed said it had
+/// saved (D-49). The save's answer is now part of the sentence.
+fn closing(path: &Path, segments: u64, witnesses: u64, outcome: &str) -> String {
+    format!(
+        "{}: {segments} segments, {witnesses} witnesses, {outcome}",
+        path.display()
+    )
+}
+
+/// What to say about a run that ended: the failure, the failed save, or the plain truth.
+fn outcome_words(ended_badly: bool, final_save: Option<bool>) -> &'static str {
+    if ended_badly {
+        return "the session ended badly";
+    }
+    match final_save {
+        Some(false) => "the last save failed — the bytes after the last witness are in memory only",
+        Some(true) | None => "saved",
+    }
+}
+
 /// Saves now: the same intent `Ctrl+S` produces, so the commit path is the keymap's.
 fn save(app: &mut Window) -> bool {
     match app.press(Key::Character('s'), Modifiers::control()) {
@@ -184,7 +236,7 @@ fn save(app: &mut Window) -> bool {
     }
 }
 
-fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error>> {
+fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Error>> {
     let (columns, rows) = size();
     let text_rows = rows.saturating_sub(1).max(1);
     let mut app = window(document, columns, text_rows)?;
@@ -192,13 +244,14 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
     let mut stdout = std::io::stdout();
     let mut decoder = Decoder::new();
     let mut bytes = [0u8; 256];
-    let mut unsaved = false;
     let mut message = String::new();
     let mut panel: Option<Vec<String>> = None;
     print!("\x1b[?25l\x1b[2J");
     loop {
         let (now_columns, now_rows) = size();
-        let panel_lines = panel.clone().unwrap_or_default();
+        // The panel gives way, never the surface: `1 + panel + 1` lines that do not fit make the
+        // terminal scroll, and then the caret the renderer places is a row off (D-48).
+        let panel_lines = term::panel_fits(&panel.clone().unwrap_or_default(), now_rows);
         let surface_rows = now_rows.saturating_sub(1 + panel_lines.len()).max(1);
         app.surface_mut().resize(now_columns, surface_rows);
         app.resize(
@@ -210,7 +263,7 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
             path,
             document,
             app.document_len(),
-            unsaved,
+            app.has_pending(),
             message.as_str(),
         );
         write!(
@@ -225,8 +278,7 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
 
         // A pause is a save: nothing is lost if the machine dies between keystrokes.
         if !readable(PAUSE_MILLIS) {
-            if unsaved && save(&mut app) {
-                unsaved = false;
+            if app.has_pending() && save(&mut app) {
                 message.clear();
             }
             continue;
@@ -235,14 +287,13 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
         if read == 0 {
             break;
         }
-        let mut inputs = Vec::new();
-        for byte in &bytes[..read] {
-            if let Some(input) = decoder.feed(*byte) {
-                inputs.push(input);
-            }
+        let mut inputs = decoder.feed_all(&bytes[..read]);
+        // A read can end mid-sequence: `ESC` may be the Escape key or the start of an arrow the
+        // terminal is still delivering. Only a stream that stays quiet for the grace period settles
+        // it — flushing eagerly typed `[A` into the document (D-46).
+        if decoder.pending() && !readable(ESCAPE_GRACE_MILLIS) {
+            inputs.extend(decoder.flush_escape());
         }
-        // A read that ends mid-sequence leaves a lone Escape behind: deliver it.
-        inputs.extend(decoder.flush_escape());
         let mut quit = false;
         for input in inputs {
             let Input::Key(key, modifiers) = input else {
@@ -255,8 +306,11 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
                         continue;
                     }
                     Key::Character('s') => {
-                        unsaved = !save(&mut app);
-                        message.clear();
+                        if !save(&mut app) {
+                            message = "the save was refused".to_owned();
+                        } else {
+                            message.clear();
+                        }
                         continue;
                     }
                     Key::Character('g') => {
@@ -276,7 +330,6 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
                     _ => {}
                 }
             }
-            unsaved = true;
             if app.press(key, modifiers).is_err() {
                 // A refused intent is not a crashed session: say so and keep the buffer.
                 message = "the world-line refused the last edit".to_owned();
@@ -286,11 +339,15 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
             break;
         }
     }
-    // Seal whatever is open before the window goes away: a quit is a save.
-    if unsaved || app.document_len() > 0 {
-        let _ = save(&mut app);
-    }
-    Ok(())
+    // Seal whatever is open before the window goes away: a quit is a save, and whether it worked is
+    // part of what the window says on the way out (D-49).
+    Ok(if !app.has_pending() {
+        Ended::NothingToWrite
+    } else if save(&mut app) {
+        Ended::Saved
+    } else {
+        Ended::SaveFailed
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -327,15 +384,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!(
-        "{}: {} segments, {} witnesses, {}",
-        path.display(),
-        segments,
-        witnesses,
-        if outcome.is_ok() {
-            "saved"
-        } else {
-            "the session ended badly"
-        }
+        "{}",
+        closing(
+            &path,
+            segments,
+            witnesses,
+            outcome_words(
+                outcome.is_err(),
+                match outcome {
+                    Ok(Ended::SaveFailed) => Some(false),
+                    Ok(Ended::Saved) => Some(true),
+                    Ok(Ended::NothingToWrite) | Err(_) => None,
+                }
+            )
+        )
     );
-    outcome
+    if matches!(outcome, Ok(Ended::SaveFailed)) {
+        // A window that could not write must not exit as though it had.
+        std::process::exit(1);
+    }
+    outcome.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_save_is_never_called_saved() {
+        // D-49: the window used to print "saved" whenever the run returned `Ok`, and the final
+        // save's own answer was dropped on the floor.
+        assert_eq!(outcome_words(false, Some(true)), "saved");
+        assert_eq!(outcome_words(false, None), "saved");
+        assert!(
+            outcome_words(false, Some(false)).contains("failed"),
+            "a refused save must say so"
+        );
+        assert!(
+            outcome_words(true, Some(false)).contains("ended badly"),
+            "a dead session outranks a failed save"
+        );
+        let line = closing(Path::new("/tmp/notes.wavefunction"), 3, 4, "saved");
+        assert!(line.contains("3 segments"), "{line}");
+        assert!(line.contains("4 witnesses"), "{line}");
+    }
 }

@@ -141,6 +141,34 @@ impl Decoder {
         }
     }
 
+    /// Whether a sequence has begun and is still incomplete.
+    ///
+    /// The window asks this before flushing a lone `ESC` as the Escape key: if more bytes are on
+    /// their way, `ESC` is the first byte of an arrow, not a key press (D-46).
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        self.escape.is_some()
+    }
+
+    /// One read's bytes, as keys, without deciding anything about a trailing `ESC`.
+    ///
+    /// The subtlety this exists for: a terminal delivers a sequence in as many writes as the kernel
+    /// and the network feel like, so `ESC` can arrive in one read and `[A` in the next. Flushing a
+    /// lone `ESC` after every read — which the window did until D-46 — therefore *types the rest of
+    /// the sequence into the document*: press Up over ssh and get `[A` at the caret. So the window
+    /// feeds the read here, asks [`Self::pending`], and calls [`Self::flush_escape`] only when no
+    /// more bytes are waiting.
+    #[must_use]
+    pub fn feed_all(&mut self, bytes: &[u8]) -> Vec<Input> {
+        let mut inputs = Vec::new();
+        for byte in bytes {
+            if let Some(input) = self.feed(*byte) {
+                inputs.push(input);
+            }
+        }
+        inputs
+    }
+
     /// Bytes that were only an escape: the Escape key.
     ///
     /// A lone `ESC` is indistinguishable from the start of a sequence until the read blocks, so the
@@ -157,14 +185,24 @@ impl Decoder {
 }
 
 /// A control byte: the letters a terminal maps `Ctrl+letter` onto, and the two line keys.
+///
+/// Two of these are not letters at all, and both were missing until D-44 and D-45:
+///
+/// * `0x08` is `Ctrl+H`, and a terminal whose `stty erase` is `^H` sends it for the backspace key.
+///   Every other terminal sends `0x7f`, and the passphrase prompt already accepted both — the
+///   editor did not, so on such a terminal backspace did nothing at all.
+/// * `0x19` is `Ctrl+Y`, the redo key the window documents. Without it the only reachable redo was
+///   `Ctrl+Shift+Z`, which a terminal cannot tell apart from `Ctrl+Z` (both arrive as `0x1a`).
 fn control(byte: u8) -> Input {
     match byte {
         0x01 => Input::Key(Key::Character('a'), Modifiers::control()),
         0x03 => Input::Key(Key::Character('c'), Modifiers::control()),
+        0x08 => Input::Key(Key::Backspace, Modifiers::none()),
         0x09 => Input::Key(Key::Character('\t'), Modifiers::none()),
         0x0a | 0x0d => Input::Key(Key::Enter, Modifiers::none()),
         0x11 => Input::Key(Key::Character('q'), Modifiers::control()),
         0x13 => Input::Key(Key::Character('s'), Modifiers::control()),
+        0x19 => Input::Key(Key::Character('y'), Modifiers::control()),
         0x1a => Input::Key(Key::Character('z'), Modifiers::control()),
         0x1b => Input::Key(Key::Escape, Modifiers::none()),
         _ => Input::Ignored,
@@ -224,6 +262,21 @@ fn interpret(sequence: &[u8]) -> Input {
 #[must_use]
 pub fn screen(surface: &CellSurface, columns: usize, status: &str) -> String {
     screen_with(surface, columns, &[], status)
+}
+
+/// How many panel lines fit above a surface and a status line in a terminal `rows` high.
+///
+/// The window used to compute `rows - 1 - panel.len()` and clamp the surface to one row, which is
+/// fine until the panel is as tall as the terminal: then the frame is `1 + panel + 1` lines and the
+/// terminal **scrolls** on every repaint, so the caret the renderer has just placed is one row off
+/// and the screen shivers once a second (D-48). The panel is the thing that gives way — truncating
+/// it from the bottom, where the least pressing line is — and the arithmetic is kept here, next to
+/// the renderer that must not scroll.
+#[must_use]
+pub fn panel_fits(panel: &[String], rows: usize) -> Vec<String> {
+    // One row for the surface at least, one for the status line: everything else is panel.
+    let room = rows.saturating_sub(2);
+    panel.iter().take(room).cloned().collect()
 }
 
 /// The screen with a panel above the status line — what `Ctrl+G` draws.
@@ -333,6 +386,80 @@ mod tests {
         );
         // A sequence nobody uses is ignored, not misread.
         assert_eq!(keys(b"\x1b[99~"), vec![Input::Ignored]);
+    }
+
+    #[test]
+    fn backspace_arrives_as_either_byte_a_terminal_sends() {
+        // D-44: `^H` is what a terminal with `stty erase ^H` sends; the prompt always accepted it,
+        // the editor did not, so backspace deleted nothing on such a terminal.
+        let erased = vec![Input::Key(Key::Backspace, Modifiers::none())];
+        assert_eq!(keys(b"\x08"), erased);
+        assert_eq!(keys(b"\x7f"), erased);
+    }
+
+    #[test]
+    fn ctrl_y_is_redo_and_ctrl_shift_z_cannot_be_told_apart() {
+        // D-45: the window documents Ctrl+Y as redo. It was not decoded at all, and Ctrl+Shift+Z
+        // arrives as 0x1a — the same byte as Ctrl+Z — so Ctrl+Y is the only redo a tty can offer.
+        assert_eq!(
+            keys(b"\x19"),
+            vec![Input::Key(Key::Character('y'), Modifiers::control())]
+        );
+        assert_eq!(
+            keys(b"\x1a"),
+            vec![Input::Key(Key::Character('z'), Modifiers::control())]
+        );
+    }
+
+    #[test]
+    fn a_sequence_split_across_reads_is_a_sequence_not_text() {
+        // D-46: the window used to flush a lone ESC after every read, so an arrow key delivered in
+        // two writes became Escape, then `[`, then `A` — three keys, two of them typed into the
+        // document. This is the window's own rule, exercised: feed, and flush only if the stream is
+        // quiet (the caller has already waited a grace period when it says so).
+        let (mut decoder, first) = decoder_receiving(b"\x1b", false);
+        assert!(first.is_empty(), "the rest of the sequence is on its way");
+        assert!(decoder.pending(), "the sequence must still be open");
+        assert_eq!(
+            decoder.feed_all(b"[A"),
+            vec![Input::Key(Key::Up, Modifiers::none())],
+            "the second read completed the arrow"
+        );
+        assert!(!decoder.pending());
+
+        // A quiet stream still turns a lone ESC into the Escape key.
+        let (decoder, inputs) = decoder_receiving(b"\x1b", true);
+        assert_eq!(inputs, vec![Input::Key(Key::Escape, Modifiers::none())]);
+        assert!(!decoder.pending());
+    }
+
+    /// One read, with the window's rule: a started sequence is flushed only when the stream has
+    /// gone quiet; `quiet` is the caller's answer to "did no byte arrive during the grace period?".
+    fn decoder_receiving(bytes: &[u8], quiet: bool) -> (Decoder, Vec<Input>) {
+        let mut decoder = Decoder::new();
+        let mut inputs = decoder.feed_all(bytes);
+        if quiet && decoder.pending() {
+            inputs.extend(decoder.flush_escape());
+        }
+        (decoder, inputs)
+    }
+
+    #[test]
+    fn a_panel_never_outgrows_the_terminal() {
+        // D-48: `1 + panel + 1` lines must fit `rows`, or the terminal scrolls and the caret lands
+        // one row off on every repaint.
+        let panel: Vec<String> = (0..6).map(|index| format!("line {index}")).collect();
+        for rows in 1..=10usize {
+            let fitted = panel_fits(&panel, rows);
+            assert!(
+                1 + fitted.len() + 1 <= rows.max(2),
+                "{rows} rows held {} panel lines",
+                fitted.len()
+            );
+            assert_eq!(fitted, panel[..fitted.len()], "the panel keeps its top lines");
+        }
+        assert_eq!(panel_fits(&panel, 10).len(), 6, "a tall terminal keeps it all");
+        assert_eq!(panel_fits(&panel, 6).len(), 4, "rows - 1 surface - 1 status");
     }
 
     #[test]

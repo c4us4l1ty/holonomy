@@ -63,6 +63,13 @@ impl SegmentSink for Store {
     }
 }
 
+impl Store {
+    /// What reached the world-line, one entry per append.
+    fn segments(&self) -> Vec<Vec<u8>> {
+        self.0.lock().expect("a lock").clone()
+    }
+}
+
 impl SegmentSource for Store {
     fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
         let segments = self.0.lock().expect("a lock");
@@ -82,14 +89,26 @@ const SCALE: i64 = 4;
 type Window = App<Store, Store, Fake, CellSurface>;
 
 fn window() -> Window {
+    window_with_store().0
+}
+
+/// The window and the world-line behind it, for a test that wants to see what reached the sink.
+fn window_with_store() -> (Window, Store) {
     let store = Store::default();
     let residency = ResidentSet::new(store.clone(), 256, 0).expect("a workable budget");
-    let editor = Editor::new(Typing::new(store, 64), residency, Fake, WIDTH, VIEWPORT);
-    App::new(
+    let editor = Editor::new(
+        Typing::new(store.clone(), 64),
+        residency,
+        Fake,
+        WIDTH,
+        VIEWPORT,
+    );
+    let window = App::new(
         editor,
         Keymap::new(VIEWPORT),
         CellSurface::new(CCLS, ROWS, SCALE),
-    )
+    );
+    (window, store)
 }
 
 /// Writes the open bytes through, which is also what makes them visible in a frame today
@@ -161,7 +180,8 @@ fn typing_reaches_the_surface_after_the_bytes_are_written_through() {
 /// re-measures the leaf it is typed into. A user would type and see nothing — the first thing a
 /// window must never do — which is why this is a blocker for M4 rather than a footnote on it.
 ///
-/// The numbers are in the failure message: run `cargo test -p holonomy-gui --test keys -- --ignored`.
+/// The numbers are in the failure message: run
+/// `cargo test -p holonomy-gui --test keys -- --ignored`.
 #[test]
 fn typing_is_visible_before_the_bytes_are_written_through() {
     let mut window = window();
@@ -280,4 +300,81 @@ fn shortcuts_are_the_loops_own() {
         .expect("pressed");
     assert!(effects.is_empty(), "escape edited the document");
     println!("HOLONOMY_WINDOW_KEYS applied=13");
+}
+
+#[test]
+fn an_arrow_key_writes_the_bytes_so_the_document_is_not_unsaved() {
+    // D-47: the window kept its own "unsaved" flag and set it on **every** key. But a caret move
+    // seals the open leaf — one append, one witness — so after an arrow key the bytes were durable
+    // and the status line still said "unsaved", while a document whose save had been refused could
+    // show "saved". The truth is in the session: `has_pending`.
+    let (mut window, store) = window_with_store();
+    type_keys(&mut window, "abc");
+    assert!(window.has_pending(), "typed bytes are open");
+    assert_eq!(
+        window.editor().typing().pending(),
+        b"abc".as_slice(),
+        "the open bytes"
+    );
+    assert!(store.segments().is_empty(), "typing must not write before a seal");
+
+    window
+        .press(Key::Left, Modifiers::none())
+        .expect("the caret moved");
+    assert!(
+        !window.has_pending(),
+        "the move sealed the leaf, so nothing is pending"
+    );
+    assert_eq!(
+        store.segments(),
+        vec![b"abc".to_vec()],
+        "the arrow key must have appended the leaf it sealed"
+    );
+
+    // A flush with nothing open is honest: it says saved and writes nothing.
+    let effects = window
+        .press(Key::Character('s'), Modifiers::control())
+        .expect("saved");
+    assert_eq!(effects, vec![holonomy_shell::Effect::Saved]);
+    assert_eq!(store.segments().len(), 1, "a flush with nothing open appended");
+    println!("HOLONOMY_WINDOW_PENDING segments={}", store.segments().len());
+}
+
+#[test]
+fn typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret() {
+    // D-53: nothing called `reveal_caret`, so the screen never followed the caret. The binary draws
+    // before it reads, so this does too — a frame measures the first screen, which is what a reveal
+    // needs to know how far down the document its leaf is (D-50's index).
+    let (mut window, store) = window_with_store();
+    type_keys(&mut window, "start\n");
+    window.draw().expect("drew");
+
+    let mut text = String::new();
+    for _ in 0..80 {
+        text.push_str("a\n");
+    }
+    type_keys(&mut window, &text);
+    let scrolled = window.editor().scroll();
+    assert!(
+        scrolled > Fixed::ZERO,
+        "nothing scrolled, so the screen cannot have followed the caret"
+    );
+
+    window.draw().expect("drew");
+    let (column, row) = window.surface().caret_cell().expect("a caret on screen");
+    assert!(
+        row < window.surface().rows(),
+        "the caret was placed on row {row} of {} — off screen",
+        window.surface().rows()
+    );
+    assert_eq!(column, 0, "each caret row begins at the line's first column");
+    assert!(row > 0, "the caret is not on the document's first row");
+    assert!(
+        store.segments().is_empty(),
+        "typing must not have forced a seal to move the screen"
+    );
+    println!(
+        "HOLONOMY_WINDOW_REVEAL caret_row={row} rows={}",
+        window.surface().rows()
+    );
 }

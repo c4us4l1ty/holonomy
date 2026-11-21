@@ -884,3 +884,46 @@ fn an_empty_document_frames_without_reading_anything() {
     assert!(!shell.delete_forward().expect("nothing to delete"));
     assert!(!shell.undo().expect("nothing to undo"));
 }
+
+#[test]
+fn typing_into_the_middle_of_a_sealed_document_remeasures_the_leaves_after_it() {
+    // D-50: `sync_measured` used to treat *any* one-leaf growth as a tail append and `push` a
+    // zero height. A caret moved into sealed text inserts its leaf where the caret is, so every
+    // measured height after the caret stayed on a leaf that had moved, and the document's own tail
+    // was a leaf the index never measured. Both are silent: the index is the spine's length.
+    let mut shell = session();
+    shell.type_text(&repeat_leaf().repeat(8)).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    let before = shell.heights().total();
+    assert_eq!(before, Fixed::units(80), "eight leaves, one line each");
+
+    // The caret goes into the middle of the first leaf, and a keystroke opens a leaf there.
+    shell
+        .move_caret_to(holonomy_shell::Move::DocumentStart, false)
+        .expect("moved");
+    for _ in 0..30 {
+        shell
+            .move_caret_to(holonomy_shell::Move::Right, false)
+            .expect("moved");
+    }
+    shell.type_text("X").expect("typed");
+
+    let frame = shell.frame().expect("a frame");
+    assert_eq!(frame.text().len(), 65, "the frame is a screen, not a leaf");
+    // The document is still nine lines — one per leaf, and the new leaf shares its line with the
+    // leaf it split. A pushed zero and stale heights after the caret put the total at 80 + one
+    // unmeasured line, which is what this catches.
+    let after = shell.heights().total();
+    assert_eq!(shell.heights().len(), 9, "one height per leaf");
+    assert!(
+        after > Fixed::ZERO && after <= Fixed::units(90),
+        "nine lines at most, and not a phantom row of zero: {after:?}"
+    );
+    // And the last leaf is measured, not left at the zero a tail `push` would have written.
+    let last = shell.heights().height(8);
+    assert!(
+        last > Fixed::ZERO,
+        "the document's last leaf was never laid out"
+    );
+}

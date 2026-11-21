@@ -232,6 +232,27 @@ impl Draft {
         out
     }
 
+    /// The live document offset of the leaf that begins at sealed offset `sealed` (D-51).
+    ///
+    /// Drafts are whole leaves and never overlap, so a sealed offset that is a leaf start has a
+    /// live offset that is the same arithmetic the queries do — summed over the edits entirely
+    /// before it. The reverse direction of [`Self::locate`], for a caller that knows which *leaf*
+    /// it means (a height, a carry, a measured top) and needs the bytes it now covers.
+    #[must_use]
+    pub fn live_offset(&self, sealed: u64) -> u64 {
+        let mut live = sealed;
+        for edit in &self.edits {
+            let sealed_len = u64::from(edit.slab.len());
+            // A leaf start cannot be inside a drafted leaf; anything at or after `sealed` has not
+            // contributed to the live position yet.
+            if edit.at.saturating_add(sealed_len) > sealed {
+                break;
+            }
+            live = live - sealed_len + edit.len;
+        }
+        live
+    }
+
     /// Where `offset` lands in the live document, or `None` past its end.
     #[must_use]
     pub fn locate(&self, spine: &Spine, offset: u64) -> Option<LiveHit> {
@@ -264,8 +285,8 @@ impl Draft {
     }
 }
 
-/// Appends the sealed run `sealed_start..sealed_end` (which occupies live `live_start..`) clipped to
-/// `start..end`, with every span's offset translated to live coordinates.
+/// Appends the sealed run `sealed_start..sealed_end` (which occupies live `live_start..`) clipped
+/// to `start..end`, with every span's offset translated to live coordinates.
 fn push_run(
     spine: &Spine,
     sealed_start: u64,
@@ -503,6 +524,40 @@ mod tests {
             .expect("in range")
             .span()
             .is_draft());
+    }
+
+    #[test]
+    fn a_sealed_leaf_start_maps_to_the_live_offset_that_holds_it() {
+        // D-51's arithmetic, pinned on its own: leaves at sealed 0/10/25/40 in a 50-byte spine,
+        // the second grown by ten and the fourth shrunk by six. Every live offset must land in the
+        // leaf that holds it, and the map must agree with `locate`, which walks the same edits.
+        let spine = Spine::from_slabs([slab(0, 10), slab(1, 15), slab(2, 15), slab(3, 10)]);
+        let mut draft = Draft::new();
+        draft.record(span_at(&spine, 10), 25).expect("records");
+        draft.record(span_at(&spine, 40), 4).expect("records");
+        let starts = [0u64, 10, 25, 40];
+        let ends = [10u64, 25, 40, 50];
+        let live: Vec<(u64, u64)> = starts
+            .iter()
+            .zip(ends.iter())
+            .map(|(&start, &end)| (draft.live_offset(start), draft.live_offset(end)))
+            .collect();
+        assert_eq!(live, vec![(0, 10), (10, 35), (35, 50), (50, 54)]);
+        let total = draft.document_len(&spine);
+        assert_eq!(total, 54);
+        for offset in 0..total {
+            let (start, end) = live
+                .iter()
+                .copied()
+                .find(|&(start, end)| start <= offset && offset < end)
+                .expect("the live leaves tile the document");
+            let hit = draft.locate(&spine, offset).expect("in range");
+            assert_eq!(
+                hit.span().offset(),
+                start,
+                "offset {offset} resolved to the wrong leaf"
+            );
+        }
     }
 
     #[test]
