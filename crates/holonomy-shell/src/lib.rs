@@ -1118,9 +1118,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let first = leaves.first();
         let measured = measure_window(&layout, text, &spans, start, end, document_end, head_whole);
         for (index, height, carry) in measured {
-            // The index has one entry per **sealed** leaf; the open tail's leaf has none until it
-            // is sealed, so its measurement is dropped here and taken again next frame rather than
-            // being written past the end of the index (AUDIT D-41).
+            // The index is sized to the **spine** — `sync_measured` re-sizes it whenever
+            // `slab_count` moves — so the open tail's leaf has an entry, and what it lacks is a
+            // measurement: it is written here by the frame that lays it out. The guard is for the
+            // window a frame can shape past the last leaf it measured, which is one short of the
+            // spine while the tail is still being typed (AUDIT D-41).
             if first + index >= self.measured.len() {
                 continue;
             }

@@ -934,11 +934,11 @@ fn a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it() {
     }
     shell.type_text("X").expect("typed");
     let _ = shell.frame().expect("a frame");
-    // Nine sealed leaves, and the byte holding "X" registered one more where the cut fell: the
-    // spine is eleven slabs. The *index* has ten, because the open leaf has no measurement until a
-    // frame draws it — `sync_measured` counts the spine, and the frame that just ran wrote what it
-    // could measure. So both numbers are right, about different things, and the assertion says
-    // which.
+    // Nine leaves, and the byte holding "X" registered one more where the cut fell: eleven slabs.
+    // The index is sized to the spine (`sync_measured` counts slabs, not seals), so it has eleven
+    // entries too — and the last is unmeasured, because only a frame that draws it can write its
+    // height. That gap is what D-57 and D-58 are about, and the two numbers being equal here is the
+    // point: an index shorter than the spine was D-50's other half.
     assert_eq!(
         shell.typing().spine().slab_count(),
         11,
@@ -946,8 +946,8 @@ fn a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it() {
     );
     assert_eq!(
         shell.heights().len(),
-        10,
-        "the index covers the ten sealed leaves, not the open one"
+        11,
+        "the index follows the spine leaf for leaf, measured or not"
     );
 
     shell.reflow().expect("measured again");
