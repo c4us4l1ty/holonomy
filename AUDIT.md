@@ -66,6 +66,19 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-58 — a reveal into an unmeasured leaf was clamped away. FIXED.** Found while
+  writing D-57's test, and it is the same defect one layer down. `Editor::scroll_to` clamps the
+  scroll position to `measured.total()`, which is the document's height only while every leaf is
+  measured. A tail leaf pushed by `sync_measured` has no height until a frame draws it, so between
+  a keystroke and that frame the total is short by exactly the leaf being typed into. A reveal
+  computed the right position and then clamped it back to zero: the caret stayed off screen and
+  `reveal_caret` returned `false`, so nothing asked for a repaint either. This is why D-53's fix
+  was not enough on its own — the reveal had to exist **and** be able to reach the position it
+  computed. `scroll_to_within` clamps against the larger of the measured total and the extent the
+  caller has evidence for, `reveal_caret` passes the caret's own bottom, and `scroll_to` keeps the
+  plain behaviour for every other caller. Pinned by
+  `a_pushed_tail_leaf_is_laid_out_from_its_predecessors_carry`, which asserts both the position and
+  that the reveal reported a scroll.
 - **2026-11-21 — D-57 — a leaf the frame has not measured has no carry. FIXED.** Found while
   checking D-53's reveal against D-50's index. `sync_measured` grows the index for a tail append
   by `push()`, which records a zero height and a default carry; the frame measures the leaf the
