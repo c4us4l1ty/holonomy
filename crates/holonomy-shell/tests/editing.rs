@@ -894,10 +894,11 @@ fn a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it() {
     shell.type_text(&repeat_leaf().repeat(8)).expect("typed");
     shell.flush().expect("sealed");
     shell.reflow().expect("measured");
+    // 512 letters on a 200-unit line is three wrapped lines: 200, 200, 112.
     assert_eq!(
         shell.heights().total(),
-        Fixed::units(20),
-        "one wrapped line of 512 letters"
+        Fixed::units(60),
+        "three wrapped lines of 512 letters"
     );
 
     // A tail append: one new leaf at the document's end. Every earlier height is still true.
@@ -911,6 +912,8 @@ fn a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it() {
         9,
         "the index grew by one leaf, not a rebuild"
     );
+    // Leaf 0 holds bytes 0..64, all of them inside the first 200-letter line, so it is charged
+    // that one line and nothing else — a leaf's height counts the lines that *start* in it.
     assert_eq!(
         shell.heights().height(0),
         Fixed::units(20),
@@ -979,8 +982,15 @@ fn a_pushed_tail_leaf_is_laid_out_from_its_predecessors_carry() {
             .expect("moved");
     }
     shell.type_text("c").expect("typed");
-    // The cut split the second leaf in two and placed the new one between the halves.
-    assert_eq!(shell.heights().len(), 4, "the cut added one leaf");
+    // `settle` registers the open leaf on its first byte, and `insert_slab` cut the second leaf at
+    // the caret to make room, so the split is in the **spine** at once: four slabs. The measured
+    // index is a snapshot the frame keeps, and no frame has run yet — that is the state this test
+    // is about — so `heights()` is still the two-leaf model and the assertion is on the spine.
+    assert_eq!(
+        shell.typing().spine().slab_count(),
+        4,
+        "the cut added one leaf"
+    );
 
     // No frame has run, so the new leaf is unmeasured and its carry is the index's default.
     let placed = shell.reveal_caret().expect("revealed");
