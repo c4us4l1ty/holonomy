@@ -205,6 +205,36 @@ drill automated as far as a headless run can (copy the file mid-session, open it
 continue, verify every byte); and the negative case — a wrong passphrase reports a refusal, not a
 crash.
 
+**Done — the window has a file.** `holonomy-gui::store` is the application glue the commit-boundary
+test said an app crate would write: a `Document` over a `.wavefunction` world-line, a `DocumentSink`
+that appends one sealed leaf per seal (one append, one witness — the path L-6 measures), a
+`DocumentSource` that faults one segment in on demand, and `Document::spine`, which builds the
+geometry from the *authenticated segment lengths* so opening reads no plaintext at all
+(`WorldLine::segment_lengths`, new). `Typing::resume` starts a session over that geometry with the
+caret at the document's end and no history: the file is the floor, exactly as a seal leaves it.
+
+The terminal binary now takes a path: `holonomy notes.wavefunction` creates the file (echo-off
+passphrase prompt, `calibrate()` recording this host's Argon2 schedule) or opens it (public header
+first, recorded schedule replayed, capsule yielding the DEM key or one coarse refusal, witness chain
+authenticated before a byte is shown). `Ctrl+S` saves, a 1.5 s pause autosaves, and quitting seals
+what is open — a quit is a save.
+
+**Evidence,** `crates/holonomy-gui/tests/persist.rs`, five tests over real files: a session survives
+its window; a reopened session resumes where the file left off; a wrong passphrase is one coarse
+refusal (`StoreError::Refused`, one sentence, no distinguishable halves — AC-3) and the file still
+opens with the right one; a copy taken mid-session opens where it was copied; and bytes past the last
+committed witness — what a kill mid-append leaves — are reported by `Document::trailing_bytes`,
+discarded, and the document accepts new appends afterwards. The fixtures create documents under
+`ParamsClass::Test`'s schedule so the suite does not spend 256 MiB per open; the container itself
+(Argon2, capsule, witness chain, `fsync`) is real in every one.
+
+**Two residuals, recorded rather than hidden.** `WorldLine<'key>` borrows its `DEMKey`, so a
+`Document` that owns both would be self-referential; the key is leaked once per opened document
+(32 bytes, for the process's life, which is how long the window holds it anyway) instead of reaching
+for `unsafe` — the key's `Drop`, and its zeroizing, never runs (**OQ-27**; an owning `WorldLine`
+removes both). And the passphrase bytes typed at the prompt are zeroed after use but are a `Vec<u8>`
+that was never in a `Zeroizing`, so a copy may survive in allocator slack (**OQ-28**).
+
 ### M6 — Chrome, honestly (Block 7 and Block 9)
 
 The toolbar of Block 7, and the security panel of Block 9 reporting what is resident, locked and

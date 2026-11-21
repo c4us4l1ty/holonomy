@@ -23,6 +23,7 @@
 //! Nothing in this crate assumes a grid, a font or a window: [`Surface`] hands a backend clusters at
 //! the advances the Eye measured, so a GPU backend draws exactly the picture the tests assert.
 
+pub mod store;
 pub mod term;
 
 use holonomy_eye::{Fixed, Picture, Style};
