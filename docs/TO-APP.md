@@ -162,11 +162,12 @@ implementation of `Surface` plus an event loop that turns platform keys into `Ke
 resize into `App::resize`. That is a small file, and it is the first task for a machine that can
 fetch crates. Recorded rather than faked.
 
-**Also open: D-41** — a frame does not show bytes typed into an open leaf until they are written
-through, so a shipped window would show nothing while you type. Reproducer
-`typing_is_visible_before_the_bytes_are_written_through` is in the keymap tests, `#[ignore]`d with
-the number. That is the next fix, before the pixels: a window whose text lags its document would
-make every visual test a lie.
+**D-41, fixed.** A frame used to stop at the *sealed* spine's end, so bytes typed into the open leaf
+were invisible until something sealed them — a window that showed nothing while you typed. The frame
+now reaches the document's live end (`provisional`, because the open leaf has no measured height
+yet), and the write-back drops a measurement for a leaf the index does not have instead of writing
+past its end. Its reproducer is a plain green test: five keystrokes, five bytes, five clusters on the
+surface, the caret after the last one.
 
 ### M5 — Open, save, unlock, survive
 
