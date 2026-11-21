@@ -80,7 +80,7 @@ const CORPUS: [(&str, &str, usize); 14] = [
     ),
     // Arabic presentation forms are their own code points and must segment, not vanish.
     ("arabic presentation", "\u{fe8f}\u{fe9f}", 2),
-);
+];
 
 /// Lays `text` out wide enough that it never wraps, at zoom 1 and 96 dpi.
 fn lay(text: &str) -> (Layout<'_>, View) {
