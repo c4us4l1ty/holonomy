@@ -309,14 +309,28 @@ mod tests {
     fn the_budget_table_covers_vision_section_four() {
         // VISION.md §4 lists nine budgets; each one must map to a law. If a budget is added there
         // and not here, this is the test that says so rather than a reader noticing months later.
-        assert_eq!(BUDGETS.len(), 9, "VISION §4 names nine constitutive budgets");
-        let mut laws: Vec<&str> = BUDGETS.iter().map(|b| b.law).collect();
+        assert_eq!(
+            BUDGETS.len(),
+            9,
+            "VISION §4 names nine constitutive budgets"
+        );
+        // Sorted by the *number*, not the string: "L-10" sorts before "L-2" lexicographically,
+        // which the first version of this test got wrong and CI caught.
+        let mut laws: Vec<u32> = BUDGETS
+            .iter()
+            .map(|b| {
+                b.law
+                    .strip_prefix("L-")
+                    .and_then(|n| n.parse().ok())
+                    .expect("a law id is L- followed by a number")
+            })
+            .collect();
         laws.sort_unstable();
         // Every law except L-8 has a VISION §4 budget: L-8 is the geometry invariant, which is a
         // correctness property rather than a budget, and it is claimed by Block 5's gate instead.
         assert_eq!(
             laws,
-            vec!["L-1", "L-2", "L-3", "L-4", "L-5", "L-6", "L-7", "L-9", "L-10"],
+            vec![1, 2, 3, 4, 5, 6, 7, 9, 10],
             "the budget table must map VISION §4 onto the law table exactly"
         );
     }
