@@ -190,9 +190,12 @@ fn a_page_is_the_screen_the_window_is_showing_now() {
     // area, so Page Down stepped a screen that no longer existed — four lines when two were
     // visible, so two lines were never shown. A resized window has the same defect with no panel.
     let mut window = window();
-    // Forty bytes on a 24-column line is two wrapped lines, so there is somewhere to scroll to
-    // and two rows are a screen of it.
-    type_bytes(&mut window, &[b'a'; 40]);
+    // Four screens of text: at `CellShaper`'s one unit per cluster, 100 bytes on a 24-column line
+    // is four wrapped lines of one unit each, and `CellShaper` is one unit per line too. Two rows
+    // are then half the document, and paging by two is a move that can be seen. (Forty bytes was
+    // the first version of this: two wrapped lines, exactly one screen, so the clamp left nothing
+    // to page to and the assertion passed or failed on arithmetic unrelated to D-60.)
+    type_bytes(&mut window, &[b'a'; 100]);
     window
         .resize(Fixed::units(COLUMNS as i64), Fixed::units(2))
         .expect("resized to two rows");
