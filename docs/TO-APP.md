@@ -294,9 +294,28 @@ M0, M1, M2 and M3 done. M4a done: keymap, caret navigation, bursts, app loop, a 
 fixed**, so a frame shows every byte typed into the open leaf. M4b-i — the terminal window — is done:
 the app opens, takes keys, and draws through `term.rs`. M4b-ii, the GPUI adapter, is blocked in this
 environment: adding the dependency needs registry access to regenerate `Cargo.lock`, which nothing
-here has. M5 to M8 are untouched.
+here has.
 
-The distance left, plainly: open/save/unlock (M5 — the window is live but a session is not yet
-durable), chrome and the security panel (M6), the remaining gates (M7), packaging (M8), plus the GPUI
-backend (M4b-ii) for a machine with registry access. `ROADMAP.md` counts 15 gates claimed
-and 18 open.
+**M5 done (2026-11-21).** The window is durable: a `.wavefunction` is created or opened under a
+passphrase, a seal appends and witnesses, `Ctrl+S` writes through, the autosave fires 1.5 s after
+typing stops, quitting seals what is open, and a run that died mid-append is recovered by discarding
+the bytes past the last committed witness and saying how many. A failed save is reported as one and
+exits non-zero (D-49), and the phrase is refused if it is empty or the tty closed before a line
+arrived (D-63).
+
+**M6 done (2026-11-21).** `Ctrl+G` asks the document for the security panel, and every number in it
+comes from the thing it describes — the live resident set, a real `mlock` probe in this process
+today, and the file's own counts — not from a constant. `Esc` dismisses it (D-61), a panel taller
+than the terminal gives way rather than scrolling the screen (D-48), and no panel line claims
+verification unless a full `verify` ran.
+
+The distance left, plainly: the remaining gates (M7), packaging (M8), plus the GPUI backend
+(M4b-ii) for a machine with registry access. **Not one of the ten laws in `docs/GATES.md` is
+`gated`** — all ten read `spec`, and `xtask gates --check` fails the build if that file and
+`crates/holonomy-ledger/src/laws.rs` ever disagree.
+
+What is still not here, in the order it would meet a user: no GPU or font rendering (the window is
+a grid of characters, and a wide character claims one cell — OQ-25), one document at a time, the
+DEM key of each opened document leaked for the process lifetime (OQ-27), the typed passphrase
+zeroed but never held in a `Zeroizing` buffer (OQ-28), and no power-loss qualification (the L-6
+rehearsal is an ENOSPC test and says so in its own job name).

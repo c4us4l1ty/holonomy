@@ -95,6 +95,13 @@ impl Face {
         let hhea = tables.get(bytes, b"hhea")?;
         let ascender = i16::at(hhea, 4).ok_or(FaceError::BadTable("hhea"))?;
         let descender = i16::at(hhea, 6).ok_or(FaceError::BadTable("hhea"))?;
+        // `line_height` is ascender - descender, and every consumer (the height index, the reveal,
+        // the scroll limit) is written for a positive line box. A `descender` above the ascender is
+        // a font that would make it negative or zero, which release builds have no guard against;
+        // refusing the font here is cheaper than defending the index downstream (D-55).
+        if i32::from(ascender) - i32::from(descender) <= 0 {
+            return Err(FaceError::BadTable("hhea"));
+        }
         let metrics = usize::from(u16::at(hhea, 34).ok_or(FaceError::BadTable("hhea"))?);
         if metrics == 0 {
             return Err(FaceError::BadTable("hhea"));
@@ -183,6 +190,8 @@ impl Shaper for Face {
 
     fn line_height(&self, style: Style) -> Fixed {
         let total = i64::from(self.ascender) - i64::from(self.descender);
+        // `parse` refuses a font whose `hhea` makes this non-positive (D-55), so the box is a
+        // measurement rather than a rule that can run backwards.
         self.scaled(total, style)
     }
 

@@ -132,6 +132,17 @@ impl Keymap {
         Self { page }
     }
 
+    /// Re-points the page size at the height the window is actually showing.
+    ///
+    /// D-60: `page` was set once, when the window was built, and never followed the viewport.
+    /// The terminal's panel is the visible case — `Ctrl+G` takes rows *away* from the text area,
+    /// so Page Down stepped a screen that no longer existed and skipped lines the user never saw —
+    /// but a resized window has the same defect with no panel involved. The window is the thing
+    /// that knows both numbers, so it sets this on every resize.
+    pub fn set_page(&mut self, page: Fixed) {
+        self.page = page;
+    }
+
     /// The intent `key` means under `modifiers`, if any.
     #[must_use]
     pub fn intent(&self, key: Key, modifiers: Modifiers) -> Option<Intent> {
@@ -454,7 +465,31 @@ where
             self.editor.mark();
         }
         self.typing = typing;
-        let effects = self.editor.apply(intent)?;
+        // Decided before `intent` is moved into `apply`, which is where it is consumed.
+        let moves_the_caret = matches!(
+            intent,
+            Intent::Type(_) | Intent::Backspace | Intent::DeleteForward
+        );
+        let mut effects = self.editor.apply(intent)?;
+        // D-53/D-57: the caret a keystroke leaves behind is the window's to keep on screen, and
+        // nothing was doing it. A document longer than a screen scrolled nowhere, so typing past
+        // the last visible line moved the caret to a row that was never painted and the screen
+        // stopped following the person typing. The shell already has the policy (the smallest
+        // scroll that shows the caret); the loop just never asked for it.
+        //
+        // It is asked through `Intent::RevealCaret` rather than by calling `reveal_caret` here:
+        // the intent layer is the one place that turns a state change into the effects a backend
+        // renders from, and a window that reached past it returned no `Redraw` for a scroll it had
+        // performed. Best effort on the error: the edit has already landed, and a leaf the reader
+        // could not lay out is the *frame's* problem — propagating it would report a keystroke that
+        // reached the document as a refused edit, the same lie D-47 was about, one layer down.
+        if moves_the_caret {
+            if let Ok(revealed) = self.editor.apply(Intent::RevealCaret) {
+                if !revealed.is_empty() && !effects.contains(&Effect::Redraw) {
+                    effects.push(Effect::Redraw);
+                }
+            }
+        }
         if !effects.is_empty() {
             self.dirty = true;
         }
@@ -467,10 +502,30 @@ where
     ///
     /// [`GuiError`] when the editor refuses the resize.
     pub fn resize(&mut self, width: Fixed, height: Fixed) -> Result<Vec<Effect>, GuiError> {
-        let effects = self.editor.apply(Intent::Resize {
+        // A different **width** is a different geometry: the shell empties its measured index,
+        // because every height described the old wrap. It does not re-measure — that is a caller's
+        // policy — so a window that resized once could scroll no further than its first screen for
+        // the rest of the session (D-53). The window asks for the measurement it invalidated.
+        let width_changed = self.editor.width() != width;
+        let mut effects = self.editor.apply(Intent::Resize {
             width,
             viewport: height,
         })?;
+        // D-60: a page is a screen, and the screen just changed. The keymap was told the height
+        // it had when the window was built and was never told again, so a panel opening (which
+        // shrinks the surface) or a resized terminal made Page Down skip lines.
+        let page = self.editor.viewport();
+        self.keymap.set_page(page);
+        if width_changed {
+            // Through the intent, for the reason above: a re-measure is a state change and owes
+            // the caller its effects. Best effort on the error — a document the reader refuses is
+            // a provisional frame, not a dead window, and the refusal is reported by whatever drew.
+            if let Ok(reflowed) = self.editor.apply(Intent::Reflow) {
+                if !reflowed.is_empty() && !effects.contains(&Effect::Redraw) {
+                    effects.push(Effect::Redraw);
+                }
+            }
+        }
         if !effects.is_empty() {
             self.dirty = true;
         }
@@ -496,6 +551,16 @@ where
     /// show (AUDIT D-41).
     pub fn document_len(&mut self) -> u64 {
         self.editor.document_len()
+    }
+
+    /// Whether the document holds bytes the file does not have yet — what "unsaved" means.
+    ///
+    /// This is read from the session, not remembered in a flag: a caret move **seals** the open
+    /// leaf, so an arrow key commits what was typed, and a window that tracked "unsaved" itself
+    /// said the opposite of the truth about bytes that already had a witness (D-47).
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        !self.editor.typing().pending().is_empty()
     }
 
     /// The selection, as ordered ends, when it is not empty.

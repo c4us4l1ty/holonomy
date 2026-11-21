@@ -32,16 +32,28 @@ impl Mmr {
         let mut carry = leaf;
         let mut bits = self.count;
         let mut height = 0;
+        // D-59: the merge is computed into a scratch array and committed at the end. Taking peaks
+        // out of `self` as the walk goes and returning early on a missing one — which is what the
+        // `?` used to do — leaves the accumulator holding fewer peaks than its `count` claims, and
+        // `root` and `encode_peaks` both `expect` a peak for every set bit: the next call panics
+        // instead of reporting the inconsistency it inherited. The invariant is checked before
+        // anything is written, and a broken one is an error, not a poisoned value.
+        let mut merged = self.peaks;
         while bits & 1 == 1 {
-            let left = self.peaks[height].take().ok_or(LineError::InvalidRecord)?;
+            if height >= HEIGHTS {
+                return Err(LineError::TooManySegments);
+            }
+            let left = merged[height].ok_or(LineError::InvalidRecord)?;
             carry = parent_hash(&left, &carry);
+            merged[height] = None;
             bits >>= 1;
             height += 1;
         }
         if height >= HEIGHTS {
             return Err(LineError::TooManySegments);
         }
-        self.peaks[height] = Some(carry);
+        merged[height] = Some(carry);
+        self.peaks = merged;
         self.count += 1;
         Ok(())
     }
@@ -133,6 +145,44 @@ mod tests {
         }
         assert_eq!(a.count(), 3);
         assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn a_refused_merge_leaves_the_accumulator_exactly_as_it_was() {
+        // D-59: `append` used to take peaks out of `self` as its merge walk went and return early
+        // when one was missing, so the accumulator kept a `count` its peaks no longer backed and
+        // the *next* append merged against the holes. The merge is computed into a scratch copy
+        // now, and a broken invariant leaves the accumulator exactly as it found it.
+        let mut mmr = Mmr::new();
+        for leaf in [[7u8; 32], [8u8; 32], [9u8; 32]] {
+            mmr.append(leaf).unwrap();
+        }
+        // Break the invariant the way a corrupt-but-authenticated witness would: three segments
+        // are recorded, but the peak the merge would consume is gone. The snapshot is taken
+        // **after** the break, because the claim is about what the refused append does — that it
+        // leaves the accumulator exactly as it found it, holes and all, so the fault is reported
+        // every time rather than half-consumed the first time.
+        mmr.peaks[0] = None;
+        let before = mmr.clone();
+        assert!(
+            matches!(mmr.append([1u8; 32]), Err(LineError::InvalidRecord)),
+            "a merge that cannot find its peak is refused, not half-applied"
+        );
+        assert_eq!(
+            mmr.count(),
+            before.count(),
+            "a refused append counts nothing"
+        );
+        assert_eq!(
+            mmr.peaks, before.peaks,
+            "and consumes no other peak: the merge is computed into a scratch copy"
+        );
+        // And it is still refused the second time: a walk that had eaten the higher peak would
+        // report success now, or a different error, on an accumulator with the same count.
+        assert!(
+            matches!(mmr.append([1u8; 32]), Err(LineError::InvalidRecord)),
+            "the same broken witness is refused again"
+        );
     }
 
     #[test]

@@ -182,3 +182,62 @@ fn a_resized_terminal_redraws_within_its_new_columns() {
     assert_eq!(window.surface().columns(), 10);
     println!("HOLONOMY_TERMINAL_RESIZE columns=10 rows=2");
 }
+
+#[test]
+fn a_page_is_the_screen_the_window_is_showing_now() {
+    // D-60: `Keymap::page` was set once, when the window was built, and never followed the
+    // viewport. The terminal makes it visible: `Ctrl+G`'s panel takes rows away from the text
+    // area, so Page Down stepped a screen that no longer existed — four lines when two were
+    // visible, so two lines were never shown. A resized window has the same defect with no panel.
+    let mut window = window();
+    // Four screens of text: at `CellShaper`'s one unit per cluster, 100 bytes on a 24-column line
+    // is four wrapped lines of one unit each, and `CellShaper` is one unit per line too. Two rows
+    // are then half the document, and paging by two is a move that can be seen. (Forty bytes was
+    // the first version of this: two wrapped lines, exactly one screen, so the clamp left nothing
+    // to page to and the assertion passed or failed on arithmetic unrelated to D-60.)
+    type_bytes(&mut window, &[b'a'; 100]);
+    window
+        .resize(Fixed::units(COLUMNS as i64), Fixed::units(2))
+        .expect("resized to two rows");
+    assert_eq!(window.editor().viewport(), Fixed::units(2));
+    // The window is measured before it can be scrolled, which is what the binary does when it
+    // opens a document and what this test has to do to be a test of paging rather than of a
+    // document nobody has laid out: with no measured height the total is zero and every scroll
+    // clamps to it, so Page Down would be a no-op for a reason that has nothing to do with D-60.
+    window.editor().reflow().expect("measured the document");
+    // Typing reveals the caret (D-53), and this document is taller than the four rows the window
+    // was born with, so the scroll is not at the top when the typing stops. Put it there: the
+    // question this test asks is how far *one page* moves, not where the caret left the screen.
+    window.editor().scroll_to(Fixed::ZERO);
+    assert_eq!(
+        window.editor().scroll(),
+        Fixed::ZERO,
+        "the test starts at the top of the document"
+    );
+
+    window
+        .press(Key::PageDown, Modifiers::none())
+        .expect("paged down");
+    assert_eq!(
+        window.editor().scroll(),
+        Fixed::units(2),
+        "a page is the screen the window shows, not the one it had when it was built"
+    );
+    // A page back up is one screen too. Five units of document on a two-unit viewport can scroll
+    // to three, so from two a page up must land on zero — a window still paging by the four rows it
+    // was built with would clamp to zero as well, but a page size that had *grown* or a page that
+    // moved by something other than the viewport would not come back here.
+    window
+        .press(Key::PageUp, Modifiers::none())
+        .expect("paged up");
+    assert_eq!(
+        window.editor().scroll(),
+        Fixed::ZERO,
+        "a page up is one screen, not two"
+    );
+    println!(
+        "HOLONOMY_TERMINAL_PAGE scroll={} viewport={}",
+        window.editor().scroll().sixtyfourths(),
+        window.editor().viewport().sixtyfourths()
+    );
+}

@@ -66,6 +66,209 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-65 — `docs/TO-APP.md` counted gates that were never claimed.**
+  "Where we are" ended "`ROADMAP.md` counts 15 gates claimed and 18 open". Both numbers are
+  invented. `crates/holonomy-ledger/src/laws.rs` holds **ten** laws and every one is
+  `LawStatus::Spec`; `docs/GATES.md`, which `xtask gates` generates from that table, shows the same
+  ten rows all reading `spec`, and no other document in the repo repeats the figure. The claim was
+  worse than a stale count because of what it asserted: a `gated` law is one an enforcing block has
+  measured in CI, so "15 claimed" said the opposite of the standing rule that a law is called
+  `gated` only when a harness ran green on it. Two nearby statements in the same section had also
+  gone false — "M5 to M8 are untouched" and "a session is not yet durable" — when M5 and M6 landed.
+  All three are rewritten to what the code does, and `README.md` now leads its Status section with
+  the count that is true: **zero of ten**. Found while re-reading the docs for this merge, which is
+  the point of reading the code rather than the prose. Docs only; **verified by CI run 44909881863
+  on `e4c193e`, every job green.**
+- **2026-11-21 — D-64 — the durability claim was stronger than the durability.** The window's
+  autosave comment read "nothing is lost if the machine dies between keystrokes", and the module
+  documentation promised that "what you write is still there when you open it again". The first is
+  true of every **sealed** byte: `Typing::seal` appends and witnesses the moment the buffer fills,
+  so the exposure between saves is bounded by `store::CAPACITY` (16 KiB) and does not grow with how
+  long someone types. It is false of the bytes in the open buffer, which are written only by
+  `Ctrl+S`, by the pause autosave, or on quit — and a crash before any of those loses them. The
+  second sentence is true but was doing the work of a guarantee it does not make. Both now say the
+  bounded thing, which is a real property and worth stating precisely: **at most one buffer's
+  worth of the most recent typing**, never anything older. Docs only; **verified by CI run
+  44908126224 on `636af4b`, every job green.**
+- **2026-11-21 — D-63 — an empty passphrase was accepted, and a closed tty was read as one.
+  FIXED.** `prompt` collected bytes until `\r`; `stdin.read` returning **0** — `Ctrl+D` at a
+  terminal, or a tty that went away — left the loop by the same `break` a typed line takes, and the
+  phrase was then whatever had been typed, which could be nothing. Nothing downstream refuses an
+  empty one: `MasterKeys::derive_with` accepts it, `Document::create` writes the file, and the
+  window prints "saved". A document protected by nothing is indistinguishable from a document
+  protected by something until the day it matters, and the prompt is the only place it can be
+  caught. Both cases
+  are refused now — end of input, and an empty line — with the reason beside each, and the `Ctrl+C`
+  path keeps its own message so a cancel is not reported as an empty phrase. **Verified by CI run
+  44907174415 on `f6ce706`, every job green.** Residual: the phrase's bytes are still best effort,
+  which OQ-28 owns.
+- **2026-11-21 — D-62 — a document still inside its buffer had no height at all. FIXED.**
+  `Measured` keeps one height per **spine slab**, and the bytes a user is typing are in the open
+  leaf — which is in the spine, so it has an entry, but nothing measures it until a frame draws it.
+  Every other entry was fine and the total was still wrong for the commonest state in the product:
+  a new document. `reflow` laid out no leaves at all when nothing had been sealed, `scroll_to`
+  clamped every scroll against a total of zero, and Page Down did nothing on a document several
+  screens long. The same zero made `caret_place` report a caret in an unmeasured run at the top of
+  the document, which is how D-53's reveal scrolled to a fraction of the right line: the failure
+  was found by pushing the branch through CI and reading `caret=166 scroll=23040` against a frame
+  covering bytes 40..65.
+  Two fixes, at the two places the missing measurement was read. `measure_through` measures the
+  unmeasured run a geometry question depends on — one leaf at a time, carrying the line as `reflow`
+  does — so a prefix sum is exact before it is used; the leaf before the run is re-measured rather
+  than trusted through `carry_after`, because the index stores the carry a leaf was *measured with*
+  and the cluster tail it placed past its own end differs by one advance, an error `is_measured`
+  would then make permanent. And `Editor::tail` keeps the open leaf's height beside the index,
+  invalidated by a length change, a width change, or a reflow, so `scroll_to` and `reflow` see the
+  whole document. The tail is kept out of `Measured` on purpose: `byte_window` asserts that the
+  index's leaf *i* is the spine's leaf *i*.
+  A third fault fell out of the same investigation: `caret_place` read `prefix(leaf)` with a leaf
+  number from the spine while the index was a snapshot only `frame` kept in step, so a reveal asked
+  for between a keystroke and a frame indexed past the end of the model and panicked with "prefix
+  past the model". It syncs first now — the invariant it was silently relying on.
+  Pinned by `typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret`
+  (`crates/holonomy-gui/tests/keys.rs`) and by `editing`'s two tail-leaf tests. **Verified by CI run
+  44906611678 on `e898979`: every job green** — rustfmt, clippy `-D warnings`, the workspace test
+  suite, the gates contract, the million-keystroke walk, the rsync measurement, and the ext4
+  rehearsal.
+- **2026-11-21 — D-61 — `Escape` was documented as dismissing and dismissed nothing. FIXED.**
+  `Key::Escape` carries the doc line "dismisses, never edits", and the keymap does the second half
+  correctly: it refuses to turn Escape into an edit. Nothing did the first half, so the key was
+  inert in every state and the only way to close `Ctrl+G`'s security panel was the chord that
+  opened it. The panel belongs to the binary rather than the editor and never reaches an `Intent`,
+  so the binary dismisses it now, and its module docs say so beside the rest of the key list. This
+  is the class of defect the audit exists for: not a wrong line of code, but a documented behaviour
+  with no implementation behind it.
+- **2026-11-21 — D-60 — a page was the screen the window had when it was built. FIXED.**
+  `Keymap::page` is one number, set by `Keymap::new` and never told again — but the window's
+  screen changes under it. The terminal is the visible case: `Ctrl+G`'s security panel takes rows
+  from the text area and the binary hands that smaller height to `App::resize` on every loop, while
+  Page Down kept stepping the height the window had at construction, so a page skipped lines the
+  user never saw. A resized terminal does the same with no panel involved. `Keymap::set_page`
+  exists now and `App::resize` sets it from `Editor::viewport`, so the page and the screen are the
+  same number by construction. Pinned by `a_page_is_the_screen_the_window_is_showing_now`
+  (`crates/holonomy-gui/tests/terminal.rs`).
+- **2026-11-21 — D-59 — a refused MMR merge left the accumulator half-consumed. FIXED.**
+  `Mmr::append` (`crates/holonomy-line/src/mmr.rs`) walked its merge by taking peaks **out of
+  `self`** and returned early through `?` when one was missing. The caller received `Err`, but the
+  accumulator kept a `count` its peaks no longer backed, and the next `append` merged against the
+  holes while `root` and `encode_peaks` — both of which `expect` a peak for every set bit — could
+  panic on a value an earlier call had already reported as an error. The merge is computed into a
+  scratch copy now and committed only when it completes, and the height guard is checked before the
+  indexing rather than after it, so the walk cannot index `peaks[HEIGHTS]` on its last iteration.
+  Honest scope: the state that triggers this needs a corrupt-but-authenticated witness, so it is
+  defence in depth rather than a reachable user failure. Pinned by
+  `a_refused_merge_leaves_the_accumulator_exactly_as_it_was`.
+- **2026-11-21 — D-58 — a reveal into an unmeasured leaf was clamped away. FIXED.** Found while
+  writing D-57's test, and it is the same defect one layer down. `Editor::scroll_to` clamps the
+  scroll position to `measured.total()`, which is the document's height only while every leaf is
+  measured. A tail leaf pushed by `sync_measured` has no height until a frame draws it, so between
+  a keystroke and that frame the total is short by exactly the leaf being typed into. A reveal
+  computed the right position and then clamped it back to zero: the caret stayed off screen and
+  `reveal_caret` returned `false`, so nothing asked for a repaint either. This is why D-53's fix
+  was not enough on its own — the reveal had to exist **and** be able to reach the position it
+  computed. `scroll_to_within` clamps against the larger of the measured total and the extent the
+  caller has evidence for, `reveal_caret` passes the caret's own bottom, and `scroll_to` keeps the
+  plain behaviour for every other caller. Pinned by
+  `a_pushed_tail_leaf_is_laid_out_from_its_predecessors_carry`, which asserts both the position and
+  that the reveal reported a scroll.
+- **2026-11-21 — D-57 — a leaf the frame has not measured has no carry. FIXED.** Found while
+  checking D-53's reveal against D-50's index. `sync_measured` grows the index for a tail append
+  by `push()`, which records a zero height and a default carry; the frame measures the leaf the
+  first time it draws it. Everything that lays a leaf out *before* that frame ran from
+  `Measured::carry(leaf)`, which answered `Carry::default()` — and `Carry::default()` says "this
+  leaf begins a line", true only when it does. A seal cuts on a byte count, not a line boundary,
+  so a new tail leaf regularly begins mid-line, and then `caret_place` reported the caret one line
+  too high, `reveal_caret` scrolled to that line, `line_start` found the wrong line for a scroll
+  position, and `cluster_before` could cut a `\n` away from the `\r` in front of it (the phantom
+  line D-25's `leaf_text` exists to prevent). The first version of the fix tested the height for
+  zero, which is wrong: a leaf all of whose bytes its predecessor placed measures exactly zero and
+  is fully measured. `Measured::carries` is now `Vec<Option<Carry>>`, presence is the record, and
+  `Editor::carry_of` answers an unmeasured leaf from the last measured leaf at or before it. Three
+  call sites that assumed a carry was always there ask it. Unverified: no compiler here. Pinned by
+  `a_pushed_tail_leaf_is_laid_out_from_its_predecessors_carry`
+  (`crates/holonomy-shell/tests/editing.rs`), which cuts a leaf mid-line and asks for the caret's
+  place before any frame has measured the new leaf.
+- **2026-11-21 — D-56 — an escape mid-character abandoned the UTF-8 state, not the character.
+  FIXED.** `Decoder::feed` (`crates/holonomy-gui/src/term.rs`) tested the escape state before the
+  multi-byte state, so an `ESC` arriving between a character's lead byte and its continuation
+  bytes left `expect` standing; the continuation bytes then completed a character out of an
+  abandoned lead, and the keystroke after them was swallowed as the next continuation. A tty
+  delivers `ESC` between any two bytes — an arrow pressed during a paste, an interrupted writer,
+  noise on a serial line — so the sequence is not hypothetical. An escape now discards the
+  half-character, and so does `flush_escape` (the end of a read), because a stream that dies
+  mid-character must not poison the next one. Pinned by
+  `an_escape_mid_character_does_not_swallow_the_bytes_after_it`.
+- **2026-11-21 — D-55 — a font could make a line box run backwards. FIXED.** `Face::line_height`
+  is ascender − descender, read straight out of `hhea` as two `i16`s. A font with `descender >
+  ascender` — malformed, hostile, or a hand-edited file — produced a **negative** line height, and
+  nothing downstream catches it: `HeightModel::set` only *debug*-asserts that a height is not
+  negative, so a release build would store it and every prefix sum after that leaf would be wrong.
+  The visible result is a scroll bar that lies and a reveal that scrolls to the wrong row, both
+  silently. `Face::parse` now refuses such a font with `FaceError::BadTable("hhea")`, which is an
+  error a caller can show; the alternative — clamping in `line_height` — would have left every
+  other consumer of a malformed `hhea` still trusting it. Pinned by
+  `a_font_that_would_make_a_line_run_backwards_is_refused`
+  (`crates/holonomy-eye/tests/real_face.rs`), which mutates the shipped Inter's `hhea` and checks
+  both the refusal and that the unmutated font still parses.
+- **2026-11-21 — D-54 — a character wider than the buffer was an infinite loop. FIXED.** Found by
+  reading the keystroke loop against `SlabText`'s own rules rather than against its comments.
+  `Typing::type_bytes` sizes each chunk to the room left in the buffer and walks `take` down until
+  the split lands between characters. When the *next character alone* is wider than the whole
+  buffer, `take` reaches zero and the loop's only other move is `seal()` — which, with nothing
+  open, returns `Ok` and changes nothing. A `Typing::new(1)` session and a three-byte character
+  spun forever inside a public API that owed the caller an error. `take == 0` with nothing open
+  now returns `TypingError::TooLarge { needed, capacity }`. With a source open the seal is real
+  progress, so that path still seals and continues. Pinned by
+  `a_character_wider_than_the_buffer_is_refused_rather_than_spun_on`.
+- **2026-11-21 — D-53 — nothing measured the screen, revealed the caret, or re-measured on resize.
+  FIXED.** Three omissions with one symptom: the window stopped following the person typing.
+  `Editor::reflow` — the one place in the loop that measures every leaf, and therefore the only
+  way a scroll position past the first screen can be found — was called by no one but an intent a
+  front end never sent, so a document longer than a screen had one measured screen and could
+  scroll no further. `reveal_caret` had the same status: the shell has the policy, and no front
+  end asked. And `resize` empties the measured index on a width change *by design* (every height
+  described the old wrap) while leaving the re-measure to a caller that did not re-measure. The
+  window now reflows when it opens a document, asks for `Intent::RevealCaret` after a keystroke
+  that moves the caret, and asks for `Intent::Reflow` when the width changed. It asks through the
+  intent layer rather than calling the editor, because a scroll performed behind the layer's back
+  is a scroll no `Effect` told a renderer about. Pinned by
+  `typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret`
+  (`crates/holonomy-gui/tests/keys.rs`).
+- **2026-11-21 — D-52 — a seal over no bytes answered `Ok` and kept the source open. FIXED.**
+  `Typing::seal` began `if len == 0 { return Ok(()) }`, and `attach(0)` opened a source whose leaf
+  `insert_slab` then dropped as empty. Both leave the register holding a source that owns no
+  bytes: `open_count` says one, `pending()` is empty, and the window's "is the file up to date"
+  question — which it asks every pause — can never be answered consistently. `seal` over zero
+  bytes now takes the open leaf out of the tree and abandons the source; `attach(0)` moves the
+  caret and opens nothing. Honest scope: the reachable paths already avoided this state (`delete`
+  closes a leaf it empties, and `restore_mark` is the only caller that can hand `attach` a zero),
+  so these are guards plus the removal of a lie, not a repair of a user-visible failure — the
+  tests for them are white-box for that reason
+  (`a_seal_over_no_bytes_abandons_the_source_instead_of_pretending`,
+  `attach_over_no_bytes_moves_the_caret_without_opening_a_source`).
+- **2026-11-21 — D-51 — the shell compared live offsets with sealed geometry. FIXED.** A document
+  has two coordinate spaces while a leaf is open: the **sealed** offsets the spine stores, and the
+  **live** offsets the user's caret, selection and reveal use. `leaf_of` binary-searched sealed
+  leaf starts against a live caret, and `leaf_bounds` returned sealed bounds for a live lookup.
+  Every leaf after the open one moves by the difference between its live and registered length, so
+  both were off by that amount whenever the open leaf had grown or shrunk — which is every
+  keystroke after the first. `Draft::live_offset` is the reverse of `locate`: the same edit walk,
+  answering where a sealed leaf start lands in the live document. Both call sites ask it, and
+  `caret_place` goes through `leaf_bounds` instead of a raw `slab_span`. Pinned by
+  `a_sealed_leaf_start_maps_to_the_live_offset_that_holds_it`
+  (`crates/holonomy-text/src/draft.rs`).
+- **2026-11-21 — D-50 — any one-leaf growth was taken for a tail append. FIXED.** `sync_measured`
+  kept the height index sized to the leaf count with a fast path: one new leaf, one `push`, O(log
+  n), because — the comment said — a new leaf can only appear at the end. It can: a caret moved
+  into sealed text and typed into **splits** a leaf, which also adds one. The index then kept
+  every measured height after the caret attached to leaves that had moved, and the leaf past the
+  end of the index was never measured at all, so the total height was wrong by an unbounded
+  amount. The fast path is now byte-anchored: the new last leaf must begin at `len_synced`, the
+  document length when the index was last true. Anything else rebuilds the index, which the next
+  frame repopulates for the leaves it can see. Pinned by
+  `a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it`, which asserts the two
+  cases against each other: a tail append keeps the heights before it, and a mid-document insert
+  is followed by a re-measure that agrees with one continuous layout of the whole document.
 - **2026-11-19 — D-31 — a seal writes the live bytes, not the buffer behind them (found by the
   gate it was written for).** The first run of D-30's harness failed within a second, on a length
   the session and the independent model disagreed about by exactly the three bytes an undo had
@@ -176,6 +379,54 @@ Listed so they stay dead.
   redo, `abc`. Nothing could be lost by this defect — the bytes were always the document's — but a
   user could not take back a paragraph, which for a writing application is a defect in the first
   sentence of the manual.
+- **2026-11-21 — D-49 — the window said "saved" over a save that had failed. FIXED.** `run`
+  returned `Ok`, and `main` printed `outcome_words(true, None)`-style words for it; the final save's
+  own answer was thrown away with `let _ = save(...)`. A session whose last append was refused
+  therefore exited 0 and told the user everything was written. The save's answer is now part of the
+  sentence (`Ended::{NothingToWrite, Saved, SaveFailed}`), a `SaveFailed` exits non-zero, and a
+  dead session outranks a failed save in the wording. Pinned by
+  `a_failed_save_is_never_called_saved` (`crates/holonomy-gui/src/bin/holonomy.rs`).
+- **2026-11-21 — D-44 — backspace did nothing on a terminal whose erase key is `^H`. FIXED.** A tty
+  with `stty erase ^H` sends `0x08`; every other sends `0x7f`. The decoder mapped only `0x7f`, so
+  the backspace key produced no intent at all — while the passphrase prompt, which reads raw bytes,
+  accepted both, so the same key worked before the document opened and stopped working after.
+  `control` maps `0x08` to `Key::Backspace` now, and the test
+  `backspace_arrives_as_either_byte_a_terminal_sends` pins both bytes to the same key.
+- **2026-11-21 — D-45 — `Ctrl+Y` was documented as redo and was not decoded. FIXED.** The module
+  documentation offers `Ctrl+Y` precisely because a terminal sends `Ctrl+Shift+Z` as `0x1a`, the
+  same byte as `Ctrl+Z` — so the chord the keymap would need cannot be distinguished from the one
+  that undoes. Nothing mapped `0x19`, which left the documented redo key inert and redo unreachable
+  from a keyboard. `control` maps `0x19` to `Ctrl+Y` now. The `Ctrl+Shift+Z` ambiguity is not a
+  bug to fix but a fact to state, which the doc list and
+  `ctrl_y_is_redo_and_ctrl_shift_z_cannot_be_told_apart` both do.
+- **2026-11-21 — D-46 — a lone `ESC` and the start of an arrow were the same thing. FIXED.** The
+  window flushed a pending escape after every read, so a terminal that delivered `ESC` and `[A` in
+  two writes — over ssh, or under load — had `[A` typed into the document at the caret. An Up arrow
+  inserted two characters. The decoder keeps the partial sequence (`Decoder::pending`) and the
+  window settles it only when no further byte is waiting for a grace period; reads that arrive empty
+  stay non-destructive. Pinned by `escape_sequences_are_arrows_and_their_modifiers`.
+- **2026-11-21 — D-47 — "unsaved" was a flag that lied in both directions. FIXED.** `App` kept its
+  own dirty bit and set it on **every** key. A caret move seals the open leaf, so an arrow key
+  commits the bytes — after which the status line still said "unsaved" about text that already had a
+  witness — while a refused save left bytes unwritten and the line could say "saved". The truth is
+  in the session: `has_pending` asks `Typing::pending`, so the status line cannot disagree with the
+  file. `an_arrow_key_writes_the_bytes_so_the_document_is_not_unsaved`
+  (`crates/holonomy-gui/tests/keys.rs`) asserts the seal, the append, and that a flush with nothing
+  open writes nothing.
+- **2026-11-21 — OQ-25 — the terminal surface is one cell per cluster, so a wide character claims
+  half the screen the terminal gives it. OPEN.** `CellShaper` advances one logical unit per cluster
+  and the renderer writes one character per column, while a terminal draws an East Asian wide
+  character, most emoji and a handful of symbols in **two** cells. The disagreement is structural,
+  not a rounding error: `screen_with` lays out `columns` characters per row, so a row containing a
+  wide character is drawn two cells wider than the row it was measured for, and everything below it
+  shifts by one column — the same class of failure D-48 fixed for rows. It was cited in
+  `crates/holonomy-gui/src/term.rs` as "recorded as OQ-25" while no such entry existed, which is the
+  failure mode this file exists to prevent: a deferral with no owner, no reason and no date. Closing
+  it means a display-width function in the eye (`unicode-width`, or the East Asian Width tables
+  `holonomy-eye` already generates) consulted by both `CellShaper::advance` and the renderer, so the
+  cell grid and the terminal agree by construction rather than by hope. Nothing else is blocked on
+  it: the document, the geometry and the world-line are unaffected, and a document of ASCII and
+  narrow characters — which is what this release is typed in, per OQ-24's same scope — is exact.
 - **2026-11-20 — OQ-24 — shaping is metrics only, and nothing reads `GSUB`/`GPOS`. OPEN, by
   design for now.** `holonomy_eye::Face` reads `head`, `hhea`, `hmtx`, `maxp` and `cmap` (M3), so
   advances, ascent and descent are the font's own numbers — but a cluster's width is the *sum of

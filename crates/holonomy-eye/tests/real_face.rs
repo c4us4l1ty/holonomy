@@ -213,3 +213,45 @@ fn a_paragraph_laid_out_with_a_real_face_keeps_the_law() {
     );
     assert!(roundtrips > 50, "only {roundtrips} carets round-tripped");
 }
+
+#[test]
+fn a_font_that_would_make_a_line_run_backwards_is_refused() {
+    // D-55: `line_height` is ascender - descender, and the height index, the reveal and the scroll
+    // limit are all written for a positive line box. `HeightModel::set` only *debug*-asserts that a
+    // height is not negative, so in a release build a font whose `hhea` says the descender sits
+    // below the ascender corrupts every prefix sum after the leaf it measured. The font is refused
+    // at parse time instead, which is a `FaceError` a caller can print.
+    let mut bytes = FONT.to_vec();
+    let hhea = table_offset(&bytes, b"hhea").expect("the font has an hhea");
+    // ascender at +4, descender at +6: make the descender 4000 units above the ascender.
+    let ascender = i16::from_be_bytes([bytes[hhea + 4], bytes[hhea + 5]]);
+    let descender = ascender.saturating_add(4_000);
+    bytes[hhea + 6..hhea + 8].copy_from_slice(&descender.to_be_bytes());
+    assert!(
+        matches!(
+            Face::parse(&bytes),
+            Err(holonomy_eye::FaceError::BadTable("hhea"))
+        ),
+        "a backwards line box must be refused, not measured"
+    );
+    // And the font as shipped still parses, so the mutation is what was refused.
+    assert!(Face::parse(FONT).is_ok());
+}
+
+/// The offset of a table's bytes in an sfnt, read from the table directory the way `Face` does.
+fn table_offset(bytes: &[u8], tag: &[u8; 4]) -> Option<usize> {
+    let count = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+    for index in 0..count {
+        let record = 12 + index * 16;
+        if bytes.get(record..record + 4) == Some(&tag[..]) {
+            let offset = u32::from_be_bytes([
+                bytes[record + 8],
+                bytes[record + 9],
+                bytes[record + 10],
+                bytes[record + 11],
+            ]);
+            return usize::try_from(offset).ok();
+        }
+    }
+    None
+}

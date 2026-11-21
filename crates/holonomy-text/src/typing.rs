@@ -714,9 +714,18 @@ impl<S: SegmentSink> Typing<S> {
             "a leaf cannot claim bytes the buffer does not hold ({len} > {})",
             self.buffer.len()
         );
+        let at = self.next_at.take().unwrap_or_else(|| self.spine.len());
+        if len == 0 {
+            // D-52: a source opened over no bytes registers a leaf `insert_slab` drops, so the
+            // register holds a buffer that names nothing and `open_count` climbs past the one
+            // buffer a caller can hand a reader. `restore_mark` is the only caller that can hand
+            // this function a zero — a live mark whose length an undo walked back to nothing — and
+            // there is nothing to attach: only the caret moves.
+            self.next_at = Some(at.min(self.spine.len()));
+            return Ok(());
+        }
         let registered = u32::try_from(len).expect("capacity fits in u32");
         let source = self.sources.open();
-        let at = self.next_at.take().unwrap_or_else(|| self.spine.len());
         self.spine = self
             .spine
             .insert_slab(at, Slab::new(source, 0, registered))?;
@@ -799,6 +808,20 @@ impl<S: SegmentSink> Typing<S> {
                 take -= 1;
             }
             if take == 0 {
+                // D-54: a character wider than the whole buffer could be neither typed nor
+                // refused. A seal is the loop's other move, and with nothing open a seal does
+                // nothing — so `insert` spun forever on a one-byte session and a three-byte
+                // character: a hang in a public API where an error was owed. Nothing open means
+                // the character being placed is the first of `rest`, and it does not fit the
+                // buffer at all.
+                if self.open.is_none() {
+                    // The character's own width, not the burst's: `rest` can hold a whole paste,
+                    // and reporting its length would name a number the buffer never had to hold.
+                    return Err(TypingError::TooLarge {
+                        needed: lead_byte_len(rest),
+                        capacity: self.capacity,
+                    });
+                }
                 self.seal()?;
                 continue;
             }
@@ -932,6 +955,20 @@ impl<S: SegmentSink> Typing<S> {
         // can name — the document would grow by exactly what undo removed.
         let len = self.live_len();
         if len == 0 {
+            // D-52: an open source over no bytes. `delete` closes a leaf it empties, and `attach`
+            // refuses to open one over nothing, so the public API cannot deliver this state today
+            // — the guard is defence in depth, and it is also what `set_live(0)` needs: an undo
+            // that takes a source back to zero bytes must not leave the leaf in the tree claiming
+            // bytes no reader can produce. A seal over nothing therefore has one job: take the
+            // leaf out and abandon the source, rather than answering `Ok` while `open_count`
+            // stays one and `pending()` stays empty forever.
+            let end = open.at + u64::from(open.registered);
+            self.spine = self.spine.remove_range(open.at, end)?;
+            self.sources.close(open.source);
+            self.draft.forget(open.at);
+            self.open = None;
+            self.next_at = Some(open.at);
+            self.undone.clear();
             return Ok(());
         }
         let appended: Appended = self
@@ -1016,6 +1053,21 @@ fn summary(step: &Step) -> StepSummary {
             len: *pending,
             tree: spine.len(),
         },
+    }
+}
+
+/// The length of the UTF-8 character whose first byte is `bytes[0]`, from the first byte alone.
+///
+/// The keystroke loop needs this when a character does not fit: it has already split `rest` at a
+/// character boundary, so `rest[0]` is a lead byte and the table in RFC 3629 says how many bytes
+/// follow. A continuation byte cannot appear at `0` for that reason, but it is reported as one byte
+/// rather than panicking — the caller's error message is about capacity, not encoding.
+fn lead_byte_len(bytes: &[u8]) -> usize {
+    match bytes.first() {
+        Some(0xC2..=0xDF) => 2,
+        Some(0xE0..=0xEF) => 3,
+        Some(0xF0..=0xF4) => 4,
+        _ => 1,
     }
 }
 
@@ -1142,6 +1194,92 @@ mod tests {
             "the burst came back as open bytes"
         );
         assert_eq!(typing.document_len(), 3);
+    }
+
+    #[test]
+    fn a_seal_over_no_bytes_abandons_the_source_instead_of_pretending() {
+        // D-52, tested from inside because the public API cannot reach the state: `delete` closes
+        // a leaf it empties and `attach` refuses to open one over nothing. The guard still
+        // matters, because the alternative is a source over no bytes that `flush` answers `Ok`
+        // for while `open_count` stays one — the window asks `pending()` whether the file has
+        // everything, and that answer would never come.
+        let mut typing = session(64);
+        assert_eq!(typing.sources().open_count(), 0);
+        let source = typing.sources.open();
+        typing.open = Some(Open {
+            source,
+            at: 0,
+            registered: 0,
+        });
+        assert_eq!(typing.sources().open_count(), 1);
+        typing.flush().expect("a seal over nothing is total");
+        assert_eq!(
+            typing.sources().open_count(),
+            0,
+            "the source is abandoned, not left open"
+        );
+        assert!(typing.open.is_none(), "and the session stops naming it");
+        assert!(typing.pending().is_empty());
+        assert_eq!(typing.sealed_bytes(), 0, "nothing was appended");
+        assert_eq!(typing.spine().slab_count(), 0);
+        // The reachable shape of the same thing: a cut that empties the only leaf.
+        typing.insert(b"abc").expect("typed");
+        typing.delete(0, 3).expect("deleted");
+        assert_eq!(typing.spine().slab_count(), 0);
+        assert_eq!(typing.sources().open_count(), 0);
+        // And typing again opens a fresh source at the same place.
+        typing.insert(b"x").expect("typed");
+        assert_eq!(typing.document_len(), 1);
+        assert_eq!(typing.sources().open_count(), 1);
+        assert_eq!(typing.caret(), 1);
+    }
+
+    #[test]
+    fn attach_over_no_bytes_moves_the_caret_without_opening_a_source() {
+        // D-52's other half, also from inside. `attach(0)` opened a source whose leaf
+        // `insert_slab` then drops as empty, so the register held a buffer that named nothing and
+        // `open_count` climbed past the one buffer a caller can hand a reader. `restore_mark` is
+        // the only caller that can hand it a zero, and no public route produces one today — so
+        // the test states the contract where the contract lives.
+        let mut typing = session(64);
+        typing.insert(b"ab").expect("typed");
+        assert_eq!(typing.sources().open_count(), 1);
+        let open = typing.open.take().expect("a source is open");
+        typing.sources.close(open.source);
+        typing.buffer = SlabText::from_plaintext(Vec::new(), 64).expect("empty is UTF-8");
+        typing.spine = typing.spine.remove_range(0, 2).expect("emptied");
+        typing.next_at = Some(0);
+        typing.draft.clear();
+        typing.attach(0).expect("attaches nothing");
+        assert_eq!(typing.sources().open_count(), 0, "no source over no bytes");
+        assert!(typing.open.is_none());
+        assert_eq!(typing.caret(), 0, "only the caret moved");
+        assert_eq!(typing.document_len(), 0);
+        assert_eq!(typing.spine().slab_count(), 0);
+    }
+
+    #[test]
+    fn a_character_wider_than_the_buffer_is_refused_rather_than_spun_on() {
+        // D-54: capacity one, and a three-byte character. The room is one, the split search walks
+        // `take` to zero because no prefix of the character is a character boundary, and the old
+        // loop sealed — which with nothing open does nothing — forever. The error is the contract.
+        let mut typing = session(1);
+        let refused = typing.insert("\u{2192}".as_bytes());
+        assert!(
+            matches!(
+                refused,
+                Err(TypingError::TooLarge {
+                    needed: 3,
+                    capacity: 1
+                })
+            ),
+            "a character the buffer cannot hold is an error, not a hang: {refused:?}"
+        );
+        assert_eq!(typing.document_len(), 0);
+        // A character that does fit still types, one byte at a time.
+        typing.insert(b"a").expect("typed");
+        assert_eq!(typing.document_len(), 1);
+        assert_eq!(typing.pending(), b"a");
     }
 
     #[test]

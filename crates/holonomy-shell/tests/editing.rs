@@ -884,3 +884,152 @@ fn an_empty_document_frames_without_reading_anything() {
     assert!(!shell.delete_forward().expect("nothing to delete"));
     assert!(!shell.undo().expect("nothing to undo"));
 }
+
+#[test]
+fn a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it() {
+    // D-50: `sync_measured` treated *any* one-leaf growth as a tail append and `push`ed a zero
+    // height. The difference the fix rests on is byte-anchored — the new leaf must begin where the
+    // document ended — so the two cases are asserted against each other here.
+    let mut shell = session();
+    shell.type_text(&repeat_leaf().repeat(8)).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    // 512 letters on a 200-unit line is three wrapped lines: 200, 200, 112.
+    assert_eq!(
+        shell.heights().total(),
+        Fixed::units(60),
+        "three wrapped lines of 512 letters"
+    );
+
+    // A tail append: one new leaf at the document's end. Every earlier height is still true.
+    shell
+        .move_caret_to(holonomy_shell::Move::DocumentEnd, false)
+        .expect("moved");
+    shell.type_text(&repeat_leaf()).expect("typed");
+    let _ = shell.frame().expect("a frame");
+    assert_eq!(
+        shell.heights().len(),
+        9,
+        "the index grew by one leaf, not a rebuild"
+    );
+    // Leaf 0 holds bytes 0..64, all of them inside the first 200-letter line, so it is charged
+    // that one line and nothing else — a leaf's height counts the lines that *start* in it.
+    assert_eq!(
+        shell.heights().height(0),
+        Fixed::units(20),
+        "and the heights before the append were not thrown away"
+    );
+
+    // A mid-document insert: the leaf splits and every height after the caret described a document
+    // that no longer exists. The index is rebuilt and the re-measure agrees with one layout.
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    shell
+        .move_caret_to(holonomy_shell::Move::DocumentStart, false)
+        .expect("moved");
+    for _ in 0..30 {
+        shell
+            .move_caret_to(holonomy_shell::Move::Right, false)
+            .expect("moved");
+    }
+    shell.type_text("X").expect("typed");
+    let _ = shell.frame().expect("a frame");
+    // Nine leaves, and the byte holding "X" registered one more where the cut fell: eleven slabs.
+    // The index is sized to the spine (`sync_measured` counts slabs, not seals), so it has eleven
+    // entries too — and the last is unmeasured, because only a frame that draws it can write its
+    // height. That gap is what D-57 and D-58 are about, and the two numbers being equal here is the
+    // point: an index shorter than the spine was D-50's other half.
+    assert_eq!(
+        shell.typing().spine().slab_count(),
+        11,
+        "the split added a leaf"
+    );
+    assert_eq!(
+        shell.heights().len(),
+        11,
+        "the index follows the spine leaf for leaf, measured or not"
+    );
+
+    shell.reflow().expect("measured again");
+    let document = {
+        let mut text = repeat_leaf().repeat(9);
+        text.insert(30, 'X');
+        text
+    };
+    let whole = layout_styled(StyledText::plain(&document), 0, WIDTH, &Fake);
+    assert_eq!(
+        shell.heights().total(),
+        whole.height(),
+        "the leaf walk and one continuous layout must agree"
+    );
+}
+
+#[test]
+fn a_pushed_tail_leaf_is_laid_out_from_its_predecessors_carry() {
+    // D-57: a seal cuts on a byte count, so the leaf a tail append pushes can begin in the middle
+    // of a wrapped line. `sync_measured` pushes it unmeasured — zero height, and the index's
+    // default carry says "this leaf begins a line". Anything that laid it out before a frame had
+    // measured it therefore started it at column zero, one line too high, and a reveal scrolled
+    // there. The caret is asked for before any frame runs, which is exactly the window's order:
+    // `App::press` reveals, and the binary draws afterwards.
+    let mut shell = session();
+    // One leaf of 64 letters on a 64-unit line is a single line; the next leaf starts a new one.
+    // Twenty letters on a 20-unit line is two lines of ten, so a cut after the tenth lands at a
+    // line start and a cut after the fifteenth does not.
+    shell.type_text(&"a".repeat(20)).expect("typed");
+    shell.flush().expect("sealed");
+    shell.type_text(&"b".repeat(20)).expect("typed");
+    shell.flush().expect("sealed");
+    shell.resize(Fixed::units(10), VIEWPORT);
+    shell.reflow().expect("measured");
+    // Two leaves, four lines: `aaaaaaaaaa aaaaaaaaaa` then the same for the b's.
+    assert_eq!(shell.heights().total(), Fixed::units(80));
+    assert_eq!(shell.heights().len(), 2);
+
+    // The caret goes to the middle of the second leaf and a keystroke opens a third.
+    shell
+        .move_caret_to(holonomy_shell::Move::DocumentStart, false)
+        .expect("moved");
+    for _ in 0..25 {
+        shell
+            .move_caret_to(holonomy_shell::Move::Right, false)
+            .expect("moved");
+    }
+    shell.type_text("c").expect("typed");
+    // `settle` registers the open leaf on its first byte, and `insert_slab` cut the second leaf at
+    // the caret to make room, so the split is in the **spine** at once: four slabs. The measured
+    // index is a snapshot the frame keeps, and no frame has run yet — that is the state this test
+    // is about — so `heights()` is still the two-leaf model and the assertion is on the spine.
+    assert_eq!(
+        shell.typing().spine().slab_count(),
+        4,
+        "the cut added one leaf"
+    );
+
+    // No frame has run, so the new leaf is unmeasured and its carry is the index's default.
+    let placed = shell.reveal_caret().expect("revealed");
+    let scroll = shell.scroll();
+    println!("HOLONOMY_REVEAL_UNMEASURED scrolled={placed} top={scroll:?}");
+
+    // The caret is at byte 26 of a 41-byte document, on the third of five lines — past the first
+    // screen of two, so the reveal has to scroll. With a default carry the new leaf was placed one
+    // line too high and the answer came out short by a line; the check is against the document's
+    // own geometry rather than a number.
+    //
+    // D-58 rides on the same state: `heights().total()` is still the four lines the last `reflow`
+    // measured, because the new leaf has not been drawn. A clamp against that total makes the
+    // reveal a no-op, which is the D-53 symptom surviving in a second place.
+    let document = format!("{}{}c{}", "a".repeat(20), "b".repeat(5), "b".repeat(15));
+    let whole = layout_styled(StyledText::plain(&document), 0, Fixed::units(10), &Fake);
+    let caret = whole.paint_point(26).expect("a caret on the third line");
+    let bottom = caret.top + caret.height;
+    assert!(
+        scroll + VIEWPORT >= bottom,
+        "the caret's line ends at {bottom:?} but the screen stops at {:?}",
+        scroll + VIEWPORT
+    );
+    assert!(
+        placed,
+        "the reveal reported no scroll, so it was clamped to a total that is short a leaf"
+    );
+}
