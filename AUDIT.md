@@ -66,6 +66,17 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-64 — the durability claim was stronger than the durability.** The window's
+  autosave comment read "nothing is lost if the machine dies between keystrokes", and the module
+  documentation promised that "what you write is still there when you open it again". The first is
+  true of every **sealed** byte: `Typing::seal` appends and witnesses the moment the buffer fills,
+  so the exposure between saves is bounded by `store::CAPACITY` (16 KiB) and does not grow with how
+  long someone types. It is false of the bytes in the open buffer, which are written only by
+  `Ctrl+S`, by the pause autosave, or on quit — and a crash before any of those loses them. The
+  second sentence is true but was doing the work of a guarantee it does not make. Both now say the
+  bounded thing, which is a real property and worth stating precisely: **at most one buffer's
+  worth of the most recent typing**, never anything older. Docs only; **verified by CI run
+  44908126224 on `636af4b`, every job green.**
 - **2026-11-21 — D-63 — an empty passphrase was accepted, and a closed tty was read as one.
   FIXED.** `prompt` collected bytes until `\r`; `stdin.read` returning **0** — `Ctrl+D` at a
   terminal, or a tty that went away — left the loop by the same `break` a typed line takes, and the
