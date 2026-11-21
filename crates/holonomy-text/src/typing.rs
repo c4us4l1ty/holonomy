@@ -824,6 +824,23 @@ impl<S: SegmentSink> Typing<S> {
         self.seal()
     }
 
+    /// A session resumed over a document that is already in the world-line.
+    ///
+    /// `spine` is the geometry the file's segment lengths give; the caret starts at its end, and
+    /// nothing is read until a frame or a residency fault asks for a leaf — so opening a long
+    /// document costs what opening a short one costs. There is no open leaf and no history: the
+    /// file is the floor, exactly as a seal leaves it.
+    ///
+    /// # Panics
+    ///
+    /// If `capacity` is zero, for the reason [`Self::new`] gives.
+    pub fn resume(sink: S, spine: Spine, capacity: usize) -> Self {
+        let mut typing = Self::new(sink, capacity);
+        typing.next_at = Some(spine.len());
+        typing.spine = spine;
+        typing
+    }
+
     /// The document's geometry, with the open source as its last leaf.
     #[must_use]
     pub fn spine(&self) -> &Spine {

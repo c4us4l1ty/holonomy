@@ -468,6 +468,15 @@ impl<'key> WorldLine<'key> {
         self.mmr.root()
     }
 
+    /// The plaintext length of every committed segment, in order.
+    ///
+    /// This is the geometry a document reopens with: the lengths are authenticated metadata in the
+    /// record headers, so a window can lay out a document without decrypting a byte of it — the
+    /// same rule the resident set lives by (AUDIT OQ-9's load-time half).
+    pub fn segment_lengths(&self) -> impl Iterator<Item = u32> + '_ {
+        self.segments.iter().map(|descriptor| descriptor.plaintext_len)
+    }
+
     /// Number of committed witness records, including genesis.
     pub fn witness_count(&self) -> u64 {
         self.next_witness_sequence

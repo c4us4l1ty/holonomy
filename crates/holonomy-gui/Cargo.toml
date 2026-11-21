@@ -20,3 +20,7 @@ holonomy-text = { path = "../holonomy-text" }
 # Raw mode and the window size, for the terminal front end. Already in the lockfile for the
 # seal's page locking, so this adds no dependency to the tree.
 libc.workspace = true
+# The document's file: a `.wavefunction` world-line, appended one sealed leaf at a time.
+holonomy-line = { path = "../holonomy-line" }
+# The passphrase, the capsule and the DEM key the segments are sealed with.
+holonomy-seal = { path = "../holonomy-seal" }

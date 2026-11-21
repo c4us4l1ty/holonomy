@@ -1,63 +1,38 @@
-//! The terminal app: Holonomy, open and typeable (`docs/TO-APP.md` M4b-i).
+//! The terminal app: Holonomy, open, typeable and durable (`docs/TO-APP.md` M4b-i and M5).
 //!
 //! ```text
-//! cargo run -p holonomy-gui --bin holonomy
+//! cargo run -p holonomy-gui --bin holonomy -- notes.wavefunction
 //! ```
 //!
-//! What this is: a real window in the sense that matters — you open it, you type, the text appears
-//! on the geometry the Eye measured, arrows move a caret, `Ctrl+Z` takes back a typing burst,
-//! `Ctrl+S` writes the open leaf through. It runs on the terminal's own cell grid, so the geometry
-//! and the screen are the same thing (`CellShaper`), which is what keeps paint and hit-test honest
-//! down to the last cell.
+//! The window: a terminal in raw mode, a grid of cells the Eye measured, keys decoded from the
+//! bytes a tty actually sends. The document: a `.wavefunction` world-line under a passphrase —
+//! created if the path does not exist, opened if it does. Every sealed leaf is one append and one
+//! witness, so `Ctrl+S`, the autosave that fires when typing pauses, and the seal on quit all go
+//! through the same commit path the L-6 rehearsal measures.
 //!
-//! What this is not, yet: durable. The document lives in memory for the length of the session; a
-//! closing window loses it, and nothing is sealed to a `.wavefunction` file. That is **M5** (open,
-//! save, unlock), and it is the next step: the world-line is already on disk-capable
-//! (`holonomy_line::WorldLine`) and the shape here — a `SegmentSink` that appends, a `SegmentSource`
-//! that reads back — is the socket it plugs into.
+//! Keys: printable text types; arrows, Home, End, PageUp and PageDown move the caret (hold shift to
+//! extend); `Ctrl+Z` undoes a burst, `Ctrl+Shift+Z` or `Ctrl+Y` redoes; `Ctrl+A` selects all;
+//! `Ctrl+S` saves now; `Ctrl+Q` or `Ctrl+C` saves and quits.
 //!
-//! The parts that need a tty live here and only here: raw mode, the window size, the read loop.
-//! Everything they call is tested without one (`term.rs`, `tests/terminal.rs`).
+//! What is still not here: the GPU backend (M4b-ii — it needs crates this environment cannot
+//! fetch), chrome and the security panel (M6), and the remaining gates (M7). What *is* here is the
+//! thing the question in `docs/TO-APP.md` asked: you can open the app and start writing, and what
+//! you write is still there when you open it again.
 
 use holonomy_eye::Fixed;
+use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
-use holonomy_gui::{App, CellSurface, Key, Keymap};
+use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
+use holonomy_shell::Effect;
 use holonomy_shell::Editor;
-use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
+use holonomy_text::{ResidentSet, Typing};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
-/// The document's world-line, in memory: the sink appends, the source reads back.
-///
-/// One object doing both is what M5 will not do — a real world-line is a file, opened under a
-/// passphrase — but it is the same socket, and the app cannot tell the difference.
-#[derive(Debug, Clone, Default)]
-struct Memory(std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+/// How long a pause counts as a pause, for the autosave.
+const PAUSE_MILLIS: i32 = 1_500;
 
-impl SegmentSink for Memory {
-    fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
-        let mut segments = self.0.lock().map_err(|_| "the store is poisoned")?;
-        let id = segments.len() as u64;
-        segments.push(plaintext.to_vec());
-        Ok(Appended {
-            segment: SegmentId::new(id),
-            witness_sequence: id + 1,
-            segment_root: [0u8; 32],
-            bytes_written: plaintext.len() as u64,
-        })
-    }
-}
-
-impl SegmentSource for Memory {
-    fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
-        let segments = self.0.lock().map_err(|_| "the store is poisoned")?;
-        segments
-            .get(usize::try_from(segment.get()).unwrap_or(usize::MAX))
-            .cloned()
-            .ok_or_else(|| format!("no {segment}"))
-    }
-}
-
-type Window = App<Memory, Memory, CellShaper, CellSurface>;
+type Window = App<store::DocumentSink, store::DocumentSource, CellShaper, CellSurface>;
 
 /// The terminal in raw mode, restored when it is dropped.
 struct RawMode {
@@ -66,8 +41,8 @@ struct RawMode {
 
 impl RawMode {
     fn enable() -> std::io::Result<Self> {
-        // SAFETY: `tcgetattr`/`tcsetattr` are called with a valid fd (0 and 1 are the tty this
-        // process was started on) and a fully initialised `termios` this function owns.
+        // SAFETY: `tcgetattr`/`tcsetattr` are called with a valid fd (0 is the tty this process was
+        // started on) and a fully initialised `termios` this function owns.
         unsafe {
             let mut current: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(libc::STDIN_FILENO, &mut current) != 0 {
@@ -92,8 +67,7 @@ impl Drop for RawMode {
         unsafe {
             libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.saved);
         }
-        // Leave the cursor visible and the screen clean.
-        print!("\x1b[0m\x1b[{};1H\x1b[J", 24);
+        print!("\x1b[0m\x1b[2J\x1b[1;1H");
         let _ = std::io::stdout().flush();
     }
 }
@@ -115,49 +89,146 @@ fn size() -> (usize, usize) {
     }
 }
 
-fn window(columns: usize, rows: usize) -> Window {
-    let store = Memory::default();
-    let residency = ResidentSet::new(store.clone(), 64 * 1024, 0).expect("a budget");
+/// Whether a byte is waiting, within `millis`. `false` on a timeout is the autosave's cue.
+fn readable(millis: i32) -> bool {
+    // SAFETY: a `pollfd` for fd 0, which this process owns for its whole life.
+    unsafe {
+        let mut descriptor = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        matches!(libc::poll(&mut descriptor, 1, millis), count if count > 0)
+    }
+}
+
+/// Asks for the passphrase with echo off, and returns what was typed.
+///
+/// Raw mode already turned echo off for the whole session, so this only has to collect bytes and
+/// answer the line and backspace keys. Nothing is echoed, which is the point.
+fn prompt(verb: &str, path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut stdout = std::io::stdout();
+    write!(stdout, "{} {} (passphrase): ", verb, path.display())?;
+    stdout.flush()?;
+    let mut stdin = std::io::stdin();
+    let mut phrase = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if stdin.read(&mut byte)? == 0 {
+            break;
+        }
+        match byte[0] {
+            b'\r' | b'\n' => break,
+            0x7f | 0x08 => {
+                phrase.pop();
+            }
+            0x03 => {
+                writeln!(stdout)?;
+                return Err(std::io::Error::other("cancelled at the passphrase"));
+            }
+            byte => phrase.push(byte),
+        }
+    }
+    writeln!(stdout)?;
+    stdout.flush()?;
+    Ok(phrase)
+}
+
+/// Builds the window over a document, with the file's own geometry.
+fn window(
+    document: &Document,
+    columns: usize,
+    rows: usize,
+) -> Result<Window, Box<dyn std::error::Error>> {
+    let spine = document.spine()?;
+    let residency = ResidentSet::new(document.source(), store::BUDGET, store::SLACK)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let editor = Editor::new(
-        Typing::new(store, 64 * 1024),
+        Typing::resume(document.sink(), spine, store::CAPACITY),
         residency,
         CellShaper,
         Fixed::units(columns as i64),
         Fixed::units(rows as i64),
     );
-    let surface = CellSurface::new(columns, rows, 1);
-    App::new(editor, Keymap::new(Fixed::units(rows as i64)), surface)
+    Ok(App::new(
+        editor,
+        Keymap::new(Fixed::units(rows as i64)),
+        CellSurface::new(columns, rows, 1),
+    ))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = window(80, 23);
-    let raw = RawMode::enable()?;
+/// What the status line says.
+fn status(path: &Path, document: &Document, bytes: u64, unsaved: bool, message: &str) -> String {
+    let name = path
+        .file_name()
+        .map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
+    let state = if unsaved { "unsaved" } else { "saved" };
+    let extra = if message.is_empty() {
+        String::new()
+    } else {
+        format!(" · {message}")
+    };
+    format!(
+        " holonomy · {name} · {bytes} bytes · {} segments · {state} · ^S save · ^Q quit{extra} ",
+        document.segment_count()
+    )
+}
+
+/// Saves now: the same intent `Ctrl+S` produces, so the commit path is the keymap's.
+fn save(app: &mut Window) -> bool {
+    match app.press(Key::Character('s'), Modifiers::control()) {
+        Ok(effects) => effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Saved)),
+        Err(_) => false,
+    }
+}
+
+fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error>> {
+    let (columns, rows) = size();
+    let text_rows = rows.saturating_sub(1).max(1);
+    let mut app = window(document, columns, text_rows)?;
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut decoder = Decoder::new();
     let mut bytes = [0u8; 256];
+    let mut unsaved = false;
+    let mut message = String::new();
     print!("\x1b[?25l\x1b[2J");
     loop {
-        let (columns, rows) = size();
-        let text_rows = rows.saturating_sub(1).max(1);
-        app.surface_mut().resize(columns, text_rows);
-        app.resize(Fixed::units(columns as i64), Fixed::units(text_rows as i64))?;
+        let (now_columns, now_rows) = size();
+        let surface_rows = now_rows.saturating_sub(1).max(1);
+        app.surface_mut().resize(now_columns, surface_rows);
+        app.resize(
+            Fixed::units(now_columns as i64),
+            Fixed::units(surface_rows as i64),
+        )?;
         app.draw()?;
-        let status = format!(
-            " holonomy · {} bytes · in memory · ^S save · ^Q quit ",
-            app.document_len()
+        let line = status(
+            path,
+            document,
+            app.document_len(),
+            unsaved,
+            message.as_str(),
         );
-        write!(stdout, "{}", term::screen(app.surface(), columns, &status))?;
+        write!(stdout, "{}", term::screen(app.surface(), now_columns, &line))?;
         if let Some((column, row)) = app.surface().caret_cell() {
             write!(stdout, "\x1b[?25h\x1b[{};{}H", row + 1, column + 1)?;
         }
         stdout.flush()?;
 
+        // A pause is a save: nothing is lost if the machine dies between keystrokes.
+        if !readable(PAUSE_MILLIS) {
+            if unsaved && save(&mut app) {
+                unsaved = false;
+                message.clear();
+            }
+            continue;
+        }
         let read = stdin.read(&mut bytes)?;
         if read == 0 {
             break;
         }
-        let mut quit = false;
         let mut inputs = Vec::new();
         for byte in &bytes[..read] {
             if let Some(input) = decoder.feed(*byte) {
@@ -166,24 +237,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // A read that ends mid-sequence leaves a lone Escape behind: deliver it.
         inputs.extend(decoder.flush_escape());
+        let mut quit = false;
         for input in inputs {
-            if let Input::Key(key, modifiers) = input {
-                if modifiers.control {
-                    match key {
-                        Key::Character('q') | Key::Character('c') => {
-                            quit = true;
-                            continue;
-                        }
-                        _ => {}
+            let Input::Key(key, modifiers) = input else {
+                continue;
+            };
+            if modifiers.control {
+                match key {
+                    Key::Character('q') | Key::Character('c') => {
+                        quit = true;
+                        continue;
                     }
+                    Key::Character('s') => {
+                        unsaved = !save(&mut app);
+                        message.clear();
+                        continue;
+                    }
+                    _ => {}
                 }
-                app.press(key, modifiers)?;
+            }
+            unsaved = true;
+            if app.press(key, modifiers).is_err() {
+                // A refused intent is not a crashed session: say so and keep the buffer.
+                message = "the world-line refused the last edit".to_owned();
             }
         }
         if quit {
             break;
         }
     }
-    drop(raw);
+    // Seal whatever is open before the window goes away: a quit is a save.
+    if unsaved || app.document_len() > 0 {
+        let _ = save(&mut app);
+    }
     Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A window needs a terminal; saying so is better than a stack of escape sequences in a pipe.
+    let mut args = std::env::args().skip(1);
+    let Some(path) = args.next().map(PathBuf::from) else {
+        eprintln!("usage: holonomy <document.wavefunction>");
+        eprintln!("  the file is created if it does not exist, opened if it does");
+        std::process::exit(2);
+    };
+    let raw = RawMode::enable()?;
+    let existing = path.exists();
+    let passphrase = prompt(if existing { "open" } else { "create" }, &path)?;
+    let document = if existing {
+        Document::open(&path, &passphrase)?
+    } else {
+        Document::create(&path, &passphrase)?
+    };
+    let started = document.trailing_bytes();
+    // Best effort: the phrase is the caller's, and this is the last moment it is needed. The
+    // derived keys live in the document and wipe themselves; the bytes typed do not, yet (OQ-5's
+    // neighbour, recorded as OQ-28).
+    let mut passphrase = passphrase;
+    passphrase.iter_mut().for_each(|byte| *byte = 0);
+    drop(passphrase);
+    let outcome = run(&path, &document);
+    let segments = document.segment_count();
+    let witnesses = document.witness_count();
+    drop(raw);
+    if started != 0 {
+        println!(
+            "recovered: {started} bytes past the last committed witness were discarded — \
+             a previous run died mid-append"
+        );
+    }
+    println!(
+        "{}: {} segments, {} witnesses, {}",
+        path.display(),
+        segments,
+        witnesses,
+        if outcome.is_ok() { "saved" } else { "the session ended badly" }
+    );
+    outcome
 }
