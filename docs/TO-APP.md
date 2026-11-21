@@ -244,6 +244,30 @@ hard-coded string.
 **Acceptance:** every number the panel shows is produced by a function with a unit test; a panel
 claim that disagrees with `ProtectedReport`/`LockReport` fails a test.
 
+**Done — the panel says only what it can measure.** `holonomy-gui::panel` assembles `Facts` from the
+live `ResidentSet` (resident, allocated and budget bytes, resident leaves), a real
+`probe_capability()` `mlock` of a probe page in this process (reported in the rung's own words,
+`LockCapability::claim`, with `describe_how` explaining the mechanism), and the world-line's
+committed segment and witness counts, its recovery report, and the result of a full `verify()` —
+which is asked for when the panel opens, never assumed. `Facts` lines are pure functions of its
+fields, so the tests mutate one field at a time and watch its line change; a hard-coded claim cannot
+pass. `None` renders as "not verified", a partial verification as "verified 2 of 5", and bytes are
+formatted by integer arithmetic (`1.5 KiB`, `1023.9 KiB`) so no number is rounded into a lie.
+`Ctrl+G` toggles the panel above the status line; the toolbar this release has is the status line
+itself (file, bytes, segments, saved/unsaved) plus that panel, which is what a terminal can show
+honestly.
+
+**Evidence:** `crates/holonomy-gui/tests/panel.rs` — the residency half against a real
+`ResidentSet`; the file half against a real world-line with a real `verify()`; the lock half against
+every rung, asserting each renders its own claim and no two rungs render alike; and the formatter's
+boundaries.
+
+**Deviation, stated:** the milestone names `ProtectedReport`, which does not exist in this codebase —
+the equivalents are `holonomy_seal::LockReport`/`LockCapability` and the resident set's own
+accounting, and those are what the panel reads. There is no separate "quorum" state in the
+world-line (a single-writer append log has none); the witness count and the verification result are
+what can be said, and the panel says only that.
+
 ### M7 — The gates that remain
 
 Block 5 gate 3 (BiDi): decide — implement runs, or record the deferral with the reason; it is

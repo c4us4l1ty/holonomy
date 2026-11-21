@@ -229,6 +229,24 @@ impl Document {
         Ok(spine_of(&line.line))
     }
 
+    /// Fully authenticates the committed segment bodies and the witness chain.
+    ///
+    /// This is what a panel may say "verified" on: it re-opens the file through the container's own
+    /// check and compares the identity and the last witness tag, so a file that changed under this
+    /// handle is reported rather than trusted.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Refused`] if the chain or a body does not authenticate — which is the same
+    /// answer a wrong passphrase gets, and for the same reason.
+    pub fn verify(&self) -> Result<holonomy_line::VerifyReport, StoreError> {
+        let line = self
+            .line
+            .try_borrow()
+            .map_err(|_| StoreError::Line("the document is busy".to_owned()))?;
+        line.line.verify().map_err(map_open)
+    }
+
     /// The sink half of the document, for a session that seals leaves into it.
     #[must_use]
     pub fn sink(&self) -> DocumentSink {

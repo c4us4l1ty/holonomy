@@ -223,6 +223,21 @@ fn interpret(sequence: &[u8]) -> Input {
 /// character into the grid — the text is the document's, not the cursor's.
 #[must_use]
 pub fn screen(surface: &CellSurface, columns: usize, status: &str) -> String {
+    screen_with(surface, columns, &[], status)
+}
+
+/// The screen with a panel above the status line — what `Ctrl+G` draws.
+///
+/// Same renderer, one extra block: the panel's lines are the security panel's own text (see
+/// [`crate::panel`]), truncated to the terminal's width, so a number that is too long to show is
+/// visibly cut rather than silently wrong.
+#[must_use]
+pub fn screen_with(
+    surface: &CellSurface,
+    columns: usize,
+    panel: &[String],
+    status: &str,
+) -> String {
     let mut out = String::with_capacity(columns * 24 + 64);
     out.push_str("\x1b[H");
     for row in 0..surface.rows() {
@@ -231,6 +246,10 @@ pub fn screen(surface: &CellSurface, columns: usize, status: &str) -> String {
             line.push(surface.at(column, row));
         }
         out.push_str(line.trim_end());
+        out.push_str("\x1b[K\r\n");
+    }
+    for line in panel {
+        out.push_str(&line.chars().take(columns).collect::<String>());
         out.push_str("\x1b[K\r\n");
     }
     out.push_str("\x1b[7m");
