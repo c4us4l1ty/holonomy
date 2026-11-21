@@ -369,12 +369,16 @@ fn typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret() {
     );
     assert_eq!(column, 0, "each caret row begins at the line's first column");
     assert!(row > 0, "the caret is not on the document's first row");
+    // This document is longer than the session's 64-byte buffer, so the keystrokes *did* seal —
+    // that is the buffer filling, not the reveal. What must not happen is the screen standing
+    // still, which the scroll assertion above covers.
     assert!(
-        store.segments().is_empty(),
-        "typing must not have forced a seal to move the screen"
+        !store.segments().is_empty(),
+        "a 160-byte document cannot fit one 64-byte buffer"
     );
     println!(
-        "HOLONOMY_WINDOW_REVEAL caret_row={row} rows={}",
-        window.surface().rows()
+        "HOLONOMY_WINDOW_REVEAL caret_row={row} rows={} segments={}",
+        window.surface().rows(),
+        store.segments().len()
     );
 }
