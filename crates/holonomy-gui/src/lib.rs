@@ -132,6 +132,17 @@ impl Keymap {
         Self { page }
     }
 
+    /// Re-points the page size at the height the window is actually showing.
+    ///
+    /// D-60: `page` was set once, when the window was built, and never followed the viewport.
+    /// The terminal's panel is the visible case — `Ctrl+G` takes rows *away* from the text area,
+    /// so Page Down stepped a screen that no longer existed and skipped lines the user never saw —
+    /// but a resized window has the same defect with no panel involved. The window is the thing
+    /// that knows both numbers, so it sets this on every resize.
+    pub fn set_page(&mut self, page: Fixed) {
+        self.page = page;
+    }
+
     /// The intent `key` means under `modifiers`, if any.
     #[must_use]
     pub fn intent(&self, key: Key, modifiers: Modifiers) -> Option<Intent> {
@@ -495,6 +506,10 @@ where
             width,
             viewport: height,
         })?;
+        // D-60: a page is a screen, and the screen just changed. The keymap was told the height
+        // it had when the window was built and was never told again, so a panel opening (which
+        // shrinks the surface) or a resized terminal made Page Down skip lines.
+        self.keymap.set_page(self.editor.viewport());
         if width_changed {
             // Through the intent, for the reason above: a re-measure is a state change and owes
             // the caller its effects. Best effort on the error — a document the reader refuses is

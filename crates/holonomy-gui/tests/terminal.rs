@@ -182,3 +182,33 @@ fn a_resized_terminal_redraws_within_its_new_columns() {
     assert_eq!(window.surface().columns(), 10);
     println!("HOLONOMY_TERMINAL_RESIZE columns=10 rows=2");
 }
+
+#[test]
+fn a_page_is_the_screen_the_window_is_showing_now() {
+    // D-60: `Keymap::page` was set once, when the window was built, and never followed the
+    // viewport. The terminal makes it visible: `Ctrl+G`'s panel takes rows away from the text
+    // area, so Page Down stepped a screen that no longer existed — four lines when two were
+    // visible, so two lines were never shown. A resized window has the same defect with no panel.
+    let mut window = window();
+    // Forty bytes on a 24-column line is two wrapped lines, so there is somewhere to scroll to
+    // and two rows are a screen of it.
+    type_bytes(&mut window, &[b'a'; 40]);
+    window
+        .resize(Fixed::units(COLUMNS as i64), Fixed::units(2))
+        .expect("resized to two rows");
+    assert_eq!(window.editor().viewport(), Fixed::units(2));
+
+    window
+        .press(Key::PageDown, Modifiers::none())
+        .expect("paged down");
+    assert_eq!(
+        window.editor().scroll(),
+        Fixed::units(2),
+        "a page is the screen the window shows, not the one it had when it was built"
+    );
+    println!(
+        "HOLONOMY_TERMINAL_PAGE scroll={} viewport={}",
+        window.editor().scroll().sixtyfourths(),
+        window.editor().viewport().sixtyfourths()
+    );
+}
