@@ -698,12 +698,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// answer is the leaf's, because that is what the carry chain means.
     fn carry_of(&mut self, leaf: usize) -> Result<Carry, ShellError> {
         let mut at = leaf;
-        // Only a run of unmeasured leaves at the tail can walk, and the walk is bounded by the
-        // leaf count, so this terminates on any document.
-        for _ in 0..CLUSTER_LEAF_LIMIT {
-            if self.measured.is_measured(at) || at == 0 {
-                break;
-            }
+        // The walk is bounded by the leaf count, not by the cluster limit: `Measured::push` can add
+        // an arbitrarily long unmeasured run in one sync (a paste that crosses many leaves), and a
+        // cap here would answer a *different* leaf's carry instead of reporting that it cannot. The
+        // loop ends at leaf 0 at the latest, and `at` strictly decreases.
+        while at > 0 && !self.measured.is_measured(at) {
             at -= 1;
         }
         if at == leaf {
@@ -721,7 +720,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// Measured from the leaf's own carry and its text, because the index stores where a leaf
     /// *begins*, not where it ends — and a reveal on an unmeasured tail leaf needs the latter
     /// (D-57). The answer is this leaf's own carry when the text is empty (nothing here moved the
-    /// line), and not broken when the line broke inside it (a break always starts the next line).
+    /// line), and a fresh line when the text broke one (a break always starts the next).
     fn carry_after(&mut self, leaf: usize) -> Result<Carry, ShellError> {
         let Some((start, end)) = self.leaf_bounds(leaf) else {
             return Ok(Carry::default());
