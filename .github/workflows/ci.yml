@@ -244,6 +244,9 @@ jobs:
   smoke:
     name: M8 smoke — the shipped binary through a real terminal
     runs-on: ubuntu-latest
+    # A smoke test that hangs is worse than one that fails: the first run of this job sat for 25
+    # minutes because the pty driver could not deliver Ctrl+Q. The cap turns a hang into a failure.
+    timeout-minutes: 10
     # Push-only, like the other jobs that need a terminal or a loop device: pull-request runs from
     # forks get no secrets and the evidence is posted back to the diag issue, which needs write.
     if: github.event_name == 'push'
@@ -254,18 +257,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # `script(1)` (util-linux) is what gives the child a pty. The window calls `tcgetattr(0)` and
-      # fails against a pipe, so without this the job would be testing a stub of the thing users
-      # run. It is present on the GitHub ubuntu image, and the step fails loudly if it is not.
-      - name: Ensure a pty driver is available
+      # The pty comes from `scripts/drive-pty.py`, not from `script(1)`. `script` was the first
+      # attempt and it hangs: it cannot reliably feed a pty non-interactively, so a program that
+      # reads one byte at a time sees end-of-input before the piped bytes are readable and then
+      # waits on a terminal nobody is typing into — this job sat for 25 minutes on its first run.
+      # A pty the driver owns, with a deadline and a kill, has no such ambiguity.
+      - name: Ensure python3 is available for the pty driver
         run: |
-          if ! command -v script >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y util-linux
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "no python3: cannot drive a pty" >&2; exit 1
           fi
-          if ! command -v script >/dev/null 2>&1; then
-            echo "no script(1): cannot drive a pty" >&2; exit 1
-          fi
-          echo "script: $(script --version 2>&1 | head -1)"
+          python3 --version
       - name: Build the binary the way a user would
         run: cargo build --locked --release -p holonomy-gui --bin holonomy
       - name: Drive it — create, reopen, refuse wrong and empty passphrases

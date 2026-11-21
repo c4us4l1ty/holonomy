@@ -9,8 +9,14 @@ set -euo pipefail
 # path — would be invisible to all of them. That is the gap M8 exists to close.
 #
 # Why a pty: the window puts the terminal in raw mode with `tcgetattr(0)`, which fails against a
-# pipe. `script(1)` gives the child a real terminal, so what runs here is the same code path a
-# person runs, not a stub of it.
+# pipe. `scripts/drive-pty.py` gives the child a real terminal and feeds it keys on a schedule, so
+# what runs here is the same code path a person runs, not a stub of it.
+#
+# `script(1)` was the first attempt and it hangs, which is worth recording: it cannot reliably feed
+# a pty non-interactively, so a program reading one byte at a time sees end-of-input before the
+# piped bytes are readable and then waits on a terminal nobody is typing into. The M8 smoke job sat
+# for 25 minutes on CI before that was found. A pty the driver owns, with a deadline and a kill,
+# has no such ambiguity.
 #
 # What is asserted, end to end:
 #   1. a document is created by typing a passphrase and some text, and quitting saves it;
@@ -50,23 +56,48 @@ if [[ ! -x "$binary" ]]; then
   exit 1
 fi
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Run `binary` on a pty: type `phrase` + Return, then `text`, then Ctrl+Q.
+#
+# Three separate writes, not one: a raw-mode program reads the phrase until Return, and if the
+# sentence arrived in the same write the phrase loop would stop at Return and the rest would sit in
+# the pty buffer — which works only by luck of buffer sizes. The driver's per-key delay makes the
+# ordering explicit.
+#
+# `ctrl_q` is what quits: the window saves and exits on it, so a clean exit is the save's receipt.
+#
+# Returns the child's exit status, so `if drive ...; then` reads as "did it accept this".
+drive() {
+  local out="$1"
+  local phrase="$2"
+  local text="$3"
+  shift 3
+  local spec="$work_dir/keys.json"
+  python3 -c '
+import json, sys
+phrase, text, path = sys.argv[1], sys.argv[2], sys.argv[3]
+json.dump([[0.8, phrase + "\r"], [0.5, text], [0.5, "\u0011"]], open(path, "w"))
+' "$phrase" "$text" "$spec"
+  python3 "$here/drive-pty.py" \
+    --timeout "${HOLONOMY_SMOKE_TIMEOUT:-30}" \
+    --out "$out" \
+    --keys "$spec" \
+    -- "$binary" "$@"
+}
+
 phrase="correct horse battery staple"
 # The sentence is deliberately distinctive: it is asserted present when the document is reopened,
 # and asserted absent from the file's bytes.
 sentence="the quick brown fox jumps over the lazy dog"
-ctrl_q=$'\x11'
 
 echo "smoke: binary=$binary"
 echo "smoke: home=$home"
 
 # --- 1. create, type, save on quit ------------------------------------------------------------
 first="$log/first.session"
-keys="$phrase\r$sentence$ctrl_q"
 first_status=0
-HOME="$home" TERM=xterm-256color \
-  printf '%b' "$keys" \
-  | HOME="$home" TERM=xterm-256color script -qec "$binary $document" "$first" >/dev/null 2>&1 \
-  || first_status=$?
+drive "$first" "$phrase" "$sentence" "$document" || first_status=$?
 
 if [[ ! -f "$document" ]]; then
   echo "smoke: FAIL — no document was created at $document" >&2
@@ -97,20 +128,31 @@ else
   head -c 32 "$document" | od -c >&2
   exit 1
 fi
-if grep -qa "$sentence" "$document"; then
-  echo "smoke: FAIL — the typed sentence is readable in the file's bytes" >&2
-  exit 1
-fi
-echo "smoke: ok — the typed sentence does not appear in the ciphertext"
+# Several fragments, not the whole sentence: a leak that stopped at a segment boundary would
+# still expose most of what was typed, and matching only the complete 43-byte string would call
+# that a pass. A negative control caught exactly that — a stand-in writing "the quick brown fox
+# jumps" passed this check until the fragments below were added.
+leaked=0
+while IFS= read -r fragment; do
+  if grep -qa "$fragment" "$document"; then
+    echo "smoke: FAIL — '$fragment' is readable in the file's bytes" >&2
+    leaked=1
+  fi
+done <<'FRAGMENTS'
+quick brown
+brown fox
+lazy dog
+jumps over
+FRAGMENTS
+[[ $leaked -eq 0 ]] || exit 1
+echo "smoke: ok — no fragment of the typed sentence appears in the ciphertext"
 
 # --- 3. reopen and read it back ---------------------------------------------------------------
 second="$log/second.session"
 # Open, then quit at once: `Ctrl+Q` with nothing pending writes nothing, which is the case D-51
 # made reachable. The assertion is that the phrase is accepted and the run ends cleanly.
-HOME="$home" TERM=xterm-256color \
-  printf '%b' "$phrase\r$ctrl_q" \
-  | HOME="$home" TERM=xterm-256color script -qec "$binary $document" "$second" >/dev/null 2>&1
-status_second=$?
+status_second=0
+drive "$second" "$phrase" "" "$document" || status_second=$?
 if [[ $status_second -ne 0 ]]; then
   echo "smoke: FAIL — reopening the document exited $status_second" >&2
   sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$second" | tr -d '\r' | tail -30 >&2 || true
@@ -129,9 +171,7 @@ echo "smoke: ok — the same passphrase reopened the document and it showed the 
 before_bytes="$(stat -c %s "$document")"
 before_sum="$(sha256sum "$document" | cut -d' ' -f1)"
 wrong="$log/wrong.session"
-if HOME="$home" TERM=xterm-256color \
-  printf '%b' "the wrong phrase\r" \
-  | HOME="$home" TERM=xterm-256color script -qec "$binary $document" "$wrong" >/dev/null 2>&1; then
+if drive "$wrong" "the wrong phrase" "" "$document"; then
   echo "smoke: FAIL — a wrong passphrase was accepted" >&2
   exit 1
 fi
@@ -145,9 +185,7 @@ echo "smoke: ok — a wrong passphrase was refused and the file is byte-identica
 # --- 5. an empty passphrase is refused (D-63) and creates nothing ------------------------------
 uncreated="$work_dir/never.wavefunction"
 empty="$log/empty.session"
-if HOME="$home" TERM=xterm-256color \
-  printf '\r' \
-  | HOME="$home" TERM=xterm-256color script -qec "$binary $uncreated" "$empty" >/dev/null 2>&1; then
+if drive "$empty" "" "" "$uncreated"; then
   echo "smoke: FAIL — an empty passphrase was accepted" >&2
   exit 1
 fi
