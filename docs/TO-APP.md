@@ -283,8 +283,20 @@ decision can be wrong, and the harness was verified by deliberately breaking the
 CI fail. L-5 itself stays `spec` because it names Block 6's GPU window — D-69 records what the
 promotion still owes rather than letting a green test stand in for a met law.
 
-Remaining: Block 3's two deferred clauses. The full VISION budget table. Each one either prints its
-numbers green or moves to `AUDIT.md` as an open question with a reason.
+Block 3's two deferred clauses: **written down as decisions (D-70, D-71), not left in a roadmap
+checkbox.** D-70 records that the ENOSPC rehearsal proves the *refusal* is clean but cannot prove
+the *torn write* is recoverable, because a loop filesystem still flushes through the host page
+cache — so L-6's physical qualification is owned by Block 6 and Block 10 and stays `spec`. D-71
+records exactly which client L-10's number covers (rsync 3.4.1, local daemon over TCP, one
+workload) and that every other client and backend is Block 10's, or an explicit narrowing of the
+law.
+
+The full VISION budget table: **now generated, not written.** `BUDGETS` in
+`crates/holonomy-ledger/src/laws.rs` maps VISION §4 onto the law table and onto the harness that
+measures each row, `xtask gates` renders it into `GATES.md`, and `gates --check` fails the build if
+the two disagree. Two rows say **"nothing yet"** out loud — L-7's wipe and L-9's portability have no
+harness at all. No remaining M7 item is unaddressed: each one either prints its numbers green or
+moved to `AUDIT.md` with an owner and a reason.
 
 ### M8 — Packaging
 

@@ -66,6 +66,31 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-70 — L-6 physical qualification: deferred by scope, with an owner and a named
+  test.** What is *evidenced*: short-write injection at every append byte, both synchronous failure
+  modes, torn-tail recovery, and a real ext4 loop filesystem driven out of space
+  (`scripts/qualify-ext4-enospc.sh`, its own CI job whose name says "not power-loss
+  qualification"). What is **not** evidenced: a controlled power cut at arbitrary instants,
+  write-cache/controller behaviour beneath the filesystem, and any device matrix. The ENOSPC
+  rehearsal proves the *refusal* is clean; it cannot prove the *torn write* is recoverable, because
+  a loop filesystem still flushes through the host page cache. This is deferred, not waived: the
+  write ordering the suite will test is frozen now with a witness per append, and the suite itself
+  is **owned by Block 6** (kill-power-at-random-instant) and **Block 10** (all three OSes at the
+  release gate). L-6 stays `spec`, exactly as `docs/THREAT-MODEL.md` §5 states to a reader. A green
+  gate would need hardware this project does not control, and holding Block 3 open for equipment
+  access — rather than for an unproven design claim — is the trade recorded here.
+- **2026-11-21 — D-71 — L-10 client and backend scope: deferred, and the law says which client it
+  means.** The measurement is real and runs every push: the ignored rsync harness transfers a
+  ~60 MB file, appends ~263 KB, and asserts the client's literal data stays within appended bytes
+  plus one 64 KiB block while application-layer bytes stay within 8× appended. CI run 44923942692
+  printed `HOLONOMY_RSYNC_MEASUREMENT client=rsync 3.4.1 protocol version 32` with
+  `delta_application_bytes=334907`. What that establishes is *one client, one transport (a local
+  rsync daemon over TCP), one build, one workload*. It says nothing about other clients, cloud sync
+  services, or remote backends, any of which may re-read the whole file or re-download it.
+  **Owned by Block 10**: either a backend matrix runs there, or L-10 is explicitly narrowed in
+  `LAWS` at the release gate to name the client class it covers. The GATES budget table renders
+  this row with its `measured_by` and its `owes`, so the narrowing sits in the contract rather
+  than in a reader's memory. L-10 stays `spec`.
 - **2026-11-21 — D-68 — an idle window rewrote its whole screen every 1.5 seconds.** GATES law L-5
   is "zero repaint and zero text-path timers while the view is unchanged", and the window broke the
   first clause on every loop iteration. `Window::draw` already returns `Ok(false)` when nothing is
