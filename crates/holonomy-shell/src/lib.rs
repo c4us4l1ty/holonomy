@@ -214,6 +214,25 @@ pub struct Editor<S, R: SegmentSource, H> {
     /// or before it. This records that byte, so `sync_measured` can answer the question instead of
     /// guessing.
     len_synced: u64,
+    /// The height and carry of the **open** tail leaf, and the document length they were measured
+    /// at — or `None` while nothing has measured it (D-58).
+    ///
+    /// The index has one entry per *sealed* leaf, and the bytes a user is typing are in none of
+    /// them until the buffer seals. A document that fits one buffer therefore measured zero
+    /// height: `reflow` laid out nothing, `scroll_to` clamped every scroll to zero, and Page Down
+    /// did nothing at all on a document that was several screens long. The tail is kept apart from
+    /// the index rather than appended to it because the index's leaf *i* must be the spine's leaf
+    /// *i* — the window's own assertion — and this leaf has no spine entry.
+    tail: Option<Tail>,
+}
+
+/// The open tail leaf's measured height, and the length it described.
+#[derive(Debug, Clone, Copy)]
+struct Tail {
+    /// The document's length when this was measured; a longer or shorter one invalidates it.
+    len: u64,
+    /// Height of the lines that start in the tail.
+    height: Fixed,
 }
 
 impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
@@ -244,6 +263,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             view: View::IDENTITY,
             selection: Selection::caret(0),
             len_synced: len,
+            tail: None,
         }
     }
 
@@ -313,9 +333,16 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     }
 
     /// Scrolls so `top` is the viewport's first logical unit, clamped into the document.
+    ///
+    /// The document's height here includes the **open tail** (D-58). Without it a document still
+    /// inside its buffer measured nothing, and every scroll clamped to zero — Page Down did
+    /// nothing on a document several screens long. A tail that cannot be read is not a reason to
+    /// refuse the scroll: the clamp then uses the sealed height alone, which is what it used to do
+    /// always, and the frame that follows reports the refusal.
     pub fn scroll_to(&mut self, top: Fixed) {
-        let known = self.measured.total();
-        self.scroll_to_within(top, known);
+        let sealed = self.measured.total();
+        let tail = self.tail_height().unwrap_or(Fixed::ZERO);
+        self.scroll_to_within(top, sealed + tail);
     }
 
     /// Sets the scroll position, clamped so `top` can be reached even when the index is short.
@@ -359,6 +386,8 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let leaves = self.typing.spine().slab_count() as usize;
             self.measured = Measured::new(leaves);
             self.len_synced = self.typing.spine().len();
+            // The open tail's height described the old wrap as much as the index did.
+            self.tail = None;
             self.scroll = Fixed::ZERO;
         }
         self.width = width;
@@ -730,6 +759,64 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Ok(carried)
     }
 
+    /// The open tail's height, measuring it if the open bytes have changed since the last time.
+    ///
+    /// Best effort: `None` when the tail cannot be read. No measurement is written on a refusal, so
+    /// the next call tries again.
+    fn tail_height(&mut self) -> Option<Fixed> {
+        self.measure_tail().ok()?;
+        self.tail.map(|tail| tail.height)
+    }
+
+    /// Measures the open tail leaf, if it has not been measured at its current length.
+    ///
+    /// One leaf, faulted in alone, with the carry the last sealed leaf handed on — the same walk
+    /// [`Self::reflow`] makes, stopped at the leaf the spine does not have yet.
+    fn measure_tail(&mut self) -> Result<(), ShellError> {
+        let len = self.typing.document_len();
+        if self.tail.is_some_and(|tail| tail.len == len) {
+            return Ok(());
+        }
+        self.tail = None;
+        let sealed = self.typing.spine().len();
+        if len <= sealed {
+            return Ok(());
+        }
+        // The carry the tail begins with is the one the last sealed leaf ended at, and the index
+        // stores the carry a leaf was measured *with* — so that leaf is measured again, exactly as
+        // `measure_through` does it.
+        let leaves = self.typing.spine().slab_count();
+        let carry = if leaves == 0 {
+            Carry::default()
+        } else {
+            let inherited = self.measured.carry(leaves as usize - 1);
+            self.measure_leaf(leaves - 1, inherited)?.1
+        };
+        let (text, from) = {
+            let read = self.read(sealed, len)?;
+            leaf_text(read.text(), sealed, carry)
+        };
+        let layout = layout_styled_continuing(
+            StyledText::plain(text),
+            from,
+            carry.x,
+            carry.cluster,
+            self.width,
+            &self.shaper,
+        );
+        let mut height = Fixed::ZERO;
+        for (index, line) in layout.lines().iter().enumerate() {
+            // The first line is the tail of a line that began in the sealed text: it was charged
+            // there, and it is not a line of this leaf.
+            if index == 0 && !carry.x.is_zero() {
+                continue;
+            }
+            height += line.height();
+        }
+        self.tail = Some(Tail { len, height });
+        Ok(())
+    }
+
     /// Measures every unmeasured leaf up to and including `leaf`, so its prefix height is exact.
     ///
     /// The index is a prefix of measured leaves and a tail of zero-height placeholders, which is
@@ -871,12 +958,17 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let leaves = self.typing.spine().slab_count();
         self.measured = Measured::new(leaves as usize);
         self.len_synced = self.typing.spine().len();
+        self.tail = None;
         let mut carried = Carry::default();
         for leaf in 0..leaves {
             let (height, next) = self.measure_leaf(leaf, carried)?;
             self.measured.set(leaf as usize, height, carried);
             carried = next;
         }
+        // D-58: the bytes in the open buffer are not in any sealed leaf, so a document that fits
+        // one buffer would measure nothing at all. The tail is measured here too, which is what
+        // makes "the whole document can be scrolled before it has been seen" true of it.
+        self.measure_tail()?;
         Ok(())
     }
 
