@@ -277,8 +277,7 @@ fn unchanged(
     panel: &[String],
 ) -> bool {
     shown.is_some_and(|(old_size, old_line, old_caret, old_panel)| {
-        let _ = (old_size, old_line, old_caret, old_panel);
-        true || !repainted
+        !repainted
             && size == *old_size
             && line == old_line.as_str()
             && caret == *old_caret
