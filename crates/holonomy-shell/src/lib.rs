@@ -651,6 +651,13 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// the line a paint of the same byte would choose, and falls back to the previous cluster's
     /// leaf only when the caret's own leaf does not draw it.
     fn caret_place(&mut self) -> Result<Option<(Fixed, Fixed)>, ShellError> {
+        // The index is brought in step with the spine **here**, not only in `frame`. This reads
+        // `measured.heights.prefix(leaf)` with a leaf number that comes from the spine, and between
+        // a keystroke and the frame that follows it the two disagree by design: a seal or an append
+        // changed `slab_count` and nothing has measured the new leaf yet. `frame` calls this on its
+        // own way in, so it always ran after a sync — until the keystroke path called a reveal
+        // first (D-53), and then the prefix was asked for a leaf past the end of the model.
+        self.sync_measured();
         let caret_at = self.typing.caret();
         for probe in [caret_at, caret_at.saturating_sub(1)] {
             let Some(leaf) = self.leaf_of(probe) else {

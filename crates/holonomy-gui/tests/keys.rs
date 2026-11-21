@@ -215,9 +215,16 @@ fn arrows_move_a_caret_and_keep_the_column() {
     window
         .press(Key::Home, Modifiers::control())
         .expect("moved");
-    window.press(Key::Down, Modifiers::none()).expect("moved");
-    window.press(Key::Right, Modifiers::none()).expect("moved");
-    assert_eq!(window.caret(), 4, "down+right is not column 1 of line 2");
+    let mut trail = vec![window.caret()];
+    let down = window.press(Key::Down, Modifiers::none()).expect("moved");
+    trail.push(window.caret());
+    let right = window.press(Key::Right, Modifiers::none()).expect("moved");
+    trail.push(window.caret());
+    assert_eq!(
+        window.caret(),
+        4,
+        "down+right is not column 1 of line 2: trail={trail:?} down={down:?} right={right:?}"
+    );
     window.press(Key::Up, Modifiers::none()).expect("moved");
     assert_eq!(window.caret(), 1, "up did not keep the column");
     window.press(Key::Down, Modifiers::none()).expect("moved");
