@@ -455,21 +455,24 @@ where
         }
         self.typing = typing;
         let mut effects = self.editor.apply(intent)?;
-        // D-53: the caret a keystroke leaves behind is the window's to keep on screen, and nothing
-        // was doing it. A document longer than a screen scrolled nowhere, so typing past the last
-        // visible line moved the caret to a row that was never painted and the screen stopped
-        // following the person typing. The shell already has the policy (the smallest scroll that
-        // shows the caret); the loop just never asked for it.
-        // Best effort: the edit has already landed, and a leaf the reader could not lay out is the
-        // *frame's* problem. Propagating it here would report a keystroke that reached the document
-        // as a refused edit — the same lie D-47 was about, one layer down.
-        if matches!(intent, Intent::Type(_) | Intent::Backspace | Intent::DeleteForward)
-            && self.editor.reveal_caret().unwrap_or(false)
-        {
-            if !effects.contains(&Effect::Redraw) {
-                effects.push(Effect::Redraw);
+        // D-53/D-57: the caret a keystroke leaves behind is the window's to keep on screen, and
+        // nothing was doing it. A document longer than a screen scrolled nowhere, so typing past
+        // the last visible line moved the caret to a row that was never painted and the screen
+        // stopped following the person typing. The shell already has the policy (the smallest
+        // scroll that shows the caret); the loop just never asked for it.
+        //
+        // It is asked through `Intent::RevealCaret` rather than by calling `reveal_caret` here:
+        // the intent layer is the one place that turns a state change into the effects a backend
+        // renders from, and a window that reached past it returned no `Redraw` for a scroll it had
+        // performed. Best effort on the error: the edit has already landed, and a leaf the reader
+        // could not lay out is the *frame's* problem — propagating it would report a keystroke that
+        // reached the document as a refused edit, the same lie D-47 was about, one layer down.
+        if matches!(intent, Intent::Type(_) | Intent::Backspace | Intent::DeleteForward) {
+            if let Ok(revealed) = self.editor.apply(Intent::RevealCaret) {
+                if !revealed.is_empty() && !effects.contains(&Effect::Redraw) {
+                    effects.push(Effect::Redraw);
+                }
             }
-            self.dirty = true;
         }
         if !effects.is_empty() {
             self.dirty = true;
@@ -493,9 +496,14 @@ where
             viewport: height,
         })?;
         if width_changed {
-            // Best effort on purpose: a document the reader refuses is a provisional frame, not a
-            // dead window, and the refusal has already been reported by whatever drew it.
-            let _ = self.editor.reflow();
+            // Through the intent, for the reason above: a re-measure is a state change and owes
+            // the caller its effects. Best effort on the error — a document the reader refuses is
+            // a provisional frame, not a dead window, and the refusal is reported by whatever drew.
+            if let Ok(reflowed) = self.editor.apply(Intent::Reflow) {
+                if !reflowed.is_empty() && !effects.contains(&Effect::Redraw) {
+                    effects.push(Effect::Redraw);
+                }
+            }
         }
         if !effects.is_empty() {
             self.dirty = true;

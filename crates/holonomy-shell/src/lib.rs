@@ -642,7 +642,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let Some((start, end)) = self.leaf_bounds(leaf) else {
                 continue;
             };
-            let carried = self.measured.carry(leaf);
+            let carried = self.carry_of(leaf)?;
             let read = self.read(start, end)?;
             let (text, from) = leaf_text(read.text(), start, carried);
             let layout = layout_styled_continuing(
@@ -669,6 +669,77 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             }
         }
         Ok(None)
+    }
+
+    /// The carry `leaf` is measured from.
+    ///
+    /// D-57: a leaf the frame has not measured has no carry of its own, and `Carry::default()`
+    /// says "this leaf begins a line" — true only when it really does. A tail leaf pushed by
+    /// `sync_measured` is in exactly that state until the next frame measures it, so anything that
+    /// asked before then laid it out from column zero: a reveal scrolled to a line the caret is not
+    /// on, and a backspace could cut a `\n` away from the `\r` in front of it. The predecessor's
+    /// answer is the leaf's, because that is what the carry chain means.
+    fn carry_of(&mut self, leaf: usize) -> Result<Carry, ShellError> {
+        let mut at = leaf;
+        // Only a run of unmeasured leaves at the tail can walk, and the walk is bounded by the
+        // leaf count, so this terminates on any document.
+        for _ in 0..CLUSTER_LEAF_LIMIT {
+            if self.measured.is_measured(at) || at == 0 {
+                break;
+            }
+            at -= 1;
+        }
+        if at == leaf {
+            return Ok(self.measured.carry(leaf));
+        }
+        let mut carried = self.carry_after(at)?;
+        // Every leaf after `at` begins where the one before it ended, and it trims nothing: the
+        // carry the tail leaf would be measured with is the carry `at` ends at.
+        carried.skip = 0;
+        Ok(carried)
+    }
+
+    /// The carry `leaf` ended at: the state the leaf after it is measured from.
+    ///
+    /// Measured from the leaf's own carry and its text, because the index stores where a leaf
+    /// *begins*, not where it ends — and a reveal on an unmeasured tail leaf needs the latter
+    /// (D-57). The answer is this leaf's own carry when the text is empty (nothing here moved the
+    /// line), and not broken when the line broke inside it (a break always starts the next line).
+    fn carry_after(&mut self, leaf: usize) -> Result<Carry, ShellError> {
+        let Some((start, end)) = self.leaf_bounds(leaf) else {
+            return Ok(Carry::default());
+        };
+        let carried = self.measured.carry(leaf);
+        let read = self.read(start, end)?;
+        let (text, _) = leaf_text(read.text(), start, carried);
+        if text.is_empty() {
+            return Ok(Carry {
+                x: carried.x,
+                after_cr: false,
+                cluster: carried.cluster,
+                skip: 0,
+            });
+        }
+        let layout = layout_styled_continuing(
+            StyledText::plain(text),
+            start,
+            carried.x,
+            carried.cluster,
+            self.width,
+            &self.shaper,
+        );
+        let broken = text.ends_with('\n') || text.ends_with('\r');
+        Ok(Carry {
+            x: match layout.lines().last() {
+                Some(line) if !broken => line.end_x(),
+                _ => Fixed::ZERO,
+            },
+            after_cr: text.ends_with('\r'),
+            cluster: layout.carry(),
+            // The tail a leaf places for the next one is the look it took past its own end; a
+            // reveal has no such look, so the next leaf trims nothing.
+            skip: 0,
+        })
     }
 
     /// The leaf whose bytes contain `at`, or the last leaf when `at` is the document's end.
@@ -1065,7 +1136,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             return Ok(0);
         };
         let (start, end) = (span.offset(), span.offset() + span.len());
-        let carried = self.measured.carry(leaf);
+        let carried = self.carry_of(leaf)?;
         let read = self.read(start, end)?;
         let (text, from) = leaf_text(read.text(), start, carried);
         let layout = layout_styled_continuing(
@@ -1120,11 +1191,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
 
     /// The **live** byte range of leaf `index`, or `None` past the end of the spine.
     ///
-    /// Both ends are the live document's, not the spine's. The spine's offsets are sealed and do not
-    /// move while a leaf is open, while every leaf after the open one *does* move by the difference
-    /// between its live length and its registered one (D-51). A caller that asked this for "where
-    /// does leaf 7 start" used to get a sealed offset and hand it to a live lookup, which is the
-    /// same mixed arithmetic that put a revealing caret on the wrong line.
+    /// Both ends are the live document's, not the spine's. The spine's offsets are sealed and do
+    /// not move while a leaf is open, while every leaf after the open one *does* move by the
+    /// difference between its live length and its registered one (D-51). A caller that asked this
+    /// for "where does leaf 7 start" used to get a sealed offset and hand it to a live lookup,
+    /// which is the same mixed arithmetic that put a revealing caret on the wrong line.
     fn leaf_bounds(&self, index: usize) -> Option<(u64, u64)> {
         let span = self.typing.spine().slab_span(index as u32)?;
         let draft = self.typing.draft();
@@ -1156,7 +1227,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let Some((leaf_start, _)) = self.leaf_bounds(leaf) else {
                 return Ok(None);
             };
-            let carried = self.measured.carry(leaf);
+            let carried = self.carry_of(leaf)?;
             let from = leaf_start + carried.skip as u64;
             if from >= at {
                 if leaf == 0 || hops >= CLUSTER_LEAF_LIMIT {
@@ -1205,9 +1276,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let Some((leaf_start, leaf_end)) = self.leaf_bounds(leaf) else {
                 return Ok(None);
             };
-            let carried = self.measured.carry(leaf);
+            let carried = self.carry_of(leaf)?;
             let from = leaf_start + carried.skip as u64;
-            let placed = (leaf_end + self.measured.carry(leaf + 1).skip as u64).min(document);
+            let placed = (leaf_end + self.carry_of(leaf + 1)?.skip as u64).min(document);
             let start = at.max(from);
             if start >= placed {
                 if placed >= document || hops >= CLUSTER_LEAF_LIMIT {
@@ -1330,14 +1401,18 @@ struct Carry {
 #[derive(Debug)]
 struct Measured {
     heights: HeightModel,
-    carries: Vec<Carry>,
+    /// The carry each leaf was **measured with**, or `None` while it has not been measured.
+    ///
+    /// Presence is the record, not the height: a leaf whose bytes its predecessor all placed
+    /// measures zero height and is still measured, and telling the two apart is what D-57 needs.
+    carries: Vec<Option<Carry>>,
 }
 
 impl Measured {
     fn new(leaves: usize) -> Self {
         Self {
             heights: HeightModel::new(leaves),
-            carries: vec![Carry::default(); leaves],
+            carries: vec![None; leaves],
         }
     }
 
@@ -1355,7 +1430,17 @@ impl Measured {
 
     /// The carry `leaf` was measured with; the document's own start for an unmeasured leaf.
     fn carry(&self, leaf: usize) -> Carry {
-        self.carries.get(leaf).copied().unwrap_or_default()
+        self.carries.get(leaf).copied().flatten().unwrap_or_default()
+    }
+
+    /// Whether `leaf` has been measured — which a pushed tail leaf has not, until `frame` draws
+    /// it.
+    ///
+    /// A caller that lays such a leaf out before then — a reveal asked for between the keystroke
+    /// and the frame — would otherwise begin it at the line start `Carry::default()` describes,
+    /// and scroll to a line the caret is not on (D-57).
+    fn is_measured(&self, leaf: usize) -> bool {
+        matches!(self.carries.get(leaf), Some(Some(_)))
     }
 
     /// Records what one leaf measured.
@@ -1363,14 +1448,14 @@ impl Measured {
         let Some(slot) = self.carries.get_mut(leaf) else {
             return;
         };
-        *slot = carry;
+        *slot = Some(carry);
         self.heights.set(leaf, height);
     }
 
     /// Appends a leaf nothing has measured, O(log n).
     fn push(&mut self) {
         self.heights.push(Fixed::ZERO);
-        self.carries.push(Carry::default());
+        self.carries.push(None);
     }
 }
 
