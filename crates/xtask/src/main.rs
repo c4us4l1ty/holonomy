@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use holonomy_ledger::laws::LAWS;
+use holonomy_ledger::laws::{BUDGETS, LAWS};
 
 const USAGE: &str = "usage: cargo run -p xtask -- gates [--check]";
 
@@ -68,6 +68,29 @@ fn render_gates() -> String {
             law.bound,
             law.block,
             law.status.token()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    out.push('\n');
+
+    // VISION.md §4's budgets, mapped onto the laws above and onto the thing that measures each
+    // one. This block is rendered from `BUDGETS` for the same reason the table above is rendered
+    // from `LAWS`: a contract that is typed by hand drifts, and a budget nobody measures is the
+    // easiest number in the project to overstate.
+    out.push_str(
+        "## Constitutive budgets (VISION.md \u{a7}4)\n\n\
+         > Machine-generated from `BUDGETS` in `crates/holonomy-ledger/src/laws.rs`.\n\
+         > \"Measured by\" names what CI runs today; \"still owed\" is what must be true\n\
+         > before the law may be called `gated`.\n\n\
+         | Budget | Law | Measured by | Still owed |\n\
+         | ------ | --- | ----------- | ---------- |\n",
+    );
+    for budget in BUDGETS {
+        let measured = budget.measured_by.unwrap_or("**nothing yet**");
+        writeln!(
+            out,
+            "| {} | {} | {} | {} |",
+            budget.vision, budget.law, measured, budget.owes
         )
         .expect("writing to a String cannot fail");
     }
