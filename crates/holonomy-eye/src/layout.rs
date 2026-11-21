@@ -19,6 +19,12 @@
 //! BiDi reordering, style runs, word wrapping and the Spine window (which slab supplies the text)
 //! are later slices. The layout takes the window's text and its document offset, which is all the
 //! arithmetic needs — and all a test needs to build the whole tree.
+//!
+//! **Placement is strictly logical order** — every cluster at `x += advance`, nothing reversed.
+//! For left-to-right text that is the visual order; for a right-to-left run it is not, and the
+//! difference is the deferral AUDIT OQ-11 records and `tests/script_gate.rs` measures rather than
+//! describes. Segmentation is unaffected: a caret may not be placed inside a cluster in either
+//! direction, and that half is asserted there.
 
 use crate::cluster::{ClusterContext, Clusters};
 use crate::geom::{Fixed, Point};

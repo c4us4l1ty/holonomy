@@ -74,6 +74,7 @@ detail lives.
 | Terminal window: open, type, save, unlock, panel | **Real — this is the app you run** | `holonomy-gui` |
 | GPU backend, font shaping, IME | **Not built** — the window is a grid of characters | `docs/TO-APP.md` M4b-ii |
 | Wide characters (`中`, most emoji) | **Wrong** — claims one cell, terminal draws two | OQ-25 |
+| Right-to-left text (Hebrew, Arabic, …) | **Drawn left-to-right.** A caret never splits a letter's mark, but the visual order is wrong — there is no bidi reordering | OQ-11, D-66 |
 | Crash before a save | **Loses up to 16 KiB** of the most recent typing; nothing older | D-64 |
 | Documents open at once | **One**, one window, one caret. No panes, search, or settings | — |
 | DEM key of each opened document | **Leaked** for the process lifetime | OQ-27 |

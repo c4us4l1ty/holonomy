@@ -45,7 +45,11 @@
 //! is generated from the Unicode Character Database (`scripts/gen-cluster-tables.py` writes
 //! `cluster.rs`'s tables), so a mark from any script joins its base, not only the scripts this
 //! UI's spec names. The rules run through GB13, Unicode 15.1's Indic conjunct rule included (AUDIT
-//! D-28). One thing is still outside it: **BiDi reordering**, not attempted at all.
+//! D-28). One thing is still outside it: **BiDi reordering**, not attempted at all — but its
+//! absence is narrower than it sounds, and the width was measured (AUDIT D-66): segmentation is
+//! already honest for right-to-left scripts, so a caret never lands inside a Hebrew or Arabic
+//! grapheme; what is missing is visual *order*, because `layout.rs` places every cluster at
+//! `x += advance`. `tests/script_gate.rs` asserts the first and prints the size of the second.
 //! The run tree is also built from a whole window of text, so nothing here yet constrains shaping
 //! cost to the viewport. Those are Block 5's remaining gates, not this crate's footnotes.
 

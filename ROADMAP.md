@@ -298,9 +298,15 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
   out of the resident set and the pending buffer, and `holonomy-shell` runs the loop that turns a
   scroll position into a laid-out frame and writes the measured heights back (D-18, D-19). Gate 2's
   *inputs* are therefore measured end to end on a 4,000-leaf document.
-- Not yet: BiDi reordering (gate 3 — the segmentation rules are the standard's through GB13 as of
-  D-16 and D-28, and the property data is the database's as of D-27), a real shaper (Block 8), and
-  seconds rather than counts for gate 2 — without those, L-8 stays `spec` rather than `enforced`.
+- Gate 3 is **half met and measured** (D-66): no caret can land inside a grapheme in any
+  right-to-left script, because the marks are `Extend` in generated data (D-27) and 14 corpus lines
+  assert it in `tests/script_gate.rs`. Paint order for RTL text is **not built** — `layout.rs`
+  places every cluster at `x += advance` and reverses nothing — so a Hebrew run draws
+  left-to-right. That
+  half is deferred to Block 6 (OQ-11), where a pixel surface can show the difference, and its size
+  is printed every push.
+- Not yet: a real shaper (Block 8), and seconds rather than counts for gate 2 — without those,
+  L-8 stays `spec` rather than `enforced`.
 
 **GATES**
 - [x] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
@@ -312,7 +318,13 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
       all 8 zooms and 5 DPIs, over 12 generated documents at 3 wrap widths (AUDIT D-38).
 - [ ] Layout cost on a 30 M-word doc is invariant in document length (viewport-shape cost only).
 - [ ] Bi-directional and multi-script text handle cluster boundaries correctly (no caret
-      grapheme-splitting).
+      grapheme-splitting). **Half met, measured 2026-11-21 (D-66):** the *caret* half holds for
+      right-to-left scripts and is asserted over 14 corpus lines (Hebrew, Arabic, Thaana, Syriac,
+      N'Ko, Adlam, presentation forms) in `crates/holonomy-eye/tests/script_gate.rs`, with expected
+      cluster counts taken from UAX #29 and independently checked. What is **not** met is visual
+      reordering: BiDi is deferred to Block 6 (OQ-11) because it is a paint-order change with no
+      pixel surface to paint on, and its displacement is printed on every push as
+      `HOLONOMY_SCRIPT_GATE_ORDER`. The box stays unchecked until a renderer can draw the result.
 
 ---
 
