@@ -202,7 +202,9 @@ Listed so they stay dead.
   amount. The fast path is now byte-anchored: the new last leaf must begin at `len_synced`, the
   document length when the index was last true. Anything else rebuilds the index, which the next
   frame repopulates for the leaves it can see. Pinned by
-  `typing_into_the_middle_of_a_sealed_document_remeasures_the_leaves_after_it`.
+  `a_tail_append_keeps_the_index_and_a_mid_document_insert_discards_it`, which asserts the two
+  cases against each other: a tail append keeps the heights before it, and a mid-document insert
+  is followed by a re-measure that agrees with one continuous layout of the whole document.
 - **2026-11-19 — D-31 — a seal writes the live bytes, not the buffer behind them (found by the
   gate it was written for).** The first run of D-30's harness failed within a second, on a length
   the session and the independent model disagreed about by exactly the three bytes an undo had
