@@ -264,6 +264,7 @@ dependencies = [
  "holonomy-eye",
  "holonomy-shell",
  "holonomy-text",
+ "libc",
 ]
 
 [[package]]
