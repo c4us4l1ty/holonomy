@@ -1189,8 +1189,9 @@ mod tests {
         // everything, and that answer would never come.
         let mut typing = session(64);
         assert_eq!(typing.sources().open_count(), 0);
+        let source = typing.sources.open();
         typing.open = Some(Open {
-            source: typing.sources.open(),
+            source,
             at: 0,
             registered: 0,
         });
@@ -1227,10 +1228,10 @@ mod tests {
         let mut typing = session(64);
         typing.insert(b"ab").expect("typed");
         assert_eq!(typing.sources().open_count(), 1);
+        let open = typing.open.take().expect("a source is open");
+        typing.sources.close(open.source);
         typing.buffer = SlabText::from_plaintext(Vec::new(), 64).expect("empty is UTF-8");
         typing.spine = typing.spine.remove_range(0, 2).expect("emptied");
-        typing.sources.close(typing.open.expect("open").source);
-        typing.open = None;
         typing.next_at = Some(0);
         typing.draft.clear();
         typing.attach(0).expect("attaches nothing");
