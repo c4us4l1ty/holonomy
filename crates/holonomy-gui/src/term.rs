@@ -473,10 +473,22 @@ mod tests {
                 "{rows} rows held {} panel lines",
                 fitted.len()
             );
-            assert_eq!(fitted, panel[..fitted.len()], "the panel keeps its top lines");
+            assert_eq!(
+                fitted,
+                panel[..fitted.len()],
+                "the panel keeps its top lines"
+            );
         }
-        assert_eq!(panel_fits(&panel, 10).len(), 6, "a tall terminal keeps it all");
-        assert_eq!(panel_fits(&panel, 6).len(), 4, "rows - 1 surface - 1 status");
+        assert_eq!(
+            panel_fits(&panel, 10).len(),
+            6,
+            "a tall terminal keeps it all"
+        );
+        assert_eq!(
+            panel_fits(&panel, 6).len(),
+            4,
+            "rows - 1 surface - 1 status"
+        );
     }
 
     #[test]
@@ -518,7 +530,9 @@ mod tests {
         // three bytes across two reads is the ordinary case, not the hostile one.
         let mut decoder = Decoder::new();
         let bytes = "中".as_bytes();
-        assert!(decoder.feed_all(bytes.get(..2).expect("two bytes")).is_empty());
+        assert!(decoder
+            .feed_all(bytes.get(..2).expect("two bytes"))
+            .is_empty());
         assert_eq!(decoder.flush_escape(), None, "nothing was pending");
         assert_eq!(
             decoder.feed_all(bytes.get(2..).expect("one byte")),

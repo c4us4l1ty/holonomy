@@ -478,7 +478,10 @@ where
         // performed. Best effort on the error: the edit has already landed, and a leaf the reader
         // could not lay out is the *frame's* problem — propagating it would report a keystroke that
         // reached the document as a refused edit, the same lie D-47 was about, one layer down.
-        if matches!(intent, Intent::Type(_) | Intent::Backspace | Intent::DeleteForward) {
+        if matches!(
+            intent,
+            Intent::Type(_) | Intent::Backspace | Intent::DeleteForward
+        ) {
             if let Ok(revealed) = self.editor.apply(Intent::RevealCaret) {
                 if !revealed.is_empty() && !effects.contains(&Effect::Redraw) {
                     effects.push(Effect::Redraw);

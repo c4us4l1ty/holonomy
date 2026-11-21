@@ -316,7 +316,10 @@ fn an_arrow_key_writes_the_bytes_so_the_document_is_not_unsaved() {
         b"abc".as_slice(),
         "the open bytes"
     );
-    assert!(store.segments().is_empty(), "typing must not write before a seal");
+    assert!(
+        store.segments().is_empty(),
+        "typing must not write before a seal"
+    );
 
     window
         .press(Key::Left, Modifiers::none())
@@ -336,8 +339,15 @@ fn an_arrow_key_writes_the_bytes_so_the_document_is_not_unsaved() {
         .press(Key::Character('s'), Modifiers::control())
         .expect("saved");
     assert_eq!(effects, vec![holonomy_shell::Effect::Saved]);
-    assert_eq!(store.segments().len(), 1, "a flush with nothing open appended");
-    println!("HOLONOMY_WINDOW_PENDING segments={}", store.segments().len());
+    assert_eq!(
+        store.segments().len(),
+        1,
+        "a flush with nothing open appended"
+    );
+    println!(
+        "HOLONOMY_WINDOW_PENDING segments={}",
+        store.segments().len()
+    );
 }
 
 #[test]
@@ -367,7 +377,10 @@ fn typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret() {
         "the caret was placed on row {row} of {} — off screen",
         window.surface().rows()
     );
-    assert_eq!(column, 0, "each caret row begins at the line's first column");
+    assert_eq!(
+        column, 0,
+        "each caret row begins at the line's first column"
+    );
     assert!(row > 0, "the caret is not on the document's first row");
     // This document is longer than the session's 64-byte buffer, so the keystrokes *did* seal —
     // that is the buffer filling, not the reveal. What must not happen is the screen standing

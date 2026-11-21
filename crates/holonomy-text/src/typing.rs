@@ -815,9 +815,10 @@ impl<S: SegmentSink> Typing<S> {
                 // the character being placed is the first of `rest`, and it does not fit the
                 // buffer at all.
                 if self.open.is_none() {
-                    let needed = rest.chars().next().map_or(rest.len(), char::len_utf8);
+                    // The character's own width, not the burst's: `rest` can hold a whole paste,
+                    // and reporting its length would name a number the buffer never had to hold.
                     return Err(TypingError::TooLarge {
-                        needed,
+                        needed: lead_byte_len(rest),
                         capacity: self.capacity,
                     });
                 }
@@ -1052,6 +1053,21 @@ fn summary(step: &Step) -> StepSummary {
             len: *pending,
             tree: spine.len(),
         },
+    }
+}
+
+/// The length of the UTF-8 character whose first byte is `bytes[0]`, from the first byte alone.
+///
+/// The keystroke loop needs this when a character does not fit: it has already split `rest` at a
+/// character boundary, so `rest[0]` is a lead byte and the table in RFC 3629 says how many bytes
+/// follow. A continuation byte cannot appear at `0` for that reason, but it is reported as one byte
+/// rather than panicking — the caller's error message is about capacity, not encoding.
+fn lead_byte_len(bytes: &[u8]) -> usize {
+    match bytes.first() {
+        Some(0xC2..=0xDF) => 2,
+        Some(0xE0..=0xEF) => 3,
+        Some(0xF0..=0xF4) => 4,
+        _ => 1,
     }
 }
 

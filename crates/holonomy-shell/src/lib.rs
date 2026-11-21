@@ -1446,7 +1446,11 @@ impl Measured {
 
     /// The carry `leaf` was measured with; the document's own start for an unmeasured leaf.
     fn carry(&self, leaf: usize) -> Carry {
-        self.carries.get(leaf).copied().flatten().unwrap_or_default()
+        self.carries
+            .get(leaf)
+            .copied()
+            .flatten()
+            .unwrap_or_default()
     }
 
     /// Whether `leaf` has been measured — which a pushed tail leaf has not, until `frame` draws

@@ -162,8 +162,15 @@ mod tests {
         // Break the invariant the way a corrupt-but-authenticated witness would: three segments
         // are recorded, but the peak the merge would consume is gone.
         mmr.peaks[0] = None;
-        assert_eq!(mmr.append([1u8; 32]), Err(LineError::InvalidRecord));
-        assert_eq!(mmr.count(), before.count(), "a refused append counts nothing");
+        assert!(
+            matches!(mmr.append([1u8; 32]), Err(LineError::InvalidRecord)),
+            "a merge that cannot find its peak is refused, not half-applied"
+        );
+        assert_eq!(
+            mmr.count(),
+            before.count(),
+            "a refused append counts nothing"
+        );
         assert_eq!(
             mmr.peaks, before.peaks,
             "and consumes no other peak: the merge is computed into a scratch copy"
