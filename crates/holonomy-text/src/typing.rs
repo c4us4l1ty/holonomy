@@ -203,6 +203,13 @@ enum Step {
         /// from the buffer. Zero for a root recorded before a cut: at a cut nothing is open, and an
         /// undo of it restores the root rather than leaving it.
         pending: usize,
+        /// A copy of the open bytes, when this state is a **seal boundary** (D-43).
+        ///
+        /// A seal appends the open leaf and drops the buffer it lived in, so a copy is the only
+        /// thing an undo can re-attach the text from. `None` for the two states where the buffer is
+        /// still the live one — a root recorded before a cut, and a state recorded on the way out of
+        /// an undo — where copying would be a copy of bytes already in hand.
+        held: Option<Vec<u8>>,
     },
 }
 
@@ -481,12 +488,21 @@ impl<S: SegmentSink> Typing<S> {
                     spine,
                     at: self.open.map_or_else(|| self.caret(), |open| open.at),
                     pending,
+                    // The bytes travel with the state. A redo can land after a seal has replaced
+                    // the buffer with another leaf's, so a length alone would point into the wrong
+                    // text (found by the million-keystroke walk when a seal stopped being a floor).
+                    held: (pending > 0).then(|| self.buffer.as_bytes().to_vec()),
                 }
             }
         };
         match step {
             Step::Mark(mark) => self.restore_mark(mark)?,
-            Step::Root { spine, at, pending } => self.restore_root(spine, at, pending)?,
+            Step::Root {
+                spine,
+                at,
+                pending,
+                held,
+            } => self.restore_root(spine, at, pending, held)?,
         }
         Ok(current)
     }
@@ -571,7 +587,13 @@ impl<S: SegmentSink> Typing<S> {
     /// restorable, and a redo can hand them back exactly as they were. `pending` says how much of
     /// the buffer the state being left had open; the text a cut removed is a different case — it is
     /// in the world-line, and the root names it again for free.
-    fn restore_root(&mut self, spine: Spine, at: u64, pending: usize) -> Result<(), TypingError> {
+    fn restore_root(
+        &mut self,
+        spine: Spine,
+        at: u64,
+        pending: usize,
+        held: Option<Vec<u8>>,
+    ) -> Result<(), TypingError> {
         if let Some(open) = self.open {
             self.sources.close(open.source);
             self.open = None;
@@ -579,6 +601,18 @@ impl<S: SegmentSink> Typing<S> {
         self.draft.clear();
         self.spine = spine;
         self.next_at = Some(at.min(self.spine.len()));
+        debug_assert!(
+            pending == 0 || held.is_some(),
+            "a state with open bytes carries them ({pending} open, {held:?})",
+            held = held.as_ref().map(Vec::len)
+        );
+        if let Some(held) = held {
+            // The copy is what the leaf comes back from: a seal has replaced the buffer with
+            // another leaf's, and even without a seal the state a redo lands in need not be the one
+            // the bytes were typed into. They came from a buffer of this capacity, so they fit.
+            self.buffer = SlabText::from_plaintext(held, self.capacity)
+                .expect("the bytes came from a buffer of this capacity");
+        }
         if pending > 0 {
             self.attach(pending)?;
         }
@@ -603,6 +637,7 @@ impl<S: SegmentSink> Typing<S> {
             at,
             // Nothing is open at a cut — `delete` seals first, so every offset is the tree's own.
             pending: 0,
+            held: None,
         });
     }
 
@@ -641,7 +676,9 @@ impl<S: SegmentSink> Typing<S> {
             .iter()
             .position(|step| matches!(step, Step::Root { .. }))
         {
-            self.steps.remove(index);
+            // Dropping a root makes everything *behind* it unreachable — a mark behind a root can
+            // only be honoured after that root has been restored — so the prefix goes with it.
+            self.steps.drain(..=index);
         }
     }
 
@@ -893,15 +930,45 @@ impl<S: SegmentSink> Typing<S> {
             u32::try_from(len).expect("capacity fits in u32"),
         );
         let end = open.at + u64::from(open.registered);
+        // The state being sealed, kept so an undo can come back to it (D-43). It has to be taken
+        // now: the replace below is what makes the leaf final, and the buffer is dropped after it.
+        let settled = self.settled_spine()?;
+        let held = self.buffer.as_bytes().to_vec();
         self.spine = self.spine.replace_range(open.at, end, corrected)?;
         self.draft.forget(open.at);
         self.sealed_bytes += u64::try_from(len).expect("a buffer fits in u64");
         self.next_at = Some(open.at + u64::try_from(len).expect("a buffer fits in u64"));
         self.open = None;
-        // A seal is an undo floor: the bytes move to the world-line and the buffer is dropped, so
-        // no mark that promises them can be honoured any more — and a root recorded before the
-        // append would orphan the segment it names, so those go too.
+        // A seal used to be a floor that cleared the history — and that was D-43: the buffer is
+        // dropped here, so no state behind the seal could produce the bytes it promised, and every
+        // caret move seals (an open leaf's caret is its end), so one arrow key made the typing
+        // before it permanent.
+        //
+        // The floor keeps **one** state instead, and it is the one a user would ask for: the last
+        // mark's. A mark is where the burst being typed began, so the seal turns "everything up to
+        // here is settled, and the last burst is still undoable" into a state that carries the
+        // bytes (`held`) the buffer is about to lose. Only one state is kept on purpose: the marks
+        // of older leaves cannot be honoured against a buffer that a later leaf has since become
+        // (they are lengths, and two leaves can start at the same offset) — the million-keystroke
+        // walk found exactly that as a document cut inside a character.
+        //
+        // With no mark above the seal there is nothing older to keep, so the state is the leaf
+        // itself: one undo takes back what was just written. Roots behind the seal go with it, for
+        // the reason the floor existed — a root recorded before this append names a tree whose open
+        // leaf the append has moved, so restoring it would orphan the segment written here. Redo
+        // goes too: it would name a state the append has already moved past.
+        let pending = match self.steps.last() {
+            Some(Step::Mark(Mark::Live { at, len: mark })) if *at == open.at => *mark,
+            Some(Step::Mark(_)) => 0,
+            _ => len,
+        };
         self.steps.clear();
+        self.steps.push(Step::Root {
+            spine: settled,
+            at: open.at,
+            pending,
+            held: Some(held),
+        });
         self.undone.clear();
         self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
             .expect("an empty slab is valid UTF-8");
@@ -924,7 +991,9 @@ fn summary(step: &Step) -> StepSummary {
             len: *len,
             tree: 0,
         },
-        Step::Root { spine, at, pending } => StepSummary {
+        Step::Root {
+            spine, at, pending, ..
+        } => StepSummary {
             kind: "root",
             at: *at,
             len: *pending,
@@ -1006,6 +1075,56 @@ mod tests {
         // The leaf the overlay drafts is the open source's leaf, and it is the document's tail.
         let span = typing.spine().slab_span(0).expect("a leaf");
         assert!(typing.sources().locate(span.slab().segment()).is_open());
+    }
+
+    #[test]
+    fn a_caret_move_does_not_throw_the_undo_history_away() {
+        // D-43, through the layer that had the bug: moving the caret seals the open leaf, and a
+        // seal used to be an undo floor — so an arrow key, Home, End or a click silently ended
+        // undo, and the text typed before it could never be taken back.
+        let mut typing = session(64);
+        typing.mark();
+        typing.insert(b"hello").expect("typed");
+        typing.insert_at(1, b"").expect("moved");
+        assert_eq!(
+            typing.sealed_bytes(),
+            5,
+            "the move should seal the open leaf"
+        );
+        assert_eq!(typing.document_len(), 5);
+
+        // One undo takes the typing back, and a redo puts it back: the seal kept the state the
+        // mark named instead of dropping it.
+        assert!(typing.undo().expect("the typing can be taken back"));
+        assert_eq!(typing.document_len(), 0);
+        assert!(typing.redo().expect("redo"));
+        assert_eq!(typing.document_len(), 5);
+        assert_eq!(typing.spine().len(), 5, "the bytes are the world-line's");
+    }
+
+    #[test]
+    fn a_seal_keeps_the_last_burst_undoable() {
+        // The other half of D-43: a mark laid *after* the typing (which is what the window does —
+        // one mark per burst) is the state the seal keeps, so the burst the user just typed can be
+        // taken back after a caret move, and the state carries the bytes to do it.
+        let mut typing = session(64);
+        typing.mark();
+        typing.insert(b"hel").expect("typed");
+        typing.mark();
+        typing.insert(b"lo").expect("typed");
+        typing.insert_at(1, b"").expect("moved");
+        assert_eq!(typing.sealed_bytes(), 5);
+
+        let top = typing.top_undo().expect("the seal's state");
+        assert_eq!(top.kind, "root");
+        assert_eq!(top.len, 3, "the start of the burst, not the whole leaf");
+        assert!(typing.undo().expect("undo"));
+        assert_eq!(
+            typing.pending(),
+            b"hel",
+            "the burst came back as open bytes"
+        );
+        assert_eq!(typing.document_len(), 3);
     }
 
     #[test]
@@ -1271,11 +1390,11 @@ mod tests {
         let written = typing.sink.written().len();
         typing.delete(2, 4).expect("deleted");
         assert_eq!(typing.document_len(), 8);
-        assert_eq!(
-            typing.undo_depth(),
-            1,
-            "the cut recorded the root before it"
-        );
+        let top = typing
+            .top_undo()
+            .expect("the cut recorded the root before it");
+        assert_eq!(top.kind, "root");
+        assert_eq!(top.at, 2, "the root is the state the cut started from");
         assert!(typing.undo().expect("undone"));
         assert_eq!(typing.document_len(), 10, "the text came back");
         assert_eq!(typing.spine().len(), 10);
@@ -1310,13 +1429,22 @@ mod tests {
         typing.insert(b"0123456789").expect("typed");
         typing.flush().expect("flushed");
         typing.delete(2, 4).expect("deleted");
-        assert_eq!(typing.undo_depth(), 1);
+        assert_eq!(typing.top_undo().expect("the cut").kind, "root");
         // Nine bytes into a new eight-byte buffer: the ninth forces a seal, and the root recorded
-        // before the cut would orphan the segment that seal appends.
+        // before the cut would orphan the segment that seal appends — so it goes, and the seal's
+        // own state is what is left (D-43).
         typing.insert(b"abcdefghi").expect("typed");
         assert_eq!(typing.sealed_bytes(), 18);
-        assert_eq!(typing.undo_depth(), 0, "the seal is the floor");
-        assert!(!typing.undo().expect("nothing to undo"));
+        assert_eq!(
+            typing.undo_depth(),
+            1,
+            "the seal's state, and no cut behind it"
+        );
+        assert_eq!(typing.top_undo().expect("the seal").len, 8);
+        assert!(typing.undo().expect("the sealed leaf comes back"));
+        // Sixteen: the eight sealed bytes the cut left, plus the eight the seal wrote, live again.
+        // The ninth byte was typed after the seal and belongs to that state, not this one.
+        assert_eq!(typing.document_len(), 16);
     }
 
     #[test]
@@ -1477,15 +1605,27 @@ mod tests {
     }
 
     #[test]
-    fn a_seal_is_an_undo_floor() {
+    fn a_seal_keeps_the_state_it_sealed() {
+        // D-43. This used to be `a_seal_is_an_undo_floor`: a seal cleared the stack, so the text
+        // that had just gone to the world-line could not be taken back — and since a caret move
+        // seals, an arrow key made the typing before it permanent. The seal leaves one state now:
+        // the leaf it wrote, with a copy of its bytes.
         let mut typing = session(8);
         typing.mark();
         // Twelve bytes into an eight-byte buffer: a seal happens inside the action.
         typing.insert(b"0123456789ab").expect("typed");
         assert_eq!(typing.sealed_bytes(), 8);
-        assert_eq!(typing.undo_depth(), 0, "the bytes are the world-line's now");
-        assert!(!typing.undo().expect("nothing to undo"));
-        assert_eq!(typing.document_len(), 12);
+        assert_eq!(typing.undo_depth(), 1, "the seal's own state, and no more");
+
+        let top = typing.top_undo().expect("a state to unwind");
+        assert_eq!(top.kind, "root");
+        // The mark named a state with nothing open, so the seal keeps exactly that: the eight bytes
+        // it wrote are outside it, and one undo takes the typing back rather than doing nothing.
+        assert_eq!(top.len, 0);
+
+        assert!(typing.undo().expect("the typing can be taken back"));
+        assert_eq!(typing.document_len(), 0);
+        assert!(!typing.undo().expect("nothing older in this session"));
     }
 
     #[test]

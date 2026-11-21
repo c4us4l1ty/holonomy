@@ -80,6 +80,53 @@ Listed so they stay dead.
   it found the bug with: a failing step now names the action, its offsets and the caret, so the
   next one is a sentence rather than a bisect. Nothing about the *path* changed — a keystroke
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
+- **2026-11-21 — D-43 — one arrow key threw the whole undo history away. FIXED.** Found by
+  `tests/terminal.rs` the moment it drove `Ctrl+Z` through the bytes a terminal actually sends:
+  after `helo`, a backspace, `lo` and two Left presses, sixteen `Ctrl+Z` presses each came back with
+  no effects and the document still five bytes — the undo stack was not at the wrong state, it was
+  empty. The mechanism: moving the caret goes through `Editor::move_caret` → `Typing::insert_at(at,
+  b"")`, which flushes whenever the caret leaves its offset, and a flush is a **seal** — the open
+  leaf is appended to the world-line and the resident buffer it lived in is dropped. `seal` ended
+  with `steps.clear(); undone.clear()` on the reasoning that no mark could promise bytes the buffer
+  no longer held; true, and the consequence was that every caret move — an arrow, Home, End, a click
+  — silently ended undo for everything typed into the open leaf. The window made it visible; the
+  defect was in the session layer and would have been in any front end (D-40 and D-41 had each
+  closed a neighbour of it — typing was undoable, and typing was visible — without noticing that
+  *moving* cancelled the first). The fix: a seal keeps exactly **one** state, `Step::Root { spine:
+  settled, at, pending, held: Some(copy of the open bytes) }`, whose `pending` is the top mark's
+  length when the top step is a mark — so one `Ctrl+Z` after a move takes back the burst that was
+  being typed, or the whole typing when the mark named an empty document — and the leaf's own length
+  when there is no mark at all. `Step::Root` gained `held`, the copy an undo re-attaches from now
+  that the buffer is gone; every root step carries it whenever it has open bytes, because a redo can
+  land after a seal has replaced the buffer with another leaf's. Two wrong versions died on the way,
+  both caught by the suite rather than by review: keeping *all* the marks behind the seal left marks
+  of older leaves applying lengths to a buffer a later leaf had become — the million-keystroke walk
+  reported it as a document cut inside a character (`valid_up_to: 114`, a lone `\xe2` where a ZWJ
+  belonged) — and a first version without `held` panicked slicing fourteen bytes out of a four-byte
+  buffer. Keeping one state is what makes the remaining history sound: a mark is a *length*, two
+  leaves can start at the same offset, and a length is only meaningful against the bytes it was
+  measured on. Residual, recorded rather than hidden: history deeper than the last mark does not
+  survive a sealing move — that is the floor the seal was, narrowed to one step. Pinned by
+  `a_caret_move_does_not_throw_the_undo_history_away` and `a_seal_keeps_the_last_burst_undoable`
+  (`crates/holonomy-text/src/typing.rs`), by the end-to-end terminal test that found it, and by the
+  million-keystroke walk's rewind.- **2026-11-21 — D-42 — every arrow key typed a letter into the document. FIXED.** Found by the
+  terminal backend's own unit test, on the first run that reached it: `keys(b"\x1b[A")` came back as
+  `[Ignored, Character('A')]` instead of `[Up]`, and `keys(b"\x1b[C")` as `[Ignored,
+  Character('C')]`. The mechanism, in `Decoder::feed` (`crates/holonomy-gui/src/term.rs`): while an
+  escape sequence was being accumulated the decoder looked for a CSI *final* byte — the range
+  `0x40..=0x7e` — in the byte it had just appended, with no exception for the second byte. `[` is
+  0x5b, inside that range, so `ESC [` was complete the moment it arrived; `interpret` saw a two-byte
+  sequence with nothing after the introducer and answered `Ignored`, and the `A` that followed was
+  read as an ordinary printable byte. The arrows therefore walked into the edit path as text: press
+  Up and the letter `A` appears in the document, `C` for Right, `D` for Left, `B` for Down — and
+  with modifiers the rest of the sequence (`[1;2` then `D`) becomes a run of digits. This was
+  invisible to the keymap (`keys.rs` presses `Key` values directly) and to everything before M4b,
+  because nothing had ever encoded a tty's bytes. The fix: the second byte is the introducer and
+  cannot be a final byte — `len == 2` is complete only when that byte is neither `[` nor `O`, and
+  from the third byte on the `0x40..=0x7e` rule applies. The test that found it
+  (`escape_sequences_are_arrows_and_their_modifiers`) covers `ESC[A`, `ESC[C`, `ESC[1;2D`, `ESC[3~`
+  and `ESC[5~`; `tests/terminal.rs` re-proves the path end to end by feeding those same bytes
+  through the decoder and asserting where the caret landed.
 - **2026-11-20 — D-41 — a frame showed nothing of the bytes being typed into the open leaf.
   FIXED.** Found by M4's window tests: five keystrokes left a document of five bytes and a frame of
   two, and only `Ctrl+S` made the rest appear. The mechanism, traced through the code: the frame's

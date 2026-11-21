@@ -695,8 +695,8 @@ fn run(seed: u64, steps: u64) -> Session {
             assert_eq!(text, session.model, "seed {seed}: differ at {step}");
         }
     }
-    // End on a mark, so the walk always has a state to unwind: a seal is an undo floor, and a run
-    // that stopped on one would prove nothing about undo.
+    // End on a mark, so the walk always has a state to unwind. Since D-43 a seal is a state too,
+    // so this is belt and braces rather than the only thing that makes the walk non-empty.
     session.mark();
     session
 }

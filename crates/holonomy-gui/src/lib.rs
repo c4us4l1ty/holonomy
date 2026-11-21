@@ -23,6 +23,8 @@
 //! Nothing in this crate assumes a grid, a font or a window: [`Surface`] hands a backend clusters at
 //! the advances the Eye measured, so a GPU backend draws exactly the picture the tests assert.
 
+pub mod term;
+
 use holonomy_eye::{Fixed, Picture, Style};
 use holonomy_shell::{Editor, Effect, Intent, Move};
 use holonomy_text::{SegmentSink, SegmentSource};
@@ -239,6 +241,32 @@ impl CellSurface {
         }
     }
 
+    /// How many columns the surface has.
+    #[must_use]
+    pub fn columns(&self) -> usize {
+        self.columns
+    }
+
+    /// How many rows the surface has.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Resizes the grid, keeping whatever still fits — what a terminal does when its window is
+    /// dragged larger.
+    pub fn resize(&mut self, columns: usize, rows: usize) {
+        let mut cells = vec![vec![' '; columns]; rows];
+        for (row, line) in self.cells.iter().take(rows).enumerate() {
+            for (column, cell) in line.iter().take(columns).enumerate() {
+                cells[row][column] = *cell;
+            }
+        }
+        self.columns = columns;
+        self.rows = rows;
+        self.cells = cells;
+    }
+
     /// The cell a logical coordinate falls in.
     fn cell(&self, value: Fixed) -> usize {
         let sixtyfourths = value.sixtyfourths();
@@ -389,6 +417,11 @@ where
     #[must_use]
     pub fn surface(&self) -> &T {
         &self.surface
+    }
+
+    /// The surface, mutably — for a window that has resized itself, or is about to be replaced.
+    pub fn surface_mut(&mut self) -> &mut T {
+        &mut self.surface
     }
 
     /// Whether a repaint is owed.
