@@ -172,12 +172,9 @@ fn control(byte: u8) -> Input {
 fn interpret(sequence: &[u8]) -> Input {
     let body = sequence.get(1..).unwrap_or_default();
     // `ESC O x` is the application-mode arrow set; `ESC [ x` the normal one.
-    let params = if body.first() == Some(&b'[') {
-        body.get(1..).unwrap_or_default()
-    } else if body.first() == Some(&b'O') {
-        body.get(1..).unwrap_or_default()
-    } else {
-        return Input::Ignored;
+    let params = match body.first() {
+        Some(b'[') | Some(b'O') => body.get(1..).unwrap_or_default(),
+        _ => return Input::Ignored,
     };
     let Some(&final_byte) = params.last() else {
         return Input::Ignored;
@@ -264,21 +261,21 @@ mod tests {
     fn plain_and_control_bytes_are_keys() {
         assert_eq!(
             keys(b"a"),
-            vec![Input::Key(
-                Key::Character('a'),
-                Modifiers::none()
-            )]
+            vec![Input::Key(Key::Character('a'), Modifiers::none())]
         );
-        assert_eq!(
-            keys(b"\r"),
-            vec![Input::Key(Key::Enter, Modifiers::none())]
-        );
+        assert_eq!(keys(b"\r"), vec![Input::Key(Key::Enter, Modifiers::none())]);
         assert_eq!(
             keys(b"\x7f"),
             vec![Input::Key(Key::Backspace, Modifiers::none())]
         );
-        assert_eq!(keys(b"\x1a"), vec![Input::Key(Key::Character('z'), Modifiers::control())]);
-        assert_eq!(keys(b"\x13"), vec![Input::Key(Key::Character('s'), Modifiers::control())]);
+        assert_eq!(
+            keys(b"\x1a"),
+            vec![Input::Key(Key::Character('z'), Modifiers::control())]
+        );
+        assert_eq!(
+            keys(b"\x13"),
+            vec![Input::Key(Key::Character('s'), Modifiers::control())]
+        );
     }
 
     #[test]

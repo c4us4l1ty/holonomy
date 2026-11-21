@@ -84,19 +84,19 @@ fn a_session_types_and_the_screen_shows_it() {
     window.draw().expect("drew");
 
     let status = format!(" holonomy · {} bytes ", window.document_len());
-    let screen = screen(window.surface(), COLUMNS, &status);
+    let drawn = screen(window.surface(), COLUMNS, &status);
     assert!(
-        screen.contains("hello"),
-        "the screen does not show the text:\n{screen}"
+        drawn.contains("hello"),
+        "the screen does not show the text:\n{drawn}"
     );
     assert!(
-        screen.contains("5 bytes"),
+        drawn.contains("5 bytes"),
         "the status line does not count the bytes"
     );
     // The caret is placed on row 1, column 6: after the five clusters.
     assert!(
-        screen.contains("\x1b[1;6H"),
-        "the caret is not after the last cluster:\n{screen}"
+        drawn.contains("\x1b[1;6H"),
+        "the caret is not after the last cluster:\n{drawn}"
     );
     println!(
         "HOLONOMY_TERMINAL keys={keys} bytes={} clusters={}",
@@ -114,8 +114,11 @@ fn editing_keys_reach_the_document_and_the_screen() {
     type_bytes(&mut window, b"\x7fo");
     assert_eq!(window.document_len(), 5);
     window.draw().expect("drew");
-    let screen = screen(window.surface(), COLUMNS, "status");
-    assert!(screen.contains("hello"), "backspace did not edit:\n{screen}");
+    let drawn = screen(window.surface(), COLUMNS, "status");
+    assert!(
+        drawn.contains("hello"),
+        "backspace did not edit:\n{drawn}"
+    );
 
     // Arrow keys are escape sequences; Ctrl+Z is one byte.
     type_bytes(&mut window, b"\x1b[D\x1b[D");
@@ -123,12 +126,15 @@ fn editing_keys_reach_the_document_and_the_screen() {
     type_bytes(&mut window, b"\x1a");
     assert_eq!(window.document_len(), 0, "Ctrl+Z did not undo");
     window.draw().expect("drew");
-    let screen = screen(window.surface(), COLUMNS, "status");
+    let after = screen(window.surface(), COLUMNS, "status");
     assert!(
-        !screen.contains("hello"),
-        "the screen still shows the undone text:\n{screen}"
+        !after.contains("hello"),
+        "the screen still shows the undone text:\n{after}"
     );
-    println!("HOLONOMY_TERMINAL_EDIT text={:?}", window.frame_text().expect("a frame"));
+    println!(
+        "HOLONOMY_TERMINAL_EDIT text={:?}",
+        window.frame_text().expect("a frame")
+    );
 }
 
 #[test]
@@ -140,8 +146,8 @@ fn a_resized_terminal_redraws_within_its_new_columns() {
         .resize(Fixed::units(10), Fixed::units(2))
         .expect("resized");
     window.draw().expect("drew");
-    let screen = screen(window.surface(), 10, "status");
-    for line in screen.split("\r\n") {
+    let drawn = screen(window.surface(), 10, "status");
+    for line in drawn.split("\r\n") {
         let visible: String = line.chars().filter(|c| !c.is_control()).collect();
         assert!(
             visible.chars().count() <= 12,
