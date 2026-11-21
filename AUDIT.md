@@ -366,6 +366,54 @@ Listed so they stay dead.
   redo, `abc`. Nothing could be lost by this defect — the bytes were always the document's — but a
   user could not take back a paragraph, which for a writing application is a defect in the first
   sentence of the manual.
+- **2026-11-21 — D-49 — the window said "saved" over a save that had failed. FIXED.** `run`
+  returned `Ok`, and `main` printed `outcome_words(true, None)`-style words for it; the final save's
+  own answer was thrown away with `let _ = save(...)`. A session whose last append was refused
+  therefore exited 0 and told the user everything was written. The save's answer is now part of the
+  sentence (`Ended::{NothingToWrite, Saved, SaveFailed}`), a `SaveFailed` exits non-zero, and a
+  dead session outranks a failed save in the wording. Pinned by
+  `a_failed_save_is_never_called_saved` (`crates/holonomy-gui/src/bin/holonomy.rs`).
+- **2026-11-21 — D-44 — backspace did nothing on a terminal whose erase key is `^H`. FIXED.** A tty
+  with `stty erase ^H` sends `0x08`; every other sends `0x7f`. The decoder mapped only `0x7f`, so
+  the backspace key produced no intent at all — while the passphrase prompt, which reads raw bytes,
+  accepted both, so the same key worked before the document opened and stopped working after.
+  `control` maps `0x08` to `Key::Backspace` now, and the test
+  `backspace_arrives_as_either_byte_a_terminal_sends` pins both bytes to the same key.
+- **2026-11-21 — D-45 — `Ctrl+Y` was documented as redo and was not decoded. FIXED.** The module
+  documentation offers `Ctrl+Y` precisely because a terminal sends `Ctrl+Shift+Z` as `0x1a`, the
+  same byte as `Ctrl+Z` — so the chord the keymap would need cannot be distinguished from the one
+  that undoes. Nothing mapped `0x19`, which left the documented redo key inert and redo unreachable
+  from a keyboard. `control` maps `0x19` to `Ctrl+Y` now. The `Ctrl+Shift+Z` ambiguity is not a
+  bug to fix but a fact to state, which the doc list and
+  `ctrl_y_is_redo_and_ctrl_shift_z_cannot_be_told_apart` both do.
+- **2026-11-21 — D-46 — a lone `ESC` and the start of an arrow were the same thing. FIXED.** The
+  window flushed a pending escape after every read, so a terminal that delivered `ESC` and `[A` in
+  two writes — over ssh, or under load — had `[A` typed into the document at the caret. An Up arrow
+  inserted two characters. The decoder keeps the partial sequence (`Decoder::pending`) and the
+  window settles it only when no further byte is waiting for a grace period; reads that arrive empty
+  stay non-destructive. Pinned by `escape_sequences_are_arrows_and_their_modifiers`.
+- **2026-11-21 — D-47 — "unsaved" was a flag that lied in both directions. FIXED.** `App` kept its
+  own dirty bit and set it on **every** key. A caret move seals the open leaf, so an arrow key
+  commits the bytes — after which the status line still said "unsaved" about text that already had a
+  witness — while a refused save left bytes unwritten and the line could say "saved". The truth is
+  in the session: `has_pending` asks `Typing::pending`, so the status line cannot disagree with the
+  file. `an_arrow_key_writes_the_bytes_so_the_document_is_not_unsaved`
+  (`crates/holonomy-gui/tests/keys.rs`) asserts the seal, the append, and that a flush with nothing
+  open writes nothing.
+- **2026-11-21 — OQ-25 — the terminal surface is one cell per cluster, so a wide character claims
+  half the screen the terminal gives it. OPEN.** `CellShaper` advances one logical unit per cluster
+  and the renderer writes one character per column, while a terminal draws an East Asian wide
+  character, most emoji and a handful of symbols in **two** cells. The disagreement is structural,
+  not a rounding error: `screen_with` lays out `columns` characters per row, so a row containing a
+  wide character is drawn two cells wider than the row it was measured for, and everything below it
+  shifts by one column — the same class of failure D-48 fixed for rows. It was cited in
+  `crates/holonomy-gui/src/term.rs` as "recorded as OQ-25" while no such entry existed, which is the
+  failure mode this file exists to prevent: a deferral with no owner, no reason and no date. Closing
+  it means a display-width function in the eye (`unicode-width`, or the East Asian Width tables
+  `holonomy-eye` already generates) consulted by both `CellShaper::advance` and the renderer, so the
+  cell grid and the terminal agree by construction rather than by hope. Nothing else is blocked on
+  it: the document, the geometry and the world-line are unaffected, and a document of ASCII and
+  narrow characters — which is what this release is typed in, per OQ-24's same scope — is exact.
 - **2026-11-20 — OQ-24 — shaping is metrics only, and nothing reads `GSUB`/`GPOS`. OPEN, by
   design for now.** `holonomy_eye::Face` reads `head`, `hhea`, `hmtx`, `maxp` and `cmap` (M3), so
   advances, ascent and descent are the font's own numbers — but a cluster's width is the *sum of
