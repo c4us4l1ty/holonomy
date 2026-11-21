@@ -314,7 +314,20 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
 
     /// Scrolls so `top` is the viewport's first logical unit, clamped into the document.
     pub fn scroll_to(&mut self, top: Fixed) {
-        let max = self.measured.total().sixtyfourths() - self.viewport.sixtyfourths();
+        self.scroll_to_within(top, self.measured.total());
+    }
+
+    /// Sets the scroll position, clamped so `top` can be reached even when the index is short.
+    ///
+    /// `measured.total()` is the document's height only while every leaf has been measured. A
+    /// tail leaf is pushed by `sync_measured` with no height and measured by the frame that draws
+    /// it, so between a keystroke and that frame the total is **short by the leaf the user is
+    /// typing into** — and clamping to it makes the reveal a no-op exactly when the caret is in
+    /// that leaf (D-58). `known` is the furthest document position the caller has evidence for;
+    /// the clamp is against whichever is larger.
+    fn scroll_to_within(&mut self, top: Fixed, known: Fixed) {
+        let document = self.measured.total().max(known);
+        let max = document.sixtyfourths() - self.viewport.sixtyfourths();
         let max = if max < 0 {
             Fixed::ZERO
         } else {
@@ -538,10 +551,13 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             return Ok(false);
         };
         let bottom = top + height;
+        // D-58: the caret's own line box is evidence the index may not have yet — the leaf holding
+        // a just-typed byte is unmeasured until a frame draws it — so the clamp is told the extent
+        // the caret establishes rather than trusting a total that is short by exactly that leaf.
         if top < self.scroll {
-            self.scroll_to(top);
+            self.scroll_to_within(top, bottom);
         } else if bottom > self.scroll + self.viewport {
-            self.scroll_to(bottom - self.viewport);
+            self.scroll_to_within(bottom - self.viewport, bottom);
         }
         Ok(self.scroll != before)
     }

@@ -66,6 +66,102 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-57 — a leaf the frame has not measured has no carry. FIXED.** Found while
+  checking D-53's reveal against D-50's index. `sync_measured` grows the index for a tail append
+  by `push()`, which records a zero height and a default carry; the frame measures the leaf the
+  first time it draws it. Everything that lays a leaf out *before* that frame ran from
+  `Measured::carry(leaf)`, which answered `Carry::default()` — and `Carry::default()` says "this
+  leaf begins a line", true only when it does. A seal cuts on a byte count, not a line boundary,
+  so a new tail leaf regularly begins mid-line, and then `caret_place` reported the caret one line
+  too high, `reveal_caret` scrolled to that line, `line_start` found the wrong line for a scroll
+  position, and `cluster_before` could cut a `\n` away from the `\r` in front of it (the phantom
+  line D-25's `leaf_text` exists to prevent). The first version of the fix tested the height for
+  zero, which is wrong: a leaf all of whose bytes its predecessor placed measures exactly zero and
+  is fully measured. `Measured::carries` is now `Vec<Option<Carry>>`, presence is the record, and
+  `Editor::carry_of` answers an unmeasured leaf from the last measured leaf at or before it. Three
+  call sites that assumed a carry was always there ask it. Unverified: no compiler here. Pinned by
+  `a_pushed_tail_leaf_is_laid_out_from_its_predecessors_carry`
+  (`crates/holonomy-shell/tests/editing.rs`), which cuts a leaf mid-line and asks for the caret's
+  place before any frame has measured the new leaf.
+- **2026-11-21 — D-56 — an escape mid-character abandoned the UTF-8 state, not the character.
+  FIXED.** `Decoder::feed` (`crates/holonomy-gui/src/term.rs`) tested the escape state before the
+  multi-byte state, so an `ESC` arriving between a character's lead byte and its continuation
+  bytes left `expect` standing; the continuation bytes then completed a character out of an
+  abandoned lead, and the keystroke after them was swallowed as the next continuation. A tty
+  delivers `ESC` between any two bytes — an arrow pressed during a paste, an interrupted writer,
+  noise on a serial line — so the sequence is not hypothetical. An escape now discards the
+  half-character, and so does `flush_escape` (the end of a read), because a stream that dies
+  mid-character must not poison the next one. Pinned by
+  `an_escape_mid_character_does_not_swallow_the_bytes_after_it`.
+- **2026-11-21 — D-55 — a font could make a line box run backwards. FIXED.** `Face::line_height`
+  is ascender − descender, read straight out of `hhea` as two `i16`s. A font with `descender >
+  ascender` — malformed, hostile, or a hand-edited file — produced a **negative** line height, and
+  nothing downstream catches it: `HeightModel::set` only *debug*-asserts that a height is not
+  negative, so a release build would store it and every prefix sum after that leaf would be wrong.
+  The visible result is a scroll bar that lies and a reveal that scrolls to the wrong row, both
+  silently. `Face::parse` now refuses such a font with `FaceError::BadTable("hhea")`, which is an
+  error a caller can show; the alternative — clamping in `line_height` — would have left every
+  other consumer of a malformed `hhea` still trusting it. Pinned by
+  `a_font_that_would_make_a_line_run_backwards_is_refused`
+  (`crates/holonomy-eye/tests/real_face.rs`), which mutates the shipped Inter's `hhea` and checks
+  both the refusal and that the unmutated font still parses.
+- **2026-11-21 — D-54 — a character wider than the buffer was an infinite loop. FIXED.** Found by
+  reading the keystroke loop against `SlabText`'s own rules rather than against its comments.
+  `Typing::type_bytes` sizes each chunk to the room left in the buffer and walks `take` down until
+  the split lands between characters. When the *next character alone* is wider than the whole
+  buffer, `take` reaches zero and the loop's only other move is `seal()` — which, with nothing
+  open, returns `Ok` and changes nothing. A `Typing::new(1)` session and a three-byte character
+  spun forever inside a public API that owed the caller an error. `take == 0` with nothing open
+  now returns `TypingError::TooLarge { needed, capacity }`. With a source open the seal is real
+  progress, so that path still seals and continues. Pinned by
+  `a_character_wider_than_the_buffer_is_refused_rather_than_spun_on`.
+- **2026-11-21 — D-53 — nothing measured the screen, revealed the caret, or re-measured on resize.
+  FIXED.** Three omissions with one symptom: the window stopped following the person typing.
+  `Editor::reflow` — the one place in the loop that measures every leaf, and therefore the only
+  way a scroll position past the first screen can be found — was called by no one but an intent a
+  front end never sent, so a document longer than a screen had one measured screen and could
+  scroll no further. `reveal_caret` had the same status: the shell has the policy, and no front
+  end asked. And `resize` empties the measured index on a width change *by design* (every height
+  described the old wrap) while leaving the re-measure to a caller that did not re-measure. The
+  window now reflows when it opens a document, asks for `Intent::RevealCaret` after a keystroke
+  that moves the caret, and asks for `Intent::Reflow` when the width changed. It asks through the
+  intent layer rather than calling the editor, because a scroll performed behind the layer's back
+  is a scroll no `Effect` told a renderer about. Pinned by
+  `typing_past_the_last_visible_line_scrolls_the_screen_with_the_caret`
+  (`crates/holonomy-gui/tests/keys.rs`).
+- **2026-11-21 — D-52 — a seal over no bytes answered `Ok` and kept the source open. FIXED.**
+  `Typing::seal` began `if len == 0 { return Ok(()) }`, and `attach(0)` opened a source whose leaf
+  `insert_slab` then dropped as empty. Both leave the register holding a source that owns no
+  bytes: `open_count` says one, `pending()` is empty, and the window's "is the file up to date"
+  question — which it asks every pause — can never be answered consistently. `seal` over zero
+  bytes now takes the open leaf out of the tree and abandons the source; `attach(0)` moves the
+  caret and opens nothing. Honest scope: the reachable paths already avoided this state (`delete`
+  closes a leaf it empties, and `restore_mark` is the only caller that can hand `attach` a zero),
+  so these are guards plus the removal of a lie, not a repair of a user-visible failure — the
+  tests for them are white-box for that reason
+  (`a_seal_over_no_bytes_abandons_the_source_instead_of_pretending`,
+  `attach_over_no_bytes_moves_the_caret_without_opening_a_source`).
+- **2026-11-21 — D-51 — the shell compared live offsets with sealed geometry. FIXED.** A document
+  has two coordinate spaces while a leaf is open: the **sealed** offsets the spine stores, and the
+  **live** offsets the user's caret, selection and reveal use. `leaf_of` binary-searched sealed
+  leaf starts against a live caret, and `leaf_bounds` returned sealed bounds for a live lookup.
+  Every leaf after the open one moves by the difference between its live and registered length, so
+  both were off by that amount whenever the open leaf had grown or shrunk — which is every
+  keystroke after the first. `Draft::live_offset` is the reverse of `locate`: the same edit walk,
+  answering where a sealed leaf start lands in the live document. Both call sites ask it, and
+  `caret_place` goes through `leaf_bounds` instead of a raw `slab_span`. Pinned by
+  `a_sealed_leaf_start_maps_to_the_live_offset_that_holds_it`
+  (`crates/holonomy-text/src/draft.rs`).
+- **2026-11-21 — D-50 — any one-leaf growth was taken for a tail append. FIXED.** `sync_measured`
+  kept the height index sized to the leaf count with a fast path: one new leaf, one `push`, O(log
+  n), because — the comment said — a new leaf can only appear at the end. It can: a caret moved
+  into sealed text and typed into **splits** a leaf, which also adds one. The index then kept
+  every measured height after the caret attached to leaves that had moved, and the leaf past the
+  end of the index was never measured at all, so the total height was wrong by an unbounded
+  amount. The fast path is now byte-anchored: the new last leaf must begin at `len_synced`, the
+  document length when the index was last true. Anything else rebuilds the index, which the next
+  frame repopulates for the leaves it can see. Pinned by
+  `typing_into_the_middle_of_a_sealed_document_remeasures_the_leaves_after_it`.
 - **2026-11-19 — D-31 — a seal writes the live bytes, not the buffer behind them (found by the
   gate it was written for).** The first run of D-30's harness failed within a second, on a length
   the session and the independent model disagreed about by exactly the three bytes an undo had

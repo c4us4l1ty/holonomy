@@ -927,3 +927,66 @@ fn typing_into_the_middle_of_a_sealed_document_remeasures_the_leaves_after_it() 
         "the document's last leaf was never laid out"
     );
 }
+
+#[test]
+fn a_pushed_tail_leaf_is_laid_out_from_its_predecessors_carry() {
+    // D-57: a seal cuts on a byte count, so the leaf a tail append pushes can begin in the middle
+    // of a wrapped line. `sync_measured` pushes it unmeasured — zero height, and the index's
+    // default carry says "this leaf begins a line". Anything that laid it out before a frame had
+    // measured it therefore started it at column zero, one line too high, and a reveal scrolled
+    // there. The caret is asked for before any frame runs, which is exactly the window's order:
+    // `App::press` reveals, and the binary draws afterwards.
+    let mut shell = session();
+    // One leaf of 64 letters on a 64-unit line is a single line; the next leaf starts a new one.
+    // Twenty letters on a 20-unit line is two lines of ten, so a cut after the tenth lands at a
+    // line start and a cut after the fifteenth does not.
+    shell.type_text(&"a".repeat(20)).expect("typed");
+    shell.flush().expect("sealed");
+    shell.type_text(&"b".repeat(20)).expect("typed");
+    shell.flush().expect("sealed");
+    shell.resize(Fixed::units(10), VIEWPORT);
+    shell.reflow().expect("measured");
+    // Two leaves, four lines: `aaaaaaaaaa aaaaaaaaaa` then the same for the b's.
+    assert_eq!(shell.heights().total(), Fixed::units(80));
+    assert_eq!(shell.heights().len(), 2);
+
+    // The caret goes to the middle of the second leaf and a keystroke opens a third.
+    shell
+        .move_caret_to(holonomy_shell::Move::DocumentStart, false)
+        .expect("moved");
+    for _ in 0..25 {
+        shell
+            .move_caret_to(holonomy_shell::Move::Right, false)
+            .expect("moved");
+    }
+    shell.type_text("c").expect("typed");
+    // The cut split the second leaf in two and placed the new one between the halves.
+    assert_eq!(shell.heights().len(), 4, "the cut added one leaf");
+
+    // No frame has run, so the new leaf is unmeasured and its carry is the index's default.
+    let placed = shell.reveal_caret().expect("revealed");
+    let scroll = shell.scroll();
+    println!("HOLONOMY_REVEAL_UNMEASURED scrolled={placed} top={scroll:?}");
+
+    // The caret is at byte 26 of a 41-byte document, on the third of five lines — past the first
+    // screen of two, so the reveal has to scroll. With a default carry the new leaf was placed one
+    // line too high and the answer came out short by a line; the check is against the document's
+    // own geometry rather than a number.
+    //
+    // D-58 rides on the same state: `heights().total()` is still the four lines the last `reflow`
+    // measured, because the new leaf has not been drawn. A clamp against that total makes the
+    // reveal a no-op, which is the D-53 symptom surviving in a second place.
+    let document = format!("{}{}c{}", "a".repeat(20), "b".repeat(5), "b".repeat(15));
+    let whole = layout_styled(StyledText::plain(&document), 0, Fixed::units(10), &Fake);
+    let caret = whole.paint_point(26).expect("a caret on the third line");
+    let bottom = caret.top + caret.height;
+    assert!(
+        scroll + VIEWPORT >= bottom,
+        "the caret's line ends at {bottom:?} but the screen stops at {:?}",
+        scroll + VIEWPORT
+    );
+    assert!(
+        placed,
+        "the reveal reported no scroll, so it was clamped to a total that is short a leaf"
+    );
+}
