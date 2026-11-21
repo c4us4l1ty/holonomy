@@ -82,21 +82,22 @@ Listed so they stay dead.
   still allocates nothing (`tests/keystroke_allocations.rs`) and a seal still appends once.
 - **2026-11-21 — D-42 — every arrow key typed a letter into the document. FIXED.** Found by the
   terminal backend's own unit test, on the first run that reached it: `keys(b"\x1b[A")` came back as
-  `[Ignored, Character('A')]` instead of `[Up]`, and `keys(b"\x1b[C")` as `[Ignored, Character('C')]`.
-  The mechanism, in `Decoder::feed` (`crates/holonomy-gui/src/term.rs`): while an escape sequence was
-  being accumulated the decoder looked for a CSI *final* byte — the range `0x40..=0x7e` — in the
-  byte it had just appended, with no exception for the second byte. `[` is 0x5b, inside that range, so
-  `ESC [` was complete the moment it arrived; `interpret` saw a two-byte sequence with nothing after
-  the introducer and answered `Ignored`, and the `A` that followed was read as an ordinary printable
-  byte. The arrows therefore walked into the edit path as text: press Up and the letter `A` appears in
-  the document, `C` for Right, `D` for Left, `B` for Down — and with modifiers the rest of the
-  sequence (`[1;2` then `D`) becomes a run of digits. This was invisible to the keymap (`keys.rs`
-  presses `Key` values directly) and to everything before M4b, because nothing had ever encoded a tty's
-  bytes. The fix: the second byte is the introducer and cannot be a final byte — `len == 2` is
-  complete only when that byte is neither `[` nor `O`, and from the third byte on the `0x40..=0x7e`
-  rule applies. The test that found it (`escape_sequences_are_arrows_and_their_modifiers`) covers
-  `ESC[A`, `ESC[C`, `ESC[1;2D`, `ESC[3~` and `ESC[5~`; `tests/terminal.rs` re-proves the path end to
-  end by feeding those same bytes through the decoder and asserting where the caret landed.
+  `[Ignored, Character('A')]` instead of `[Up]`, and `keys(b"\x1b[C")` as `[Ignored,
+  Character('C')]`. The mechanism, in `Decoder::feed` (`crates/holonomy-gui/src/term.rs`): while an
+  escape sequence was being accumulated the decoder looked for a CSI *final* byte — the range
+  `0x40..=0x7e` — in the byte it had just appended, with no exception for the second byte. `[` is
+  0x5b, inside that range, so `ESC [` was complete the moment it arrived; `interpret` saw a two-byte
+  sequence with nothing after the introducer and answered `Ignored`, and the `A` that followed was
+  read as an ordinary printable byte. The arrows therefore walked into the edit path as text: press
+  Up and the letter `A` appears in the document, `C` for Right, `D` for Left, `B` for Down — and
+  with modifiers the rest of the sequence (`[1;2` then `D`) becomes a run of digits. This was
+  invisible to the keymap (`keys.rs` presses `Key` values directly) and to everything before M4b,
+  because nothing had ever encoded a tty's bytes. The fix: the second byte is the introducer and
+  cannot be a final byte — `len == 2` is complete only when that byte is neither `[` nor `O`, and
+  from the third byte on the `0x40..=0x7e` rule applies. The test that found it
+  (`escape_sequences_are_arrows_and_their_modifiers`) covers `ESC[A`, `ESC[C`, `ESC[1;2D`, `ESC[3~`
+  and `ESC[5~`; `tests/terminal.rs` re-proves the path end to end by feeding those same bytes
+  through the decoder and asserting where the caret landed.
 - **2026-11-20 — D-41 — a frame showed nothing of the bytes being typed into the open leaf.
   FIXED.** Found by M4's window tests: five keystrokes left a document of five bytes and a frame of
   two, and only `Ctrl+S` made the rest appear. The mechanism, traced through the code: the frame's
