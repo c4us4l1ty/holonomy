@@ -20,6 +20,7 @@
 //! you write is still there when you open it again.
 
 use holonomy_eye::Fixed;
+use holonomy_gui::panel::Facts;
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
@@ -193,10 +194,12 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
     let mut bytes = [0u8; 256];
     let mut unsaved = false;
     let mut message = String::new();
+    let mut panel: Option<Vec<String>> = None;
     print!("\x1b[?25l\x1b[2J");
     loop {
         let (now_columns, now_rows) = size();
-        let surface_rows = now_rows.saturating_sub(1).max(1);
+        let panel_lines = panel.clone().unwrap_or_default();
+        let surface_rows = now_rows.saturating_sub(1 + panel_lines.len()).max(1);
         app.surface_mut().resize(now_columns, surface_rows);
         app.resize(
             Fixed::units(now_columns as i64),
@@ -213,7 +216,7 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
         write!(
             stdout,
             "{}",
-            term::screen(app.surface(), now_columns, &line)
+            term::screen_with(app.surface(), now_columns, &panel_lines, &line)
         )?;
         if let Some((column, row)) = app.surface().caret_cell() {
             write!(stdout, "\x1b[?25h\x1b[{};{}H", row + 1, column + 1)?;
@@ -254,6 +257,20 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
                     Key::Character('s') => {
                         unsaved = !save(&mut app);
                         message.clear();
+                        continue;
+                    }
+                    Key::Character('g') => {
+                        panel = if panel.is_some() {
+                            None
+                        } else {
+                            // A full authentication is what "verified" may claim, so it is asked
+                            // for when the panel opens — never assumed.
+                            let verified = document
+                                .verify()
+                                .ok()
+                                .map(|report| report.segments_verified);
+                            Some(Facts::gather(app.residency(), document, verified).lines())
+                        };
                         continue;
                     }
                     _ => {}

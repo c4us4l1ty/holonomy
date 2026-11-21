@@ -23,6 +23,7 @@
 //! Nothing in this crate assumes a grid, a font or a window: [`Surface`] hands a backend clusters at
 //! the advances the Eye measured, so a GPU backend draws exactly the picture the tests assert.
 
+pub mod panel;
 pub mod store;
 pub mod term;
 
@@ -412,6 +413,12 @@ where
     /// The editor, for a caller that needs a number the window does not show.
     pub fn editor(&mut self) -> &mut Editor<S, R, H> {
         &mut self.editor
+    }
+
+    /// The resident set, for a window that reports on what it holds (the security panel).
+    #[must_use]
+    pub fn residency(&self) -> &holonomy_text::ResidentSet<R> {
+        self.editor.residency()
     }
 
     /// The surface, for a caller that wants to read back what was drawn.
