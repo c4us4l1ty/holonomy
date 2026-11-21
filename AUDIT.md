@@ -66,6 +66,26 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-60 — a page was the screen the window had when it was built. FIXED.**
+  `Keymap::page` is one number, set by `Keymap::new` and never told again — but the window's
+  screen changes under it. The terminal is the visible case: `Ctrl+G`'s security panel takes rows
+  from the text area and the binary hands that smaller height to `App::resize` on every loop, while
+  Page Down kept stepping the height the window had at construction, so a page skipped lines the
+  user never saw. A resized terminal does the same with no panel involved. `Keymap::set_page`
+  exists now and `App::resize` sets it from `Editor::viewport`, so the page and the screen are the
+  same number by construction. Pinned by `a_page_is_the_screen_the_window_is_showing_now`
+  (`crates/holonomy-gui/tests/terminal.rs`).
+- **2026-11-21 — D-59 — a refused MMR merge left the accumulator half-consumed. FIXED.**
+  `Mmr::append` (`crates/holonomy-line/src/mmr.rs`) walked its merge by taking peaks **out of
+  `self`** and returned early through `?` when one was missing. The caller received `Err`, but the
+  accumulator kept a `count` its peaks no longer backed, and the next `append` merged against the
+  holes while `root` and `encode_peaks` — both of which `expect` a peak for every set bit — could
+  panic on a value an earlier call had already reported as an error. The merge is computed into a
+  scratch copy now and committed only when it completes, and the height guard is checked before the
+  indexing rather than after it, so the walk cannot index `peaks[HEIGHTS]` on its last iteration.
+  Honest scope: the state that triggers this needs a corrupt-but-authenticated witness, so it is
+  defence in depth rather than a reachable user failure. Pinned by
+  `a_refused_merge_leaves_the_accumulator_exactly_as_it_was`.
 - **2026-11-21 — D-58 — a reveal into an unmeasured leaf was clamped away. FIXED.** Found while
   writing D-57's test, and it is the same defect one layer down. `Editor::scroll_to` clamps the
   scroll position to `measured.total()`, which is the document's height only while every leaf is
