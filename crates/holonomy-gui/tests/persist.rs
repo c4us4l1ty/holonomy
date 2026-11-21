@@ -63,7 +63,7 @@ fn create(path: &Path) -> Document {
 }
 
 /// The window over a document: the same construction the binary uses.
-fn window(document: &Document) -> Window {
+fn open_window(document: &Document) -> Window {
     let spine = document.spine().expect("a geometry");
     let residency = ResidentSet::new(document.source(), store::BUDGET, store::SLACK)
         .expect("a workable budget");
@@ -108,7 +108,7 @@ fn text(window: &mut Window) -> String {
 fn a_session_survives_its_window() {
     let path = temp_path("survive");
     let document = create(&path.0);
-    let mut window = window(&document);
+    let mut window = open_window(&document);
     type_text(&mut window, "hello");
     assert_eq!(text(&mut window), "hello");
     assert!(save(&mut window), "Ctrl+S reported nothing saved");
@@ -123,7 +123,7 @@ fn a_session_survives_its_window() {
     let reopened = Document::open(&path.0, PASSPHRASE).expect("opens");
     assert_eq!(reopened.segment_count(), 1);
     assert_eq!(reopened.trailing_bytes(), 0, "nothing to recover");
-    let mut window = window(&reopened);
+    let mut window = open_window(&reopened);
     assert_eq!(text(&mut window), "hello", "the session did not survive");
     assert_eq!(window.document_len(), bytes);
     println!(
@@ -136,14 +136,14 @@ fn a_session_survives_its_window() {
 fn a_reopened_session_resumes_where_the_file_left_off() {
     let path = temp_path("resume");
     let first = create(&path.0);
-    let mut window = window(&first);
+    let mut window = open_window(&first);
     type_text(&mut window, "hello ");
     save(&mut window);
     drop(window);
     drop(first);
 
     let second = Document::open(&path.0, PASSPHRASE).expect("opens");
-    let mut window = window(&second);
+    let mut window = open_window(&second);
     assert_eq!(text(&mut window), "hello ");
     type_text(&mut window, "world");
     assert_eq!(text(&mut window), "hello world");
@@ -152,8 +152,12 @@ fn a_reopened_session_resumes_where_the_file_left_off() {
     drop(second);
 
     let third = Document::open(&path.0, PASSPHRASE).expect("opens");
-    let mut window = window(&third);
-    assert_eq!(text(&mut window), "hello world", "the second session lost bytes");
+    let mut window = open_window(&third);
+    assert_eq!(
+        text(&mut window),
+        "hello world",
+        "the second session lost bytes"
+    );
     assert_eq!(third.segment_count(), 2, "one segment per save");
     println!(
         "HOLONOMY_PERSIST resume segments={} witnesses={}",
@@ -166,7 +170,7 @@ fn a_reopened_session_resumes_where_the_file_left_off() {
 fn a_wrong_passphrase_is_a_refusal_and_the_file_still_opens() {
     let path = temp_path("refusal");
     let document = create(&path.0);
-    let mut window = window(&document);
+    let mut window = open_window(&document);
     type_text(&mut window, "secret");
     save(&mut window);
     drop(window);
@@ -187,7 +191,7 @@ fn a_wrong_passphrase_is_a_refusal_and_the_file_still_opens() {
 
     // And the file is untouched by the attempt.
     let reopened = Document::open(&path.0, PASSPHRASE).expect("the right phrase still works");
-    let mut window = window(&reopened);
+    let mut window = open_window(&reopened);
     assert_eq!(text(&mut window), "secret");
     println!("HOLONOMY_PERSIST refusal message={shown:?}");
 }
@@ -196,7 +200,7 @@ fn a_wrong_passphrase_is_a_refusal_and_the_file_still_opens() {
 fn a_copy_taken_mid_session_opens_where_it_was_copied() {
     let path = temp_path("handoff");
     let document = create(&path.0);
-    let mut window = window(&document);
+    let mut window = open_window(&document);
     type_text(&mut window, "first half");
     save(&mut window);
     drop(window);
@@ -205,7 +209,7 @@ fn a_copy_taken_mid_session_opens_where_it_was_copied() {
     let copy = temp_path("handoff-copy");
     fs::copy(&path.0, &copy.0).expect("copies");
 
-    let mut window = window(&document);
+    let mut window = open_window(&document);
     type_text(&mut window, " and second half");
     save(&mut window);
     assert_eq!(text(&mut window), "first half and second half");
@@ -213,14 +217,14 @@ fn a_copy_taken_mid_session_opens_where_it_was_copied() {
     drop(document);
 
     let copied = Document::open(&copy.0, PASSPHRASE).expect("the copy opens");
-    let mut window = window(&copied);
+    let mut window = open_window(&copied);
     assert_eq!(
         text(&mut window),
         "first half",
         "the copy must hold what it held when it was taken"
     );
     let original = Document::open(&path.0, PASSPHRASE).expect("the original opens");
-    let mut window = window(&original);
+    let mut window = open_window(&original);
     assert_eq!(text(&mut window), "first half and second half");
     println!(
         "HOLONOMY_PERSIST handoff copy_segments={} original_segments={}",
@@ -233,7 +237,7 @@ fn a_copy_taken_mid_session_opens_where_it_was_copied() {
 fn bytes_past_the_last_witness_are_reported_and_discarded() {
     let path = temp_path("torn");
     let document = create(&path.0);
-    let mut window = window(&document);
+    let mut window = open_window(&document);
     type_text(&mut window, "committed");
     save(&mut window);
     drop(window);
@@ -251,8 +255,12 @@ fn bytes_past_the_last_witness_are_reported_and_discarded() {
         (tail.len() as u64) - committed,
         "the recovery report must name what it discarded"
     );
-    let mut window = window(&reopened);
-    assert_eq!(text(&mut window), "committed", "the committed text survived");
+    let mut window = open_window(&reopened);
+    assert_eq!(
+        text(&mut window),
+        "committed",
+        "the committed text survived"
+    );
     // And the document is usable again: an append past a torn tail is what recovery is for.
     type_text(&mut window, " again");
     assert!(save(&mut window), "the document must accept new appends");

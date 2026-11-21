@@ -23,8 +23,8 @@ use holonomy_eye::Fixed;
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
-use holonomy_shell::Effect;
 use holonomy_shell::Editor;
+use holonomy_shell::Effect;
 use holonomy_text::{ResidentSet, Typing};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -159,9 +159,10 @@ fn window(
 
 /// What the status line says.
 fn status(path: &Path, document: &Document, bytes: u64, unsaved: bool, message: &str) -> String {
-    let name = path
-        .file_name()
-        .map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
     let state = if unsaved { "unsaved" } else { "saved" };
     let extra = if message.is_empty() {
         String::new()
@@ -177,9 +178,7 @@ fn status(path: &Path, document: &Document, bytes: u64, unsaved: bool, message: 
 /// Saves now: the same intent `Ctrl+S` produces, so the commit path is the keymap's.
 fn save(app: &mut Window) -> bool {
     match app.press(Key::Character('s'), Modifiers::control()) {
-        Ok(effects) => effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::Saved)),
+        Ok(effects) => effects.iter().any(|effect| matches!(effect, Effect::Saved)),
         Err(_) => false,
     }
 }
@@ -211,7 +210,11 @@ fn run(path: &Path, document: &Document) -> Result<(), Box<dyn std::error::Error
             unsaved,
             message.as_str(),
         );
-        write!(stdout, "{}", term::screen(app.surface(), now_columns, &line))?;
+        write!(
+            stdout,
+            "{}",
+            term::screen(app.surface(), now_columns, &line)
+        )?;
         if let Some((column, row)) = app.surface().caret_cell() {
             write!(stdout, "\x1b[?25h\x1b[{};{}H", row + 1, column + 1)?;
         }
@@ -311,7 +314,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         path.display(),
         segments,
         witnesses,
-        if outcome.is_ok() { "saved" } else { "the session ended badly" }
+        if outcome.is_ok() {
+            "saved"
+        } else {
+            "the session ended badly"
+        }
     );
     outcome
 }
