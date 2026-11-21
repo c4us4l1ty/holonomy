@@ -465,6 +465,11 @@ where
             self.editor.mark();
         }
         self.typing = typing;
+        // Decided before `intent` is moved into `apply`, which is where it is consumed.
+        let moves_the_caret = matches!(
+            intent,
+            Intent::Type(_) | Intent::Backspace | Intent::DeleteForward
+        );
         let mut effects = self.editor.apply(intent)?;
         // D-53/D-57: the caret a keystroke leaves behind is the window's to keep on screen, and
         // nothing was doing it. A document longer than a screen scrolled nowhere, so typing past
@@ -478,10 +483,7 @@ where
         // performed. Best effort on the error: the edit has already landed, and a leaf the reader
         // could not lay out is the *frame's* problem — propagating it would report a keystroke that
         // reached the document as a refused edit, the same lie D-47 was about, one layer down.
-        if matches!(
-            intent,
-            Intent::Type(_) | Intent::Backspace | Intent::DeleteForward
-        ) {
+        if moves_the_caret {
             if let Ok(revealed) = self.editor.apply(Intent::RevealCaret) {
                 if !revealed.is_empty() && !effects.contains(&Effect::Redraw) {
                     effects.push(Effect::Redraw);
@@ -505,7 +507,7 @@ where
         // policy — so a window that resized once could scroll no further than its first screen for
         // the rest of the session (D-53). The window asks for the measurement it invalidated.
         let width_changed = self.editor.width() != width;
-        let effects = self.editor.apply(Intent::Resize {
+        let mut effects = self.editor.apply(Intent::Resize {
             width,
             viewport: height,
         })?;

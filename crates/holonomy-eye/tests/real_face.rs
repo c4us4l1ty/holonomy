@@ -250,7 +250,7 @@ fn table_offset(bytes: &[u8], tag: &[u8; 4]) -> Option<usize> {
                 bytes[record + 10],
                 bytes[record + 11],
             ]);
-            return Some(usize::try_from(offset).ok()?);
+            return usize::try_from(offset).ok();
         }
     }
     None
