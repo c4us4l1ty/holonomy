@@ -509,7 +509,8 @@ where
         // D-60: a page is a screen, and the screen just changed. The keymap was told the height
         // it had when the window was built and was never told again, so a panel opening (which
         // shrinks the surface) or a resized terminal made Page Down skip lines.
-        self.keymap.set_page(self.editor.viewport());
+        let page = self.editor.viewport();
+        self.keymap.set_page(page);
         if width_changed {
             // Through the intent, for the reason above: a re-measure is a state change and owes
             // the caller its effects. Best effort on the error — a document the reader refuses is

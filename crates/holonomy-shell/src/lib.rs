@@ -314,7 +314,8 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
 
     /// Scrolls so `top` is the viewport's first logical unit, clamped into the document.
     pub fn scroll_to(&mut self, top: Fixed) {
-        self.scroll_to_within(top, self.measured.total());
+        let known = self.measured.total();
+        self.scroll_to_within(top, known);
     }
 
     /// Sets the scroll position, clamped so `top` can be reached even when the index is short.
