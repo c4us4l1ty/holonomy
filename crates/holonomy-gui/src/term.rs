@@ -182,8 +182,13 @@ impl Decoder {
     /// A lone `ESC` is indistinguishable from the start of a sequence until the read blocks, so the
     /// terminal wrapper flushes with this when a read comes back with nothing else.
     pub fn flush_escape(&mut self) -> Option<Input> {
-        // D-56: `flush_escape` is called at the end of a read, so a half-character left over from
-        // an interrupted stream must not survive to the next one either.
+        // D-56: a half-character must not outlive the read it was half of — but only when this
+        // call is actually settling an escape. A caller that flushes with nothing pending must not
+        // lose a character that is still arriving, which is the ordinary case of a tty splitting a
+        // three-byte character across two reads.
+        if self.escape.is_none() {
+            return None;
+        }
         self.utf8.clear();
         self.expect = 0;
         self.escape.take().map(|sequence| {
@@ -503,6 +508,23 @@ mod tests {
         assert!(inputs.is_empty());
         let later = decoder.feed_all(b"\x1b[A");
         assert_eq!(later, vec![Input::Key(Key::Up, Modifiers::none())]);
+    }
+
+    #[test]
+    fn a_character_split_across_reads_survives_a_flush_with_nothing_pending() {
+        // D-56's other half, and the mistake the first version of the fix made: `flush_escape`
+        // cleared the UTF-8 state unconditionally, so a caller that settled a read with nothing
+        // awaiting a decision threw away a character that was still arriving. A tty splitting
+        // three bytes across two reads is the ordinary case, not the hostile one.
+        let mut decoder = Decoder::new();
+        let bytes = "中".as_bytes();
+        assert!(decoder.feed_all(bytes.get(..2).expect("two bytes")).is_empty());
+        assert_eq!(decoder.flush_escape(), None, "nothing was pending");
+        assert_eq!(
+            decoder.feed_all(bytes.get(2..).expect("one byte")),
+            vec![Input::Key(Key::Character('中'), Modifiers::none())],
+            "the character still completed"
+        );
     }
 
     #[test]
