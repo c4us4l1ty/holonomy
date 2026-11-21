@@ -123,7 +123,15 @@ fn prompt(verb: &str, path: &Path) -> std::io::Result<Vec<u8>> {
     let mut byte = [0u8; 1];
     loop {
         if stdin.read(&mut byte)? == 0 {
-            break;
+            // D-63: end of input is not an empty passphrase. `Ctrl+D` at a terminal, or a tty that
+            // went away, used to fall through here and hand `create`/`open` an empty phrase — which
+            // nothing downstream refuses, so the document was made and reported as saved while
+            // being protected by nothing at all. The read returning zero means the user did not
+            // finish the sentence the prompt asked for.
+            writeln!(stdout)?;
+            return Err(std::io::Error::other(
+                "the passphrase was not completed (end of input)",
+            ));
         }
         match byte[0] {
             b'\r' | b'\n' => break,
@@ -139,6 +147,11 @@ fn prompt(verb: &str, path: &Path) -> std::io::Result<Vec<u8>> {
     }
     writeln!(stdout)?;
     stdout.flush()?;
+    if phrase.is_empty() {
+        // The same rule as end-of-input, for the same reason: a file protected by nothing looks
+        // exactly like a file protected by something until the day it matters.
+        return Err(std::io::Error::other("the passphrase was empty"));
+    }
     Ok(phrase)
 }
 
