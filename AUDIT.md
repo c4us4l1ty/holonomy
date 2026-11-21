@@ -66,6 +66,14 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-61 — `Escape` was documented as dismissing and dismissed nothing. FIXED.**
+  `Key::Escape` carries the doc line "dismisses, never edits", and the keymap does the second half
+  correctly: it refuses to turn Escape into an edit. Nothing did the first half, so the key was
+  inert in every state and the only way to close `Ctrl+G`'s security panel was the chord that
+  opened it. The panel belongs to the binary rather than the editor and never reaches an `Intent`,
+  so the binary dismisses it now, and its module docs say so beside the rest of the key list. This
+  is the class of defect the audit exists for: not a wrong line of code, but a documented behaviour
+  with no implementation behind it.
 - **2026-11-21 — D-60 — a page was the screen the window had when it was built. FIXED.**
   `Keymap::page` is one number, set by `Keymap::new` and never told again — but the window's
   screen changes under it. The terminal is the visible case: `Ctrl+G`'s security panel takes rows
