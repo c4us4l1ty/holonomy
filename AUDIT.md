@@ -66,6 +66,18 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-21 — D-63 — an empty passphrase was accepted, and a closed tty was read as one.
+  FIXED.** `prompt` collected bytes until `\r`; `stdin.read` returning **0** — `Ctrl+D` at a
+  terminal, or a tty that went away — left the loop by the same `break` a typed line takes, and the
+  phrase was then whatever had been typed, which could be nothing. Nothing downstream refuses an
+  empty one: `MasterKeys::derive_with` accepts it, `Document::create` writes the file, and the
+  window prints "saved". A document protected by nothing is indistinguishable from a document
+  protected by something until the day it matters, and the prompt is the only place it can be
+  caught. Both cases
+  are refused now — end of input, and an empty line — with the reason beside each, and the `Ctrl+C`
+  path keeps its own message so a cancel is not reported as an empty phrase. **Verified by CI run
+  44907174415 on `f6ce706`, every job green.** Residual: the phrase's bytes are still best effort,
+  which OQ-28 owns.
 - **2026-11-21 — D-62 — a document still inside its buffer had no height at all. FIXED.**
   `Measured` keeps one height per **spine slab**, and the bytes a user is typing are in the open
   leaf — which is in the spine, so it has an entry, but nothing measures it until a frame draws it.
