@@ -1265,13 +1265,15 @@ mod tests {
         // loop sealed — which with nothing open does nothing — forever. The error is the contract.
         let mut typing = session(1);
         let refused = typing.insert("\u{2192}".as_bytes());
-        assert_eq!(
-            refused,
-            Err(TypingError::TooLarge {
-                needed: 3,
-                capacity: 1
-            }),
-            "a character the buffer cannot hold is an error, not a hang"
+        assert!(
+            matches!(
+                refused,
+                Err(TypingError::TooLarge {
+                    needed: 3,
+                    capacity: 1
+                })
+            ),
+            "a character the buffer cannot hold is an error, not a hang: {refused:?}"
         );
         assert_eq!(typing.document_len(), 0);
         // A character that does fit still types, one byte at a time.

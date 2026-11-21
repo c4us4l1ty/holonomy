@@ -186,17 +186,14 @@ impl Decoder {
         // call is actually settling an escape. A caller that flushes with nothing pending must not
         // lose a character that is still arriving, which is the ordinary case of a tty splitting a
         // three-byte character across two reads.
-        if self.escape.is_none() {
-            return None;
-        }
+        self.escape.as_ref()?;
         self.utf8.clear();
         self.expect = 0;
-        self.escape.take().map(|sequence| {
-            if sequence.len() == 1 {
-                Input::Key(Key::Escape, Modifiers::none())
-            } else {
-                interpret(&sequence)
-            }
+        let sequence = self.escape.take().unwrap_or_default();
+        Some(if sequence.len() == 1 {
+            Input::Key(Key::Escape, Modifiers::none())
+        } else {
+            interpret(&sequence)
         })
     }
 }

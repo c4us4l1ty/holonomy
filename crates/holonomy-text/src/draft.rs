@@ -546,7 +546,7 @@ mod tests {
         let total = draft.document_len(&spine);
         assert_eq!(total, 54);
         for offset in 0..total {
-            let (start, end) = live
+            let (start, _) = live
                 .iter()
                 .copied()
                 .find(|&(start, end)| start <= offset && offset < end)
