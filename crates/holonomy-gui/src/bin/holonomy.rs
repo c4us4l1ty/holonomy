@@ -16,7 +16,7 @@
 //! `Ctrl+Z`, so `Ctrl+Y` is the redo this window can actually offer (D-45).
 //!
 //! `Ctrl+G` asks the document for the security panel: what is resident, how the memory is locked,
-//! what the file itself says. What is still not here: the GPU backend (M4b-ii — it needs crates
+//! what the file itself says. `Esc` dismisses it. What is still not here: the GPU backend (M4b-ii — it needs crates
 //! this environment cannot fetch) and the blocks after this one. What *is* here is the thing the
 //! question in `docs/TO-APP.md` asked: you can open the app and start writing, and what you write
 //! is still there when you open it again.
@@ -329,6 +329,13 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
                     }
                     _ => {}
                 }
+            }
+            // D-61: `Key::Escape` is documented as "dismisses, never edits", and the keymap
+            // correctly refuses to turn it into an edit — but nothing was doing the dismissing, so
+            // the key was inert and the only way to close the panel was the chord that opened it.
+            // The panel is the window's, not the editor's, so it is dismissed here.
+            if key == Key::Escape && panel.take().is_some() {
+                continue;
             }
             if app.press(key, modifiers).is_err() {
                 // A refused intent is not a crashed session: say so and keep the buffer.
