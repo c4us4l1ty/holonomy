@@ -792,10 +792,10 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let inherited = self.measured.carry(leaves as usize - 1);
             self.measure_leaf(leaves - 1, inherited)?.1
         };
-        let (text, from) = {
-            let read = self.read(sealed, len)?;
-            leaf_text(read.text(), sealed, carry)
-        };
+        // Bound outside the destructuring, not inside it: the text borrows the window, and a
+        // `let` in the block would drop the window while the text still pointed into it.
+        let read = self.read(sealed, len)?;
+        let (text, from) = leaf_text(read.text(), sealed, carry);
         let layout = layout_styled_continuing(
             StyledText::plain(text),
             from,
