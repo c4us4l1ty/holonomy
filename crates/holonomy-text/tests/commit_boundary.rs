@@ -50,14 +50,14 @@ fn material(passphrase: &[u8], salt: [u8; 64]) -> (Capsule, DEMKey) {
     create_capsule_for(keys.unwrap_key(), None).expect("a capsule")
 }
 
-fn create_line<'key>(path: &Temp, capsule: Capsule, dem: &'key DEMKey) -> WorldLine {
+fn create_line(path: &Temp, capsule: Capsule, dem: &DEMKey) -> WorldLine {
     let params = KdfParamsRecord {
         m_kib: 8_192,
         t: 1,
         p: 1,
     };
     let header = LineHeader::new(params, [0x5C; 64], capsule).expect("a valid header");
-    WorldLine::create(&path.0, header, dem).expect("creates the world-line")
+    WorldLine::create(&path.0, header, dem.duplicate()).expect("creates the world-line")
 }
 
 /// Reads one committed segment into an editable slab, as a fault-in would.
@@ -67,11 +67,11 @@ fn resident(line: &WorldLine, segment: u64, slack: usize) -> SlabText {
 }
 
 /// The world-line as the commit boundary sees it.
-struct LineSink<'a, 'key> {
+struct LineSink<'a> {
     line: &'a mut WorldLine,
 }
 
-impl SegmentSink for LineSink<'_, '_> {
+impl SegmentSink for LineSink<'_> {
     fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
         let receipt = self
             .line
@@ -88,11 +88,11 @@ impl SegmentSink for LineSink<'_, '_> {
 }
 
 /// The world-line as the resident set sees it.
-struct LineSource<'a, 'key> {
+struct LineSource<'a> {
     line: &'a WorldLine,
 }
 
-impl SegmentSource for LineSource<'_, '_> {
+impl SegmentSource for LineSource<'_> {
     fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
         let bytes = self
             .line
@@ -147,7 +147,7 @@ fn a_keystroke_becomes_a_sealed_segment_and_a_new_root() {
     assert_eq!(spine.len(), 11, "the old root still describes its document");
 
     // Durable and authenticated: a fresh handle sees both segments and the same root.
-    let reopened = WorldLine::open(&path.0, &dem).expect("reopens");
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).expect("reopens");
     assert_eq!(reopened.segment_count(), 2);
     assert_eq!(reopened.segment_root(), witness.segment_root);
     let original = reopened.open_segment(0).expect("segment 0").to_vec();
@@ -180,7 +180,7 @@ fn the_resident_set_reads_the_segment_the_commit_wrote() {
 
     // A resident set pointed at the same file must fault in exactly the committed bytes for the
     // segment the new root names. This is the seam the Eye will use.
-    let reopened = WorldLine::open(&path.0, &dem).expect("reopens");
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).expect("reopens");
     let source = LineSource { line: &reopened };
     let mut set = ResidentSet::new(source, 1 << 20, 64).expect("a usable budget");
     let labelled = after.locate(0).expect("not empty").slab().segment();
@@ -416,7 +416,7 @@ fn typing_through_many_commits_never_corrupts_the_document() {
     }
 
     // Everything the loop committed is still there, authenticated, after a fresh open.
-    let reopened = WorldLine::open(&path.0, &dem).expect("reopens");
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).expect("reopens");
     let report = reopened.verify().expect("the file authenticates");
     assert_eq!(report.segments_verified, reopened.segment_count());
     assert!(report.segments_verified >= 10, "ten commits at least");

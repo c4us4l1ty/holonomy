@@ -20,13 +20,11 @@
 //! 4. **Save.** Every seal of the open leaf is one append plus one witness, which is the commit
 //!    path L-6 measures; the durability work is `holonomy-line`'s and unchanged.
 //!
-//! # The leaked key, said plainly
+//! # Key ownership
 //!
-//! [`WorldLine`] borrows its `DEMKey`, so a struct that owns both would be self-referential. Rather
-//! than reach for `unsafe` or a self-reference crate, the key is leaked once per opened document:
-//! thirty-two bytes, for as long as the process lives — which is exactly how long the window would
-//! have held it anyway. The cost is that the key's `Drop` never runs, so it is not zeroized at exit.
-//! An owning `WorldLine` would remove both the leak and that sentence; it is recorded as OQ-27.
+//! [`WorldLine`] owns its `DEMKey`, so the document needs no leaked key and no self-reference.
+//! The only deliberate duplication is `DEMKey::duplicate()` for `verify` and compaction; each copy
+//! is independently locked and zeroized on drop.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -36,8 +34,7 @@ use std::rc::Rc;
 
 use holonomy_line::{LineError, LineHeader, WorldLine};
 use holonomy_seal::{
-    calibrate, create_capsule_for, generate_kdf_salt, open_capsule_for, DEMKey, KdfParamsRecord,
-    MasterKeys,
+    calibrate, create_capsule_for, generate_kdf_salt, open_capsule_for, KdfParamsRecord, MasterKeys,
 };
 use holonomy_text::{Appended, SegmentId, SegmentSink, SegmentSource, Slab, Spine};
 
@@ -256,30 +253,17 @@ impl Document {
     }
 }
 
-/// The spine a world-line presents: one slab per segment, **in file order**.
+/// The spine a world-line presents: one slab per segment, in authenticated document order (OQ-29).
 ///
-/// That is not the same as document order, and the difference is a defect (OQ-29, D-75). A segment
-/// record carries its bytes and its authenticated length and nothing else — no position, no edit,
-/// no tombstone — so the geometry a document had when it was being edited is not in the file
-/// to be read back. Building the spine from `segment_lengths()` in append order is therefore the
-/// only thing this function *can* do, and it makes a document that was only ever appended to load
-/// exactly right, which is every document the existing tests wrote.
-///
-/// It does not make an edited document load right: type `world`, then put the caret at 0 and type
-/// `hello `, and the session reads `hello world` while this reloads `worldhello `. The tests in
-/// `holonomy-gui/tests/persist.rs` assert that, so the day a structural record exists the change is
-/// visible rather than silent. Do not "fix" this here — the missing information is in the format.
+/// A witness carries the order of sealed segment ids when it differs from append order; a file
+/// written before that feature falls back to append order, which is correct for a document that
+/// was only ever appended to. Each slab spans the whole retained segment, so a leaf split by a
+/// caret move is recorded once by its id rather than once per fragment.
 fn spine_of(line: &WorldLine) -> Spine {
     Spine::from_slabs(
         line.document_order()
             .into_iter()
-            .map(|(seq, length)| {
-                Slab::new(
-                    SegmentId::new(u64::from(seq)),
-                    0,
-                    length,
-                )
-            })
+            .map(|(seq, length)| Slab::new(SegmentId::new(u64::from(seq)), 0, length))
             .collect::<Vec<_>>(),
     )
 }
@@ -297,10 +281,6 @@ impl SegmentSink for DocumentSink {
             .line
             .append_segments(&[plaintext])
             .map_err(|error| error.to_string())?;
-        // Integration (OQ-29): write structural record so reopen reproduces document order.
-        let order = line.line.document_order();
-        let sequence_list: Vec<u32> = order.iter().map(|(seq, _len)| *seq).collect();
-        let _ = line.line.append_structure(&sequence_list);
         Ok(Appended {
             // Sequences are dense from zero, so the segment just appended is the last one.
             segment: SegmentId::new(receipt.segment_count.saturating_sub(1)),
@@ -308,6 +288,34 @@ impl SegmentSink for DocumentSink {
             segment_root: receipt.segment_root,
             bytes_written: receipt.bytes_appended,
         })
+    }
+
+    fn document_order(&mut self, order: &[SegmentId]) -> Result<(), String> {
+        let mut line = self.0.line.borrow_mut();
+        let desired: Vec<u32> = order
+            .iter()
+            .map(|id| u32::try_from(id.get()).unwrap_or(u32::MAX))
+            .collect();
+        // A file with no committed order reads in append order. Do not spend a witness on an
+        // append-only document: its order is already implicit in the segment sequence.
+        let current: Vec<u32> = {
+            let committed = line.line.document_order();
+            if committed.is_empty() {
+                (0..u32::try_from(line.line.segment_count()).unwrap_or(u32::MAX)).collect()
+            } else {
+                committed.into_iter().map(|(id, _)| id).collect()
+            }
+        };
+        if desired == current {
+            return Ok(());
+        }
+        line.line
+            .append_structure(&desired)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_segment(&mut self, segment: SegmentId) -> Result<Option<Vec<u8>>, String> {
+        self.0.source().load(segment).map(Some)
     }
 }
 

@@ -40,6 +40,20 @@ impl DEMKey {
     pub fn memory_report(&self) -> LockReport {
         self.inner.report()
     }
+
+    /// Mint a second, independently locked handle to the same key material.
+    ///
+    /// `DEMKey` is deliberately not `Clone`: a copy is another thing to leak. OQ-27 nevertheless
+    /// needs one in the few places where an owning `holonomy-line` `WorldLine` must hand the
+    /// capability to a second owner — re-opening for `verify`, and seeding a compaction target.
+    /// This method is that exception, named so every call site is visible in review; the new cell
+    /// is locked on its own and zeroized on drop, like the original.
+    #[must_use]
+    pub fn duplicate(&self) -> Self {
+        Self {
+            inner: LockedSecret::new(*self.expose()),
+        }
+    }
 }
 
 impl core::fmt::Debug for DEMKey {

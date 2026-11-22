@@ -271,23 +271,14 @@ fn bytes_past_the_last_witness_are_reported_and_discarded() {
     );
 }
 
-/// OQ-14's neighbour: the file does not record what the *document* looked like.
+/// OQ-29: a save records the document order, not just the append log.
 ///
-/// Asserted here so a user cannot discover it before CI does. A save seals the open leaf, and a
-/// seal is an append ([`holonomy_text::Typing::flush`] → one `append_segments` call), so the
-/// world-line holds segments in the order they were committed and holds nothing that says where
-/// they sit in the document. The load path hands one slab per segment to `Spine::from_slabs` in
-/// file order, so **append order becomes document order** on the next open.
-///
-/// Typing at the end is the case every existing test covers, and it is correct: append order and
-/// document order coincide. Typing *before* existing text is not. The session reads correctly, the
-/// save verifies, and the reopen puts the new text after the old — no bytes lost, no error
-/// raised, a document that has silently changed shape.
-///
-/// This test is the inversion point: when the file grows a structural record, it must be rewritten
-/// to assert that a reopen reproduces the *document*, not the append log.
+/// The session reports the real ids of its sealed leaves after each commit; the file-backed sink
+/// folds that order into an authenticated witness. Typing `world`, moving to the start and typing
+/// `hello ` appends the leaves in the order `world`, `hello `, but the saved order is `hello `,
+/// `world` — and a reopen must show the document, not the order the bytes happened to land in.
 #[test]
-fn a_document_typed_before_its_end_reads_in_document_order_and_reopens_in_append_order() {
+fn a_document_typed_before_its_end_reads_in_document_order_after_a_reopen() {
     let path = temp_path("order");
     let document = create(&path.0);
     let mut window = open_window(&document);
@@ -321,13 +312,10 @@ fn a_document_typed_before_its_end_reads_in_document_order_and_reopens_in_append
         "the file must verify every segment it holds"
     );
     let mut window = open_window(&reopened);
-    // When the file carries a structural record (OQ-29), a reopen must reproduce the
-    // document, not the append log. Asserted here so the format change cannot arrive
-    // silently; until it lands this asserts the broken behaviour so CI records it.
     let shown = text(&mut window);
     assert_eq!(
         shown, "hello world",
-        "reopen must reproduce document order, not append log (OQ-29)"
+        "the authenticated document order survives a reopen (OQ-29)"
     );
     println!(
         "HOLONOMY_PERSIST order live=\"hello world\" reopened={shown:?} segments={segments} \
@@ -335,19 +323,14 @@ fn a_document_typed_before_its_end_reads_in_document_order_and_reopens_in_append
     );
 }
 
-/// OQ-14, measured: a deleted range cuts the tree and nothing else.
+/// OQ-30: a deletion that reaches sealed text is committed on the next save.
 ///
-/// A deletion that reaches sealed text is a pointer operation (`Typing::delete` →
-/// `Spine::remove_range`). It writes no record, so the segment the cut removed is still in the
-/// file, still authenticated, and still decryptable by anyone holding the passphrase — and,
-/// because the file has no structural record at all, deleting the tail and reopening brings the
-/// text back.
-///
-/// That last part is what makes this a defect rather than a disclosure: "deleted" currently means
-/// "hidden for this session". The numbers printed here are the ones any compaction policy has to
-/// change, and until it exists the app must not imply otherwise.
+/// `Typing::delete` is still a pointer operation, so the cut itself writes nothing. At the next
+/// save the file-backed sink can read the surviving leaves, so the session materializes them as a
+/// new sealed segment and records it as the document order. The old bytes remain in the file (OQ-14)
+/// but are no longer part of the document a reopen rebuilds.
 #[test]
-fn a_deleted_tail_is_hidden_and_returns_on_reopen() {
+fn a_deleted_tail_is_committed_on_save_and_hidden_after_a_reopen() {
     let path = temp_path("erase");
     let document = create(&path.0);
     let mut window = open_window(&document);
@@ -377,12 +360,13 @@ fn a_deleted_tail_is_hidden_and_returns_on_reopen() {
     assert_eq!(
         document.segment_count(),
         segments + 1,
-        "a cut seals a new shortened segment (OQ-30)"
+        "a cut across sealed text rewrites its surviving bytes as a new segment (OQ-30)"
     );
     let witnesses_after_cut = document.witness_count();
     assert_eq!(
-        witnesses_after_cut, witnesses_before + 1,
-        "a cut warrants a new witness (OQ-30)"
+        witnesses_after_cut,
+        witnesses_before + 2,
+        "the rewrite and its document-order commit each warrant once (OQ-30)"
     );
     drop(window);
     drop(document);
@@ -391,17 +375,15 @@ fn a_deleted_tail_is_hidden_and_returns_on_reopen() {
     let reopened = Document::open(&path.0, PASSPHRASE).expect("opens");
     let verified = reopened.verify().expect("verifies");
     assert_eq!(
-        verified.segments_verified, segments,
-        "the segment the cut removed is still committed"
+        verified.segments_verified,
+        segments + 1,
+        "the shortened leaf is authenticated alongside the old one"
     );
     let mut window = open_window(&reopened);
     let shown = text(&mut window);
-    // OQ-30: a deletion must persist. Once structural record (OQ-29) lands the
-    // cut writes a new segment (or structural removal); reopen must show "delet".
-    // Currently asserts broken behaviour so CI records it.
     assert_eq!(
         shown, "delet",
-        "deleted tail must persist (OQ-30)"
+        "the deleted tail must not come back on reopen (OQ-30)"
     );
     println!(
         "HOLONOMY_PERSIST erase live=\"delet\" reopened={shown:?} segments={segments} \

@@ -37,6 +37,7 @@ use holonomy_shell::Effect;
 use holonomy_text::{ResidentSet, Typing};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// How long a pause counts as a pause, for the autosave.
 const PAUSE_MILLIS: i32 = 1_500;
@@ -158,7 +159,7 @@ fn prompt(verb: &str, path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
         // exactly like a file protected by something until the day it matters.
         return Err(std::io::Error::other("the passphrase was empty"));
     }
-    Ok(phrase)
+    Ok(Zeroizing::new(phrase))
 }
 
 /// Builds the window over a document, with the file's own geometry.

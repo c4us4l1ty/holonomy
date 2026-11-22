@@ -55,6 +55,31 @@ pub trait SegmentSink {
     /// segment, an unsupported durability barrier, or an I/O failure. The commit boundary wraps it
     /// in [`CommitError::Refused`] and leaves both the spine and the world-line as they were.
     fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String>;
+
+    /// Report the document order of sealed segments after a commit (OQ-29).
+    ///
+    /// Called after the append and after the session has renamed its open leaf, so the ids are the
+    /// real ones the world-line assigned. A sink that can persist order (the file-backed one)
+    /// overrides this; every other sink keeps the default no-op.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message when the sink cannot persist the order.
+    fn document_order(&mut self, _order: &[SegmentId]) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Read one sealed segment, for a sink that can rewrite a cut as a new leaf (OQ-30).
+    ///
+    /// `Ok(None)` means this sink cannot read sealed bytes; the session then leaves the cut as a
+    /// pointer operation, which is the behaviour before OQ-30.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message when the sink has the segment but cannot read it.
+    fn load_segment(&mut self, _segment: SegmentId) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
 }
 
 /// The witness that commits a re-sealed slab.

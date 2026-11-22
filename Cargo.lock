@@ -267,6 +267,7 @@ dependencies = [
  "holonomy-shell",
  "holonomy-text",
  "libc",
+ "zeroize",
 ]
 
 [[package]]

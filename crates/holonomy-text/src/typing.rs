@@ -250,6 +250,9 @@ pub struct Typing<S> {
     steps: Vec<Step>,
     /// States an undo left behind, oldest first — the redo stack.
     undone: Vec<Step>,
+    /// A cut across sealed text the file cannot express by pointers alone (OQ-30). The next save
+    /// materializes the surviving document into a new leaf, if the sink can read sealed bytes.
+    rewrite_pending: bool,
 }
 
 impl<S: SegmentSink> Typing<S> {
@@ -277,6 +280,7 @@ impl<S: SegmentSink> Typing<S> {
             sealed_bytes: 0,
             steps: Vec::new(),
             undone: Vec::new(),
+            rewrite_pending: false,
         }
     }
 
@@ -375,6 +379,7 @@ impl<S: SegmentSink> Typing<S> {
         self.push_root(start);
         self.spine = self.spine.remove_range(start, end)?;
         self.next_at = Some(start);
+        self.rewrite_pending = true;
         Ok(())
     }
 
@@ -545,6 +550,7 @@ impl<S: SegmentSink> Typing<S> {
 
     /// Moves the session to a length, touching at most one leaf — never bytes.
     fn restore_mark(&mut self, mark: Mark) -> Result<(), TypingError> {
+        self.rewrite_pending = false;
         match (mark, self.open) {
             (Mark::Live { at, len }, Some(open)) if open.at != at => {
                 // The open leaf is not the one this state was taken over — undo and redo can move a
@@ -600,6 +606,7 @@ impl<S: SegmentSink> Typing<S> {
         pending: usize,
         held: Option<Vec<u8>>,
     ) -> Result<(), TypingError> {
+        self.rewrite_pending = false;
         if let Some(open) = self.open {
             self.sources.close(open.source);
             self.open = None;
@@ -950,10 +957,112 @@ impl<S: SegmentSink> Typing<S> {
         Ok(())
     }
 
+    /// The real segment ids named by the spine, in document order, with repeats removed. A leaf
+    /// that was split by a caret move names the same segment twice; the order records it once.
+    fn sealed_order(&self) -> Vec<SegmentId> {
+        let mut order: Vec<SegmentId> = Vec::new();
+        for span in self.spine.spans_in(0, self.spine.len()) {
+            if let Some(id) = self.sources.locate(span.slab().segment()).segment() {
+                if !order.contains(&id) {
+                    order.push(id);
+                }
+            }
+        }
+        order
+    }
+
+    /// Tell a sink that can persist document order what the current document looks like (OQ-29).
+    fn report_document_order(&mut self) -> Result<(), TypingError> {
+        let order = self.sealed_order();
+        self.sink
+            .document_order(&order)
+            .map_err(|reason| TypingError::Append { reason })
+    }
+
+    /// A cut across sealed text rewrote the spine but wrote no bytes. Materialize the surviving
+    /// document into one new leaf so a reopen cannot bring the removed text back (OQ-30).
+    fn rewrite_sealed(&mut self) -> Result<(), TypingError> {
+        let spans = self.spine.spans_in(0, self.spine.len());
+        let mut cache: Vec<(SegmentId, Vec<u8>)> = Vec::new();
+        for span in &spans {
+            let Some(id) = self.sources.locate(span.slab().segment()).segment() else {
+                return Err(TypingError::Append {
+                    reason: "a sealed leaf has no segment id".to_owned(),
+                });
+            };
+            if !cache.iter().any(|(cached, _)| *cached == id) {
+                match self
+                    .sink
+                    .load_segment(id)
+                    .map_err(|reason| TypingError::Append { reason })?
+                {
+                    Some(bytes) => cache.push((id, bytes)),
+                    // A sink without sealed reads keeps the old pointer-only cut.
+                    None => {
+                        self.rewrite_pending = false;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        let mut rebuilt = Vec::new();
+        for span in &spans {
+            let id = self
+                .sources
+                .locate(span.slab().segment())
+                .segment()
+                .expect("checked above");
+            let bytes = &cache
+                .iter()
+                .find(|(cached, _)| *cached == id)
+                .expect("cached above")
+                .1;
+            let start = span.slab().start() as usize;
+            let end = span.slab().end() as usize;
+            let slice = bytes.get(start..end).ok_or_else(|| TypingError::Append {
+                reason: "a sealed leaf names bytes outside its segment".to_owned(),
+            })?;
+            rebuilt.extend_from_slice(slice);
+        }
+        self.rewrite_pending = false;
+        let length = rebuilt.len();
+        if length == 0 {
+            self.spine = Spine::empty();
+            self.draft.clear();
+            self.next_at = Some(0);
+            self.sink
+                .document_order(&[])
+                .map_err(|reason| TypingError::Append { reason })?;
+            return Ok(());
+        }
+        let appended = self
+            .sink
+            .append_segment(&rebuilt)
+            .map_err(|reason| TypingError::Append { reason })?;
+        let source = self.sources.open();
+        self.sources
+            .seal(source, appended.segment)
+            .expect("the register handed this id out");
+        let length = u32::try_from(length).expect("a document leaf fits in u32");
+        self.spine = Spine::from_slabs([Slab::new(source, 0, length)]);
+        self.draft.clear();
+        self.open = None;
+        self.next_at = Some(u64::from(length));
+        self.sealed_bytes += u64::from(length);
+        self.sink
+            .document_order(&[appended.segment])
+            .map_err(|reason| TypingError::Append { reason })?;
+        Ok(())
+    }
+
     /// Seals the open source: append once, rename, correct the leaf's length, drop the draft.
     fn seal(&mut self) -> Result<(), TypingError> {
         let Some(open) = self.open else {
-            return Ok(());
+            return if self.rewrite_pending {
+                self.rewrite_sealed()
+            } else {
+                Ok(())
+            };
         };
         // The bytes that are in the document, not the buffer's capacity for them: an undo leaves
         // the bytes it took back *behind* the live length so redo can hand them over, and a seal
@@ -999,6 +1108,10 @@ impl<S: SegmentSink> Typing<S> {
         self.sealed_bytes += u64::try_from(len).expect("a buffer fits in u64");
         self.next_at = Some(open.at + u64::try_from(len).expect("a buffer fits in u64"));
         self.open = None;
+        self.report_document_order()?;
+        if self.rewrite_pending {
+            self.rewrite_sealed()?;
+        }
         // A seal used to be a floor that cleared the history — and that was D-43: the buffer is
         // dropped here, so no state behind the seal could produce the bytes it promised, and every
         // caret move seals (an open leaf's caret is its end), so one arrow key made the typing

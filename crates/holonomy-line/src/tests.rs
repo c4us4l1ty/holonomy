@@ -200,7 +200,7 @@ fn create_does_not_replace_an_existing_path() {
     fs::write(&path.0, existing).unwrap();
 
     assert!(matches!(
-        WorldLine::create(&path.0, header, &dem),
+        WorldLine::create(&path.0, header, dem.duplicate()),
         Err(LineError::Io(_))
     ));
     assert_eq!(fs::read(&path.0).unwrap().as_slice(), existing);
@@ -217,10 +217,32 @@ fn create_refuses_its_reserved_staging_path() {
     fs::write(&path.0, existing).unwrap();
 
     assert!(matches!(
-        WorldLine::create(&path.0, header, &dem),
+        WorldLine::create(&path.0, header, dem.duplicate()),
         Err(LineError::InvalidCreationDestination)
     ));
     assert_eq!(fs::read(&path.0).unwrap().as_slice(), existing);
+}
+
+#[test]
+fn a_committed_document_order_survives_a_reopen() {
+    let path = temp_path("document-order");
+    let salt = [0x5A; 64];
+    let (_keys, capsule, dem) = test_material(b"document order", salt);
+    let header = test_header(salt, capsule);
+    let mut line = WorldLine::create(&path.0, header, dem.duplicate()).unwrap();
+    line.append_segments(&[b"world", b"hello "]).unwrap();
+
+    // The document reads `hello world` although the second leaf was appended last (OQ-29).
+    line.append_structure(&[1, 0]).unwrap();
+    assert_eq!(line.document_order(), vec![(1, 6), (0, 5)]);
+    assert_eq!(line.recovery_info().trailing_bytes, 0);
+    assert_eq!(line.witness_count(), 3);
+    drop(line);
+
+    let reopened = WorldLine::open(&path.0, dem).unwrap();
+    assert_eq!(reopened.document_order(), vec![(1, 6), (0, 5)]);
+    assert_eq!(reopened.recovery_info().trailing_bytes, 0);
+    assert_eq!(&reopened.open_segment(1).unwrap()[..], b"hello ");
 }
 
 #[test]
@@ -229,7 +251,7 @@ fn append_reopen_and_verify_round_trip() {
     let salt = [0x31; 64];
     let (_keys, capsule, dem) = test_material(b"round trip", salt);
     let header = test_header(salt, capsule);
-    let mut line = WorldLine::create(&path.0, header, &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, header, dem.duplicate()).unwrap();
 
     let pieces: [&[u8]; 2] = [&b"first sealed slab"[..], &b"second sealed slab"[..]];
     let receipt = line.append_segments(&pieces).unwrap();
@@ -245,7 +267,7 @@ fn append_reopen_and_verify_round_trip() {
     assert_eq!(report.witnesses_verified, 2);
     drop(line);
 
-    let reopened = WorldLine::open(&path.0, &dem).unwrap();
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     assert_eq!(reopened.segment_count(), 2);
     assert_eq!(reopened.segment_root(), receipt.segment_root);
     assert!(!reopened.recovery_info().needs_recovery());
@@ -256,7 +278,7 @@ fn append_writes_only_new_tail_records() {
     let path = temp_path("tail-only");
     let salt = [0x32; 64];
     let (_keys, capsule, dem) = test_material(b"tail only", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     line.append_segments(&[&b"old segment"[..]]).unwrap();
     let before = fs::read(&path.0).unwrap();
     let old_len = before.len() as u64;
@@ -278,9 +300,10 @@ fn stale_writers_and_same_length_metadata_tampering_cannot_append() {
     let path = temp_path("stale-writer");
     let salt = [0x40; 64];
     let (_keys, capsule, dem) = test_material(b"stale writer", salt);
-    let mut original = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut original =
+        WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     original.append_segments(&[&b"first commit"[..]]).unwrap();
-    let mut stale = WorldLine::open(&path.0, &dem).unwrap();
+    let mut stale = WorldLine::open(&path.0, dem.duplicate()).unwrap();
 
     original.append_segments(&[&b"second commit"[..]]).unwrap();
     assert!(matches!(
@@ -290,7 +313,7 @@ fn stale_writers_and_same_length_metadata_tampering_cannot_append() {
     drop(stale);
     drop(original);
 
-    let mut tampered = WorldLine::open(&path.0, &dem).unwrap();
+    let mut tampered = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     let tag_offset = tampered.segments[0].ciphertext_offset - 32;
     let before_len = fs::metadata(&path.0).unwrap().len();
     {
@@ -360,7 +383,7 @@ fn a_simulated_thirty_million_word_history_still_appends_only_the_new_tail() {
     let path = temp_path("thirty-million-words");
     let salt = [0x3D; 64];
     let (_keys, capsule, dem) = test_material(b"large history", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
 
     // A one-letter word plus a space is two bytes; reusing one buffer keeps the test's
     // plaintext working set bounded while the encrypted file represents 30 million words.
@@ -383,7 +406,7 @@ fn a_simulated_thirty_million_word_history_still_appends_only_the_new_tail() {
     assert_tail_write_trace(&trace, before_len, after_len, receipt);
 
     drop(line);
-    let reopened = WorldLine::open(&path.0, &dem).unwrap();
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     assert_eq!(reopened.segment_count(), (FULL_SEGMENTS + 1 + 1) as u64);
     assert_eq!(
         &reopened.open_segment((FULL_SEGMENTS + 1) as u64).unwrap()[..],
@@ -445,7 +468,7 @@ fn rsync_measures_append_transfer_over_a_named_local_daemon() {
 
     let salt = [0x5A; 64];
     let (_keys, capsule, dem) = test_material(b"rsync 30M qualification", salt);
-    let mut line = WorldLine::create(&source, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&source, test_header(salt, capsule), dem.duplicate()).unwrap();
     let full_segment = b"a ".repeat(FULL_SEGMENT_WORDS);
     let final_segment = b"a ".repeat(FINAL_SEGMENT_WORDS);
     let mut history = vec![full_segment.as_slice(); FULL_SEGMENTS];
@@ -592,7 +615,7 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
     let filler_path = TempPath(storage_dir.join(format!("holonomy-enospc-fill-{suffix}.bin")));
     let salt = [0x6B; 64];
     let (_keys, capsule, dem) = test_material(b"real ENOSPC qualification", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
 
     // End the committed prefix on a block boundary. Otherwise a tiny append can fit in the
     // already allocated final block even after the filler has received ENOSPC.
@@ -696,7 +719,7 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
     drop(filler);
     fs::remove_file(&filler_path.0).unwrap();
 
-    let recovered = WorldLine::open(&path.0, &dem).unwrap();
+    let recovered = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     assert_eq!(
         recovered.segment_count(),
         committed_segments_before_failure,
@@ -722,7 +745,7 @@ fn incomplete_tail_recovers_to_last_witness_then_is_removed_on_append() {
     let path = temp_path("crash-tail");
     let salt = [0x33; 64];
     let (_keys, capsule, dem) = test_material(b"crash tail", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     line.append_segments(&[&b"committed"[..]]).unwrap();
 
     let orphan = encode_segment_record(
@@ -744,6 +767,7 @@ fn incomplete_tail_recovers_to_last_witness_then_is_removed_on_append() {
         &line.last_witness_tag,
         &orphan.tag,
         &prospective_mmr,
+        &[],
     )
     .unwrap();
     let orphan_bytes = orphan.frame.len() as u64 + 23;
@@ -755,7 +779,7 @@ fn incomplete_tail_recovers_to_last_witness_then_is_removed_on_append() {
     }
     drop(line);
 
-    let mut recovered = WorldLine::open(&path.0, &dem).unwrap();
+    let mut recovered = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     assert_eq!(recovered.segment_count(), 1);
     assert_eq!(recovered.recovery_info().trailing_bytes, orphan_bytes);
     assert_eq!(&recovered.open_segment(0).unwrap()[..], b"committed");
@@ -767,7 +791,7 @@ fn incomplete_tail_recovers_to_last_witness_then_is_removed_on_append() {
     assert!(!recovered.recovery_info().needs_recovery());
     drop(recovered);
 
-    let reopened = WorldLine::open(&path.0, &dem).unwrap();
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     assert_eq!(reopened.segment_count(), 2);
     assert_eq!(&reopened.open_segment(1).unwrap()[..], b"after recovery");
     assert!(torn_witness.len() > 23);
@@ -778,7 +802,7 @@ fn every_byte_cut_of_an_append_recovers_to_the_last_witness() {
     let path = temp_path("crash-matrix");
     let salt = [0x3A; 64];
     let (_keys, capsule, dem) = test_material(b"crash matrix", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     let baseline = fs::read(&path.0).unwrap();
     let receipt = line
         .append_segments(&[&b"first new slab"[..], &b"second new slab"[..]])
@@ -795,7 +819,7 @@ fn every_byte_cut_of_an_append_recovers_to_the_last_witness() {
         candidate.extend_from_slice(&tail[..cut]);
         fs::write(&path.0, candidate).unwrap();
 
-        let recovered = WorldLine::open(&path.0, &dem)
+        let recovered = WorldLine::open(&path.0, dem.duplicate())
             .unwrap_or_else(|error| panic!("open failed after cut at byte {cut}: {error}"));
         assert_eq!(recovered.segment_count(), 0, "cut at byte {cut}");
         assert_eq!(
@@ -807,7 +831,7 @@ fn every_byte_cut_of_an_append_recovers_to_the_last_witness() {
     }
 
     fs::write(&path.0, complete).unwrap();
-    let committed = WorldLine::open(&path.0, &dem).unwrap();
+    let committed = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     assert_eq!(committed.segment_count(), 2);
     assert!(!committed.recovery_info().needs_recovery());
 }
@@ -817,7 +841,7 @@ fn injected_short_write_at_every_byte_reopens_to_the_last_commit() {
     let path = temp_path("injected-short-write-matrix");
     let salt = [0x42; 64];
     let (_keys, capsule, dem) = test_material(b"injected short writes", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     line.append_segments(&[&b"last committed segment"[..]])
         .unwrap();
     let baseline = fs::read(&path.0).unwrap();
@@ -837,7 +861,7 @@ fn injected_short_write_at_every_byte_reopens_to_the_last_commit() {
     // uncommitted tail, never expose either pending segment as committed.
     for cut in 0..sample.bytes_appended {
         fs::write(&path.0, &baseline).unwrap();
-        let mut candidate = WorldLine::open(&path.0, &dem).unwrap();
+        let mut candidate = WorldLine::open(&path.0, dem.duplicate()).unwrap();
         let probe = AppendIoProbeGuard::install(Some(cut), None, false);
         let result = candidate.append_segments(&new_segments);
         let trace = probe.snapshot();
@@ -854,7 +878,7 @@ fn injected_short_write_at_every_byte_reopens_to_the_last_commit() {
         ));
         drop(candidate);
 
-        let recovered = WorldLine::open(&path.0, &dem)
+        let recovered = WorldLine::open(&path.0, dem.duplicate())
             .unwrap_or_else(|error| panic!("open failed after injected cut {cut}: {error}"));
         assert_eq!(recovered.segment_count(), 1, "cut after {cut} bytes");
         assert_eq!(
@@ -876,7 +900,8 @@ fn injected_sync_failures_leave_only_authenticated_commit_states() {
         let path = temp_path("injected-sync-failure");
         let salt = [0x43; 64];
         let (_keys, capsule, dem) = test_material(b"injected sync failures", salt);
-        let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+        let mut line =
+            WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
         line.append_segments(&[&b"last committed segment"[..]])
             .unwrap();
         let baseline = fs::read(&path.0).unwrap();
@@ -911,7 +936,7 @@ fn injected_sync_failures_leave_only_authenticated_commit_states() {
             written.len() as u64 - baseline.len() as u64,
             trace.bytes_written
         );
-        let observed = WorldLine::open(&path.0, &dem).unwrap();
+        let observed = WorldLine::open(&path.0, dem.duplicate()).unwrap();
         if fail_on_sync == 1 {
             assert_eq!(observed.segment_count(), 1);
             assert_eq!(observed.recovery_info().trailing_bytes, trace.bytes_written);
@@ -924,7 +949,7 @@ fn injected_sync_failures_leave_only_authenticated_commit_states() {
             assert_eq!(observed.verify().unwrap().segments_verified, 2);
             drop(observed);
             fs::write(&path.0, &baseline).unwrap(); // model loss of the unsynced commit tail
-            let lost_tail = WorldLine::open(&path.0, &dem).unwrap();
+            let lost_tail = WorldLine::open(&path.0, dem.duplicate()).unwrap();
             assert_eq!(lost_tail.segment_count(), 1);
             assert_eq!(lost_tail.verify().unwrap().segments_verified, 1);
         }
@@ -937,7 +962,8 @@ fn injected_recovery_truncate_failures_preserve_the_last_commit() {
         let path = temp_path("injected-recovery-truncate");
         let salt = [0x44; 64];
         let (_keys, capsule, dem) = test_material(b"injected recovery truncate", salt);
-        let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+        let mut line =
+            WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
         line.append_segments(&[&b"committed before recovery"[..]])
             .unwrap();
         let committed_end = line.committed_end;
@@ -950,7 +976,7 @@ fn injected_recovery_truncate_failures_preserve_the_last_commit() {
             .write_all(orphan_tail)
             .unwrap();
 
-        let mut recovering = WorldLine::open(&path.0, &dem).unwrap();
+        let mut recovering = WorldLine::open(&path.0, dem.duplicate()).unwrap();
         assert_eq!(
             recovering.recovery_info().trailing_bytes,
             orphan_tail.len() as u64
@@ -973,7 +999,7 @@ fn injected_recovery_truncate_failures_preserve_the_last_commit() {
         }
         drop(recovering);
 
-        let reopened = WorldLine::open(&path.0, &dem).unwrap();
+        let reopened = WorldLine::open(&path.0, dem.duplicate()).unwrap();
         assert_eq!(reopened.segment_count(), 1);
         assert_eq!(
             &reopened.open_segment(0).unwrap()[..],
@@ -996,7 +1022,7 @@ fn open_seeks_over_segment_bodies_but_verify_authenticates_them() {
     let path = temp_path("lazy-open");
     let salt = [0x34; 64];
     let (_keys, capsule, dem) = test_material(b"lazy open", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     line.append_segments(&[&b"old historical payload"[..]])
         .unwrap();
     line.append_segments(&[&b"newer payload"[..]]).unwrap();
@@ -1037,7 +1063,7 @@ fn open_seeks_over_segment_bodies_but_verify_authenticates_them() {
 
     // The metadata-only open still succeeds; the explicit full verifier catches the damaged
     // ciphertext when it faults the segment in.
-    let reopened = WorldLine::open(&path.0, &dem).unwrap();
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     assert!(matches!(
         reopened.verify(),
         Err(LineError::AuthenticationRejected)
@@ -1049,7 +1075,7 @@ fn open_rejects_flipped_metadata_in_an_older_committed_segment() {
     let path = temp_path("historical-metadata-flip");
     let salt = [0x3B; 64];
     let (_keys, capsule, dem) = test_material(b"metadata flip", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     line.append_segments(&[&b"historical segment"[..]]).unwrap();
     line.append_segments(&[&b"newer segment"[..]]).unwrap();
     let tag_offset = line.segments[0].ciphertext_offset - 32;
@@ -1059,7 +1085,7 @@ fn open_rejects_flipped_metadata_in_an_older_committed_segment() {
     bytes[tag_offset as usize] ^= 1;
     fs::write(&path.0, bytes).unwrap();
     assert!(matches!(
-        WorldLine::open(&path.0, &dem),
+        WorldLine::open(&path.0, dem.duplicate()),
         Err(LineError::AuthenticationRejected)
     ));
 }
@@ -1075,7 +1101,7 @@ fn capsule_replay_across_files_is_rejected_by_the_envelope_epoch() {
     let header_b = test_header(salt, capsule_a);
     assert_ne!(header_a.file_id(), header_b.file_id());
 
-    let mut line_a = WorldLine::create(&path_a.0, header_a, &dem_a).unwrap();
+    let mut line_a = WorldLine::create(&path_a.0, header_a, dem_a.duplicate()).unwrap();
     line_a.append_segments(&[&b"file A content"[..]]).unwrap();
     drop(line_a);
 
@@ -1087,7 +1113,7 @@ fn capsule_replay_across_files_is_rejected_by_the_envelope_epoch() {
     fs::write(&path_b.0, replayed).unwrap();
 
     assert!(matches!(
-        WorldLine::open(&path_b.0, &dem_a),
+        WorldLine::open(&path_b.0, dem_a.duplicate()),
         Err(LineError::AuthenticationRejected)
     ));
 }
@@ -1102,7 +1128,7 @@ fn compaction_is_explicit_passphrase_confirmed_and_rebases_to_a_new_file() {
     let (old_capsule, old_dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
     let old_header = test_header(salt, old_capsule);
     let old_file_id = *old_header.file_id();
-    let mut line = WorldLine::create(&source.0, old_header, &old_dem).unwrap();
+    let mut line = WorldLine::create(&source.0, old_header, old_dem.duplicate()).unwrap();
     line.append_segments(&[&b"old draft"[..]]).unwrap();
     line.append_segments(&[&b"current draft"[..]]).unwrap();
     let source_bytes = fs::read(&source.0).unwrap();
@@ -1146,7 +1172,7 @@ fn compaction_rejects_wrong_file_approval_and_reused_identity() {
     let file_id = *header.file_id();
     let mut wrong_file_id = file_id;
     wrong_file_id[0] ^= 1;
-    let mut line = WorldLine::create(&source.0, header, &dem).unwrap();
+    let mut line = WorldLine::create(&source.0, header, dem.duplicate()).unwrap();
     line.append_segments(&[&b"keep me"[..]]).unwrap();
 
     let wrong_file_approval = holonomy_seal::confirm_compaction(
@@ -1203,7 +1229,7 @@ fn compaction_does_not_replace_an_existing_destination() {
     let (old_capsule, old_dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
     let old_header = test_header(salt, old_capsule);
     let old_file_id = *old_header.file_id();
-    let mut line = WorldLine::create(&source.0, old_header, &old_dem).unwrap();
+    let mut line = WorldLine::create(&source.0, old_header, old_dem.duplicate()).unwrap();
     line.append_segments(&[&b"keep source"[..]]).unwrap();
     let source_bytes = fs::read(&source.0).unwrap();
 
@@ -1239,7 +1265,7 @@ fn a_valid_prefix_rollback_cannot_be_detected_without_external_state() {
     let path = temp_path("prefix-rollback");
     let salt = [0x36; 64];
     let (_keys, capsule, dem) = test_material(b"rollback", salt);
-    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     line.append_segments(&[&b"version one"[..]]).unwrap();
     let first_commit_end = line.committed_end;
     line.append_segments(&[&b"version two"[..]]).unwrap();
@@ -1251,7 +1277,7 @@ fn a_valid_prefix_rollback_cannot_be_detected_without_external_state() {
         .unwrap()
         .set_len(first_commit_end)
         .unwrap();
-    let rolled_back = WorldLine::open(&path.0, &dem).unwrap();
+    let rolled_back = WorldLine::open(&path.0, dem.duplicate()).unwrap();
     assert_eq!(rolled_back.segment_count(), 1);
     assert!(rolled_back.verify().is_ok());
 }
@@ -1264,12 +1290,12 @@ fn open_refuses_symlink_paths() {
     let path = temp_path("path-safety");
     let salt = [0x39; 64];
     let (_keys, capsule, dem) = test_material(b"path safety", salt);
-    let line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    let line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
     drop(line);
 
     let link = temp_path("symlink");
     symlink(&path.0, &link.0).unwrap();
-    assert!(WorldLine::open(&link.0, &dem).is_err());
+    assert!(WorldLine::open(&link.0, dem.duplicate()).is_err());
 }
 
 #[test]
@@ -1278,7 +1304,7 @@ fn open_rejects_a_weak_or_unbounded_header_before_any_kdf_is_needed() {
     let salt = [0x37; 64];
     let (_keys, capsule, dem) = test_material(b"kdf fence", salt);
     let header = test_header(salt, capsule);
-    let mut line = WorldLine::create(&path.0, header, &dem).unwrap();
+    let mut line = WorldLine::create(&path.0, header, dem.duplicate()).unwrap();
     line.append_segments(&[&b"header"[..]]).unwrap();
     drop(line);
 

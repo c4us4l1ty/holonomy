@@ -27,11 +27,12 @@ use crate::mmr::{segment_leaf, Mmr};
 const RECORD_MAGIC: &[u8; 4] = b"W6RC";
 const RECORD_SEGMENT: u8 = 1;
 const RECORD_WITNESS: u8 = 2;
-const RECORD_STRUCTURE: u8 = 3;
 const AEAD_TAG_BYTES: u32 = 16;
 const MAX_SEGMENT_BYTES: u32 = 64 * 1024;
 const WITNESS_BASE_BYTES: usize = 1 + 8 + 8 + 32 + 32 + 32 + 32;
-const MAX_WITNESS_BYTES: usize = WITNESS_BASE_BYTES + 64 * 32;
+// A version-2 witness may also carry the document order of up to 4096 segments.
+const MAX_WITNESS_ORDER_IDS: usize = 4096;
+const MAX_WITNESS_BYTES: usize = WITNESS_BASE_BYTES + 64 * 32 + 4 + MAX_WITNESS_ORDER_IDS * 4;
 const MAX_WITNESS_CIPHERTEXT_BYTES: u32 = (MAX_WITNESS_BYTES as u32) + AEAD_TAG_BYTES;
 
 // Test-only hooks exercise short writes and failed durability barriers through the same
@@ -297,8 +298,8 @@ struct SegmentDescriptor {
     previous_tag: [u8; 32],
 }
 
-/// An opened append-only world-line. The key remains an opaque capability borrowed from
-/// `holonomy-seal`; this crate can request seal/open operations but cannot read key bytes.
+/// An opened append-only world-line. The key is an opaque capability owned by the handle;
+/// this crate can request seal/open operations but cannot read key bytes.
 pub struct WorldLine {
     path: PathBuf,
     header: LineHeader,
@@ -313,7 +314,7 @@ pub struct WorldLine {
     committed_end: u64,
     observed_len: u64,
     recovery: RecoveryInfo,
-    structure: Option<StructureInfo>,
+    document_order: Vec<u32>,
     poisoned: bool,
 }
 
@@ -341,8 +342,16 @@ impl WorldLine {
         let epoch = header.epoch_id();
         let empty_mmr = Mmr::new();
         let zero_tag = [0u8; 32];
-        let (genesis, genesis_tag) =
-            encode_witness_record(&header, &epoch, key, 0, &zero_tag, &zero_tag, &empty_mmr)?;
+        let (genesis, genesis_tag) = encode_witness_record(
+            &header,
+            &epoch,
+            &key,
+            0,
+            &zero_tag,
+            &zero_tag,
+            &empty_mmr,
+            &[],
+        )?;
 
         let mut stage_options = OpenOptions::new();
         stage_options.read(true).write(true).create_new(true);
@@ -422,6 +431,7 @@ impl WorldLine {
                 trailing_bytes: 0,
                 last_committed_offset: committed_end,
             },
+            document_order: Vec::new(),
             poisoned: false,
         })
     }
@@ -436,7 +446,7 @@ impl WorldLine {
         let file_identity = file_identity(&file)?;
         let header = LineHeader::read_from(&mut file)?;
         let epoch = header.epoch_id();
-        let scan = scan_records(&mut file, &header, &epoch, key)?;
+        let scan = scan_records(&mut file, &header, &epoch, &key)?;
         Ok(Self {
             path,
             header,
@@ -451,7 +461,7 @@ impl WorldLine {
             committed_end: scan.committed_end,
             observed_len: scan.observed_len,
             recovery: scan.recovery,
-            structure: scan.structure,
+            document_order: scan.document_order,
             poisoned: false,
         })
     }
@@ -482,26 +492,33 @@ impl WorldLine {
             .map(|descriptor| descriptor.plaintext_len)
     }
 
-    /// Number of committed witness records, including genesis.
-
-    /// The document-order sequence of committed segments, from the latest structural record.
-    /// If no structural record exists, append order is returned (backward-compatible).
     /// Document-order sequence IDs and their authenticated plaintext lengths.
+    ///
+    /// The order is carried inside the latest authenticated witness (OQ-29). A file written
+    /// before that feature carries none, in which case append order is returned — which is the
+    /// document order of a document that was only ever appended to.
     pub fn document_order(&self) -> Vec<(u32, u32)> {
-        if let Some(ref info) = self.structure {
-            info.sequence_list
+        if self.document_order.is_empty() {
+            self.segments
                 .iter()
-                .map(|&seq| {
-                    let len = self.segments.get(seq as usize)
-                        .map_or(0, |d| d.plaintext_len);
-                    (seq, len)
-                })
+                .enumerate()
+                .map(|(i, descriptor)| (i as u32, descriptor.plaintext_len))
                 .collect()
         } else {
-            self.segments.iter().enumerate().map(|(i, d)| (i as u32, d.plaintext_len)).collect()
+            self.document_order
+                .iter()
+                .map(|&id| {
+                    let length = self
+                        .segments
+                        .get(id as usize)
+                        .map_or(0, |descriptor| descriptor.plaintext_len);
+                    (id, length)
+                })
+                .collect()
         }
     }
 
+    /// Number of committed witness records, including genesis.
     pub fn witness_count(&self) -> u64 {
         self.next_witness_sequence
     }
@@ -553,25 +570,31 @@ impl WorldLine {
         result
     }
 
-    /// Open one segment on demand; the returned plaintext is zeroizing and should remain local
-    /// to the caller's viewport/residency scope.
-
-    /// Appends a structural record describing the current document order.
-    /// Call after a non-append edit (insert/delete) so reopen reproduces document, not log.
+    /// Commit the document order of committed segments.
+    ///
+    /// The list is written into a new witness record, authenticated by the same AEAD key as every
+    /// other witness, so a reopen can rebuild the document rather than the append log (OQ-29).
+    /// An unchanged or empty order is a no-op; a cut that shortens a leaf still needs a new
+    /// segment to be appended first (OQ-30).
     pub fn append_structure(&mut self, sequence_list: &[u32]) -> Result<(), LineError> {
         if self.poisoned {
             return Err(LineError::ReopenRequired);
         }
-        if sequence_list.is_empty() {
+        if sequence_list.is_empty() || sequence_list == self.document_order.as_slice() {
             return Ok(());
         }
-        let sequence = 0; // structural sequence is independent of witness/segment count
-        let (frame, tag) = encode_structure_record(
+        if self.next_witness_sequence == u64::MAX {
+            return Err(LineError::TooManySegments);
+        }
+        let witness_sequence = self.next_witness_sequence;
+        let (frame, tag) = encode_witness_record(
             &self.header,
             &self.epoch,
-            self.key,
-            sequence,
+            &self.key,
+            witness_sequence,
             &self.last_witness_tag,
+            &self.last_segment_tag,
+            &self.mmr,
             sequence_list,
         )?;
         let mut file = open_worldline_file(&self.path, true, true)?;
@@ -581,20 +604,24 @@ impl WorldLine {
         }
         file.seek(SeekFrom::End(0))?;
         write_append_bytes(&mut file, &frame)?;
-        file.sync_all()?;
-        self.structure = Some(StructureInfo {
-            sequence,
-            ciphertext_offset: 0,
-            ciphertext_len: 0,
-            nonce: [0; 24],
-            tag: [0; 32],
-            previous_tag: self.last_witness_tag,
-            sequence_list: sequence_list.to_vec(),
-        });
-        self.observed_len = file.stream_position()?;
+        if sync_append_file(&file).is_err() {
+            return Err(LineError::DurabilityUncertain);
+        }
+        let committed_end = file.stream_position()?;
+        self.last_witness_tag = tag;
+        self.next_witness_sequence = witness_sequence + 1;
+        self.committed_end = committed_end;
+        self.observed_len = committed_end;
+        self.recovery = RecoveryInfo {
+            trailing_bytes: 0,
+            last_committed_offset: committed_end,
+        };
+        self.document_order = sequence_list.to_vec();
         Ok(())
     }
 
+    /// Open one segment on demand; the returned plaintext is zeroizing and should remain local
+    /// to the caller's viewport/residency scope.
     pub fn open_segment(&self, sequence: u64) -> Result<OpenedPlaintext, LineError> {
         if self.poisoned {
             return Err(LineError::ReopenRequired);
@@ -610,7 +637,7 @@ impl WorldLine {
         if self.poisoned {
             return Err(LineError::ReopenRequired);
         }
-        let current = Self::open(&self.path, self.key)?;
+        let current = Self::open(&self.path, self.key.duplicate())?;
         if current.file_identity != self.file_identity
             || current.last_witness_tag != self.last_witness_tag
             || current.header.file_id() != self.header.file_id()
@@ -641,12 +668,12 @@ impl WorldLine {
     /// The caller supplies a fresh header/key pair for the new file, a strictly increasing list
     /// of segments to retain, and a one-shot approval made by `holonomy-seal` after the
     /// passphrase is re-entered. At most one segment plaintext is resident at a time.
-    pub fn compact_to<'new_key>(
+    pub fn compact_to(
         &self,
         destination: impl AsRef<Path>,
         retain_segments: &[u64],
         new_header: LineHeader,
-        new_key: &'new_key DEMKey,
+        new_key: &DEMKey,
         approval: CompactionApproval,
     ) -> Result<WorldLine, LineError> {
         if self.poisoned {
@@ -678,7 +705,7 @@ impl WorldLine {
         if temporary == destination {
             return Err(LineError::InvalidCompactionDestination);
         }
-        let mut compacted = WorldLine::create(&temporary, new_header, new_key)?;
+        let mut compacted = WorldLine::create(&temporary, new_header, new_key.duplicate())?;
         let mut publication =
             CompactionPublication::new(temporary, destination.clone(), compacted.file_identity);
         for &sequence in retain_segments {
@@ -723,7 +750,7 @@ impl WorldLine {
         if disk_header.file_id() != self.header.file_id() || disk_epoch != self.epoch {
             return Err(LineError::ConcurrentModification);
         }
-        let disk_state = scan_records(&mut reader, &disk_header, &disk_epoch, self.key)
+        let disk_state = scan_records(&mut reader, &disk_header, &disk_epoch, &self.key)
             .map_err(|_| LineError::ConcurrentModification)?;
         if disk_state.observed_len != actual_len
             || file.metadata()?.len() != actual_len
@@ -765,7 +792,7 @@ impl WorldLine {
             let encoded = encode_segment_record(
                 &self.header,
                 &self.epoch,
-                self.key,
+                &self.key,
                 sequence,
                 &last_segment_tag,
                 plaintext,
@@ -797,11 +824,12 @@ impl WorldLine {
         let (witness_frame, witness_tag) = encode_witness_record(
             &self.header,
             &self.epoch,
-            self.key,
+            &self.key,
             witness_sequence,
             &self.last_witness_tag,
             &last_segment_tag,
             &mmr,
+            &self.document_order,
         )?;
         write_append_bytes(&mut file, &witness_frame)?;
         bytes_written = bytes_written
@@ -856,7 +884,7 @@ impl WorldLine {
             descriptor.plaintext_len,
         );
         let plaintext =
-            open_object(self.key, &aad, &sealed).map_err(|_| LineError::AuthenticationRejected)?;
+            open_object(&self.key, &aad, &sealed).map_err(|_| LineError::AuthenticationRejected)?;
         if plaintext.len() != descriptor.plaintext_len as usize {
             return Err(LineError::AuthenticationRejected);
         }
@@ -1051,26 +1079,9 @@ fn encode_segment_record(
     })
 }
 
-
-fn encode_structure_record(
-    header: &LineHeader,
-    epoch: &[u8; 32],
-    key: &DEMKey,
-    sequence: u64,
-    previous_tag: &[u8; 32],
-    sequence_list: &[u32],
-) -> Result<(Vec<u8>, [u8; 32]), LineError> {
-    let mut plaintext = Vec::with_capacity(sequence_list.len() * 4);
-    for &seq in sequence_list {
-        plaintext.extend_from_slice(&seq.to_le_bytes());
-    }
-    let plaintext_len = u32::try_from(plaintext.len()).map_err(|_| LineError::SegmentTooLarge)?;
-    let aad = structure_aad(header, epoch, sequence, previous_tag, plaintext_len);
-    let sealed = seal_object(key, &aad, &plaintext);
-    let tag = sealed.cmt4;
-    Ok((encode_record(RECORD_STRUCTURE, sequence, sealed)?, tag))
-}
-
+// All eight fields are the authenticated witness payload; a wrapper struct would only restate
+// them at every call site.
+#[allow(clippy::too_many_arguments)]
 fn encode_witness_record(
     header: &LineHeader,
     epoch: &[u8; 32],
@@ -1079,24 +1090,38 @@ fn encode_witness_record(
     previous_witness_tag: &[u8; 32],
     last_segment_tag: &[u8; 32],
     mmr: &Mmr,
+    document_order: &[u32],
 ) -> Result<(Vec<u8>, [u8; 32]), LineError> {
-    let plaintext =
-        encode_witness_plain(sequence, previous_witness_tag, last_segment_tag, epoch, mmr);
+    let plaintext = encode_witness_plain(
+        sequence,
+        previous_witness_tag,
+        last_segment_tag,
+        epoch,
+        mmr,
+        document_order,
+    )?;
     let aad = witness_aad(header, epoch, sequence, previous_witness_tag);
     let sealed = seal_object(key, &aad, &plaintext);
     let tag = sealed.cmt4;
     Ok((encode_record(RECORD_WITNESS, sequence, sealed)?, tag))
 }
 
+/// Encode a witness payload. Version 1 (no order list) is kept byte-for-byte for commits made
+/// before OQ-29; version 2 appends the document order of segment ids after the MMR peaks, inside
+/// the same authenticated body, so a reopen can rebuild the document rather than the append log.
 fn encode_witness_plain(
     sequence: u64,
     previous_witness_tag: &[u8; 32],
     last_segment_tag: &[u8; 32],
     epoch: &[u8; 32],
     mmr: &Mmr,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(WITNESS_BASE_BYTES + mmr.count().count_ones() as usize * 32);
-    out.push(1); // Witness payload version.
+    document_order: &[u32],
+) -> Result<Vec<u8>, LineError> {
+    if document_order.len() > MAX_WITNESS_ORDER_IDS {
+        return Err(LineError::TooManySegments);
+    }
+    let mut out = Vec::with_capacity(WITNESS_BASE_BYTES + 4 + document_order.len() * 4);
+    out.push(if document_order.is_empty() { 1 } else { 2 });
     out.extend_from_slice(&sequence.to_le_bytes());
     out.extend_from_slice(&mmr.count().to_le_bytes());
     out.extend_from_slice(previous_witness_tag);
@@ -1104,7 +1129,13 @@ fn encode_witness_plain(
     out.extend_from_slice(epoch);
     out.extend_from_slice(&mmr.root());
     mmr.encode_peaks(&mut out);
-    out
+    if !document_order.is_empty() {
+        out.extend_from_slice(&(document_order.len() as u32).to_le_bytes());
+        for &id in document_order {
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+    }
+    Ok(out)
 }
 
 struct DecodedWitness {
@@ -1114,10 +1145,11 @@ struct DecodedWitness {
     last_segment_tag: [u8; 32],
     epoch: [u8; 32],
     mmr: Mmr,
+    document_order: Vec<u32>,
 }
 
 fn decode_witness_plain(bytes: &[u8]) -> Result<DecodedWitness, LineError> {
-    if bytes.len() < WITNESS_BASE_BYTES || bytes[0] != 1 {
+    if bytes.len() < WITNESS_BASE_BYTES || (bytes[0] != 1 && bytes[0] != 2) {
         return Err(LineError::InvalidRecord);
     }
     let mut offset = 1;
@@ -1127,8 +1159,38 @@ fn decode_witness_plain(bytes: &[u8]) -> Result<DecodedWitness, LineError> {
     let last_segment_tag = take_array::<32>(bytes, &mut offset)?;
     let epoch = take_array::<32>(bytes, &mut offset)?;
     let root = take_array::<32>(bytes, &mut offset)?;
-    let peaks = Mmr::from_peak_bytes(segment_count, &bytes[offset..])?;
+    let peaks_len = segment_count.count_ones() as usize * 32;
+    let peaks_end = offset
+        .checked_add(peaks_len)
+        .ok_or(LineError::InvalidRecord)?;
+    let peaks_bytes = bytes
+        .get(offset..peaks_end)
+        .ok_or(LineError::InvalidRecord)?;
+    let peaks = Mmr::from_peak_bytes(segment_count, peaks_bytes)?;
     if peaks.root() != root {
+        return Err(LineError::InvalidRecord);
+    }
+    offset = peaks_end;
+
+    let document_order = if bytes[0] == 2 {
+        let count = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+        let count = count as usize;
+        if count == 0 || count > MAX_WITNESS_ORDER_IDS {
+            return Err(LineError::InvalidRecord);
+        }
+        let mut order = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+            if u64::from(id) >= segment_count {
+                return Err(LineError::InvalidRecord);
+            }
+            order.push(id);
+        }
+        order
+    } else {
+        Vec::new()
+    };
+    if offset != bytes.len() {
         return Err(LineError::InvalidRecord);
     }
     Ok(DecodedWitness {
@@ -1138,6 +1200,7 @@ fn decode_witness_plain(bytes: &[u8]) -> Result<DecodedWitness, LineError> {
         last_segment_tag,
         epoch,
         mmr: peaks,
+        document_order,
     })
 }
 
@@ -1150,24 +1213,6 @@ fn segment_aad(
 ) -> Vec<u8> {
     let mut aad = Vec::with_capacity(21 + 16 + 32 + 8 + 32 + 4);
     aad.extend_from_slice(b"HOLONOMY_V6_SEGMENT\0");
-    aad.extend_from_slice(header.file_id());
-    aad.extend_from_slice(epoch);
-    aad.extend_from_slice(&sequence.to_le_bytes());
-    aad.extend_from_slice(previous_tag);
-    aad.extend_from_slice(&plaintext_len.to_le_bytes());
-    aad
-}
-
-
-fn structure_aad(
-    header: &LineHeader,
-    epoch: &[u8; 32],
-    sequence: u64,
-    previous_tag: &[u8; 32],
-    plaintext_len: u32,
-) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(21 + 16 + 32 + 8 + 32 + 4);
-    aad.extend_from_slice(b"HOLONOMY_V6_STRUCTURE\0");
     aad.extend_from_slice(header.file_id());
     aad.extend_from_slice(epoch);
     aad.extend_from_slice(&sequence.to_le_bytes());
@@ -1213,17 +1258,6 @@ fn encode_record(kind: u8, sequence: u64, sealed: SealedObject) -> Result<Vec<u8
     Ok(frame)
 }
 
-#[derive(Clone, Debug, Default)]
-struct StructureInfo {
-    sequence: u64,
-    ciphertext_offset: u64,
-    ciphertext_len: u32,
-    nonce: [u8; 24],
-    tag: [u8; 32],
-    previous_tag: [u8; 32],
-    sequence_list: Vec<u32>,
-}
-
 struct ScanResult {
     segments: Vec<SegmentDescriptor>,
     mmr: Mmr,
@@ -1233,7 +1267,7 @@ struct ScanResult {
     committed_end: u64,
     observed_len: u64,
     recovery: RecoveryInfo,
-    structure: Option<StructureInfo>,
+    document_order: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -1309,6 +1343,7 @@ fn scan_records<R: Read + Seek>(
     let mut next_witness_sequence = 0u64;
     let mut last_witness_tag = [0u8; 32];
     let mut checkpoint = None;
+    let mut latest_document_order: Vec<u32> = Vec::new();
 
     loop {
         let record_start = reader.stream_position()?;
@@ -1330,7 +1365,7 @@ fn scan_records<R: Read + Seek>(
             return Err(LineError::InvalidRecord);
         }
         let kind = frame_header[4];
-        if kind != RECORD_SEGMENT && kind != RECORD_WITNESS && kind != RECORD_STRUCTURE {
+        if kind != RECORD_SEGMENT && kind != RECORD_WITNESS {
             return Err(LineError::InvalidRecord);
         }
         let body_len = u32::from_le_bytes(frame_header[8..12].try_into().unwrap());
@@ -1339,8 +1374,6 @@ fn scan_records<R: Read + Seek>(
         }
         let maximum = if kind == RECORD_SEGMENT {
             RECORD_FIXED_BYTES as u32 + MAX_SEGMENT_BYTES + AEAD_TAG_BYTES
-        } else if kind == RECORD_STRUCTURE {
-            RECORD_FIXED_BYTES as u32 + 65536 + AEAD_TAG_BYTES
         } else {
             RECORD_FIXED_BYTES as u32 + MAX_WITNESS_CIPHERTEXT_BYTES
         };
@@ -1404,36 +1437,6 @@ fn scan_records<R: Read + Seek>(
             mmr.append(leaf)?;
             scanned_last_segment_tag = tag;
             reader.seek(SeekFrom::Current(i64::from(ciphertext_len)))?;
-        } else if kind == RECORD_STRUCTURE {
-            if ciphertext_len < AEAD_TAG_BYTES || ciphertext_len > 65536 + AEAD_TAG_BYTES {
-                return Err(LineError::InvalidRecord);
-            }
-            let mut ciphertext = vec![0u8; ciphertext_len as usize];
-            reader.read_exact(&mut ciphertext)?;
-            let sealed = SealedObject {
-                nonce,
-                ciphertext,
-                cmt4: tag,
-            };
-            let plaintext_len = ciphertext_len - AEAD_TAG_BYTES;
-            let aad = structure_aad(header, epoch, sequence, &last_witness_tag, plaintext_len);
-            let plaintext = open_object(key, &aad, &sealed).map_err(|_| LineError::AuthenticationRejected)?;
-            if plaintext.len() != plaintext_len as usize {
-                return Err(LineError::AuthenticationRejected);
-            }
-            let mut sequence_list = Vec::with_capacity(plaintext.len() / 4);
-            for chunk in plaintext.chunks_exact(4) {
-                sequence_list.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-            }
-            latest_structure = Some(StructureInfo {
-                sequence,
-                ciphertext_offset,
-                ciphertext_len,
-                nonce,
-                tag,
-                previous_tag: last_witness_tag,
-                sequence_list,
-            });
         } else {
             if ciphertext_len < AEAD_TAG_BYTES + WITNESS_BASE_BYTES as u32
                 || ciphertext_len > MAX_WITNESS_CIPHERTEXT_BYTES
@@ -1466,6 +1469,9 @@ fn scan_records<R: Read + Seek>(
             {
                 return Err(LineError::AuthenticationRejected);
             }
+            if !witness.document_order.is_empty() {
+                latest_document_order = witness.document_order;
+            }
             last_witness_tag = tag;
             next_witness_sequence = sequence.checked_add(1).ok_or(LineError::TooManySegments)?;
             checkpoint = Some(Checkpoint {
@@ -1488,7 +1494,7 @@ fn scan_records<R: Read + Seek>(
     let mmr = checkpoint.mmr.to_mmr()?;
     let trailing_bytes = observed_len.saturating_sub(checkpoint.committed_end);
     Ok(ScanResult {
-        structure: latest_structure,
+        document_order: latest_document_order,
         segments,
         mmr,
         next_witness_sequence: checkpoint.next_witness_sequence,
@@ -1500,7 +1506,6 @@ fn scan_records<R: Read + Seek>(
             trailing_bytes,
             last_committed_offset: checkpoint.committed_end,
         },
-        structure: None,
     })
 }
 
