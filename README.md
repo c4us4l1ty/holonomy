@@ -72,6 +72,8 @@ detail lives.
 | Eye geometry: clusters, run tree, zoom/DPI, height index | **Real, measured in CI** | `holonomy-eye` |
 | Editor loop: intents in, measured frames out | **Real, measured in CI** | `holonomy-shell` |
 | Terminal window: open, type, save, unlock, panel | **Real — this is the app you run** | `holonomy-gui` |
+| That binary, driven end to end by CI | **Real** — created, sealed, reopened, wrong and empty passphrases refused | `scripts/smoke-install.sh` (D-72) |
+| A packaged release or installer | **None.** No artefact is published; you build from source | `docs/TO-APP.md` M8 |
 | GPU backend, font shaping, IME | **Not built** — the window is a grid of characters | `docs/TO-APP.md` M4b-ii |
 | Wide characters (`中`, most emoji) | **Wrong** — claims one cell, terminal draws two | OQ-25 |
 | Right-to-left text (Hebrew, Arabic, …) | **Drawn left-to-right.** A caret never splits a letter's mark, but the visual order is wrong — there is no bidi reordering | OQ-11, D-66 |
@@ -95,9 +97,10 @@ the two ever disagree. A law becomes `gated` when an enforcing block lands and C
 before, and not by editing prose.
 
 `docs/TO-APP.md` tracks the app in milestones; `ROADMAP.md` tracks the ten construction blocks.
-M0–M6 are done and M7/M8 are not: the build is not packaged, and the gates that remain are the ones
-about a shipped app on reference hardware. Block 6's deliverable — a GPUI window with quiet-md's
-page — is **not** met; its terminal half is.
+**M0–M7 are done. M8 is partially done and M4b-ii is blocked** — see `docs/TO-APP.md`. The build is
+not packaged and there is no per-platform release; the gates that remain are the ones about a
+shipped app on reference hardware. Block 6's deliverable — a GPUI window with quiet-md's page — is
+**not** met; its terminal half is.
 
 ## Installing it
 
