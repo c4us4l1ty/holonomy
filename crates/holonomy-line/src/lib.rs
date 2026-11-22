@@ -299,11 +299,11 @@ struct SegmentDescriptor {
 
 /// An opened append-only world-line. The key remains an opaque capability borrowed from
 /// `holonomy-seal`; this crate can request seal/open operations but cannot read key bytes.
-pub struct WorldLine<'key> {
+pub struct WorldLine {
     path: PathBuf,
     header: LineHeader,
     epoch: [u8; 32],
-    key: &'key DEMKey,
+    key: DEMKey,
     file_identity: FileIdentity,
     segments: Vec<SegmentDescriptor>,
     mmr: Mmr,
@@ -317,13 +317,13 @@ pub struct WorldLine<'key> {
     poisoned: bool,
 }
 
-impl<'key> WorldLine<'key> {
+impl WorldLine {
     /// Create a new file without replacing an existing path. A fully synced staging inode is
     /// linked into place atomically, then the containing directory is synced.
     pub fn create(
         path: impl AsRef<Path>,
         header: LineHeader,
-        key: &'key DEMKey,
+        key: &DEMKey,
     ) -> Result<Self, LineError> {
         if !durability_supported() {
             return Err(LineError::UnsupportedDurability);
@@ -409,7 +409,7 @@ impl<'key> WorldLine<'key> {
             path,
             header,
             epoch,
-            key,
+            key: key.clone(),
             file_identity,
             segments: Vec::new(),
             mmr: empty_mmr,
@@ -428,7 +428,7 @@ impl<'key> WorldLine<'key> {
 
     /// Open a file using an already-unwrapped document key. This scans header and witness
     /// metadata but seeks over every segment ciphertext body.
-    pub fn open(path: impl AsRef<Path>, key: &'key DEMKey) -> Result<Self, LineError> {
+    pub fn open(path: impl AsRef<Path>, key: &DEMKey) -> Result<Self, LineError> {
         let path = path.as_ref().to_path_buf();
         let mut file = open_worldline_file(&path, true, false)?;
         let _read_lock = FileReadLock::acquire(&file)?;
@@ -441,7 +441,7 @@ impl<'key> WorldLine<'key> {
             path,
             header,
             epoch,
-            key,
+            key: key.clone(),
             file_identity,
             segments: scan.segments,
             mmr: scan.mmr,
@@ -650,7 +650,7 @@ impl<'key> WorldLine<'key> {
         new_header: LineHeader,
         new_key: &'new_key DEMKey,
         approval: CompactionApproval,
-    ) -> Result<WorldLine<'new_key>, LineError> {
+    ) -> Result<WorldLine, LineError> {
         if self.poisoned {
             return Err(LineError::ReopenRequired);
         }
