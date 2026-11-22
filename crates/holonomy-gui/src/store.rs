@@ -217,6 +217,9 @@ impl Document {
     /// The document's geometry: one slab per committed segment, its length taken from the
     /// authenticated record header. No plaintext is read.
     ///
+    /// Read [`spine_of`]'s note before relying on this: the geometry is *file* order, which is
+    /// document order only for a document that was never edited before its end (OQ-29).
+    ///
     /// # Errors
     ///
     /// [`StoreError::Line`] if the shared handle is already borrowed, which only a re-entrant call
@@ -260,7 +263,19 @@ impl Document {
     }
 }
 
-/// The spine a world-line presents: one slab per segment, in order.
+/// The spine a world-line presents: one slab per segment, **in file order**.
+///
+/// That is not the same as document order, and the difference is a defect (OQ-29, D-75). A segment
+/// record carries its bytes and its authenticated length and nothing else — no position, no edit,
+/// no tombstone — so the geometry a document had when it was being edited is not in the file
+/// to be read back. Building the spine from `segment_lengths()` in append order is therefore the
+/// only thing this function *can* do, and it makes a document that was only ever appended to load
+/// exactly right, which is every document the existing tests wrote.
+///
+/// It does not make an edited document load right: type `world`, then put the caret at 0 and type
+/// `hello `, and the session reads `hello world` while this reloads `worldhello `. The tests in
+/// `holonomy-gui/tests/persist.rs` assert that, so the day a structural record exists the change is
+/// visible rather than silent. Do not "fix" this here — the missing information is in the format.
 fn spine_of(line: &WorldLine<'_>) -> Spine {
     Spine::from_slabs(
         line.segment_lengths()

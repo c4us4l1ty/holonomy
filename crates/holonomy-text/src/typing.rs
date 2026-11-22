@@ -43,10 +43,13 @@
 //! because the document is geometry and the bytes were never its bytes. Cutting a megabyte out
 //! costs what cutting ten out costs.
 //!
-//! **Deletion does not erase.** The world-line still holds the ciphertext of what was removed, and
-//! a reader with the passphrase can still decrypt it. An authenticated append-only log cannot do
-//! better without a compaction policy, and this session has none; AUDIT's OQ-14 records that,
-//! rather than letting "deleted" quietly mean two different things.
+//! **Deletion does not erase, and it does not persist either.** The world-line still holds the
+//! ciphertext of what was removed, and a reader with the passphrase can still decrypt it. An
+//! authenticated append-only log cannot do better without a compaction policy, and this session has
+//! none; AUDIT's OQ-14 records that. The sharper half, recorded as OQ-30: a cut writes **nothing**,
+//! and the sink this session holds can only append, so a deletion exists in the tree and nowhere
+//! else. Nothing here can fix that — it needs a record kind the file does not have (OQ-29) —
+//! but a caller must not read `delete` as an edit that will still be there tomorrow.
 //!
 //! # Undo is a length, not a copy
 //!
@@ -315,7 +318,10 @@ impl<S: SegmentSink> Typing<S> {
     /// keystroke path. A range that reaches sealed text seals what is open first — so every offset
     /// is the tree's own and no correction is needed — and then takes the range out of the spine.
     /// Either way **no bytes are written**: the world-line keeps what was deleted, which is OQ-14's
-    /// subject, and the leaf fragments a cut leaves behind are OQ-9's.
+    /// subject, and the leaf fragments a cut leaves behind are OQ-9's. That also means a cut across
+    /// sealed text is not *persisted* — the spine is memory, a sink only appends, and the next
+    /// open rebuilds the geometry from the segments it finds (OQ-30). A caller that shows "saved"
+    /// after a deletion is describing the seal that followed it, not the deletion.
     ///
     /// Deleting the whole open buffer takes the leaf with it and abandons the source: the tree may
     /// not carry a leaf that names nothing.

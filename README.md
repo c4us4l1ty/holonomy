@@ -59,6 +59,14 @@ A **seal** is the unit of durability: when the 16 KiB buffer fills, its bytes ar
 world-line and witnessed, so text is on disk once it has sealed. The open buffer is written by
 `Ctrl+S`, by an autosave 1.5 s after typing stops, and on quit.
 
+**A save appends; it does not record the shape of the document.** The file keeps every
+segment in the order it was written, and nothing in it says where those segments sit. Two
+consequences, both real today and both in the table below: text typed *before* existing text
+reads correctly in the session and reopens in the order it was saved (OQ-29), and text you
+delete is hidden for this session but is still in the file and comes back on the next open
+(OQ-30). If you delete something you need gone, deleting it in the app is not enough — see
+"What is real, and what is not".
+
 ## What is real, and what is not
 
 Said here, in a table, because this is the page a reader meets first and `AUDIT.md` is where the
@@ -82,6 +90,8 @@ detail lives.
 | DEM key of each opened document | **Leaked** for the process lifetime | OQ-27 |
 | Passphrase at the prompt | Zeroed, but never held in a `Zeroizing` buffer | OQ-28 |
 | Height index | Exact for measured leaves; a reveal measures the run to the caret | D-62 |
+| Text typed *before* existing text | **Reopens in the order it was saved**, not where you put it. The session is correct; the next open is not | OQ-29, D-75 |
+| Deleted text | **Comes back on the next open**, and was never erased from the file. A save seals the buffer and records no structural change | OQ-30, OQ-14 |
 | Power-loss safety | **Not qualified** — L-6 is an ENOSPC rehearsal and says so in its job name | Block 10 |
 
 Nothing in this table is aspirational. Every **real** row is exercised by a CI job on every push;
