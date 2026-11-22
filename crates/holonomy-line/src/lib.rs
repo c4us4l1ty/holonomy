@@ -555,6 +555,48 @@ impl<'key> WorldLine<'key> {
 
     /// Open one segment on demand; the returned plaintext is zeroizing and should remain local
     /// to the caller's viewport/residency scope.
+
+    /// Appends a structural record describing the current document order.
+    /// Call after a non-append edit (insert/delete) so reopen reproduces document, not log.
+    pub fn append_structure(&mut self, sequence_list: &[u32]) -> Result<(), LineError> {
+        if self.poisoned {
+            return Err(LineError::ReopenRequired);
+        }
+        if sequence_list.is_empty() {
+            return Ok(());
+        }
+        let sequence = 0; // structural sequence is independent of witness/segment count
+        let (frame, tag) = encode_structure_record(
+            &self.header,
+            &self.epoch,
+            self.key,
+            sequence,
+            &self.last_witness_tag,
+            sequence_list,
+        )?;
+        let mut file = open_worldline_file(&self.path, true, true)?;
+        validate_regular_file(&file)?;
+        if file_identity(&file)? != self.file_identity {
+            return Err(LineError::ConcurrentModification);
+        }
+        file.seek(SeekFrom::End(0))?;
+        write_append_bytes(&mut file, &frame)?;
+        file.sync_all()?;
+        // Memory update is approximate; file is authoritative and will be re-read on reopen.
+        // Only sequence_list is needed by document_order(); rest are dummies until reopen.
+        self.structure = Some(StructureInfo {
+            sequence,
+            ciphertext_offset: 0,
+            ciphertext_len: 0,
+            nonce: [0; 24],
+            tag: [0; 32],
+            previous_tag: self.last_witness_tag,
+            sequence_list: sequence_list.to_vec(),
+        });
+        self.observed_len = file.stream_position()?;
+        Ok(())
+    }
+
     pub fn open_segment(&self, sequence: u64) -> Result<OpenedPlaintext, LineError> {
         if self.poisoned {
             return Err(LineError::ReopenRequired);
@@ -1011,6 +1053,25 @@ fn encode_segment_record(
     })
 }
 
+
+fn encode_structure_record(
+    header: &LineHeader,
+    epoch: &[u8; 32],
+    key: &DEMKey,
+    sequence: u64,
+    previous_tag: &[u8; 32],
+    sequence_list: &[u32],
+) -> Result<(Vec<u8>, [u8; 32]), LineError> {
+    let mut plaintext = Vec::with_capacity(sequence_list.len() * 4);
+    for &seq in sequence_list {
+        plaintext.extend_from_slice(&seq.to_le_bytes());
+    }
+    let plaintext_len = u32::try_from(plaintext.len()).map_err(|_| LineError::SegmentTooLarge)?;
+    let aad = structure_aad(header, epoch, sequence, previous_tag, plaintext_len);
+    let sealed = seal_object(key, &aad, &plaintext);
+    let tag = sealed.cmt4;
+    Ok((encode_record(RECORD_STRUCTURE, sequence, sealed)?, tag))
+}
 fn encode_witness_record(
     header: &LineHeader,
     epoch: &[u8; 32],
