@@ -278,11 +278,11 @@ impl Document {
 /// visible rather than silent. Do not "fix" this here — the missing information is in the format.
 fn spine_of(line: &WorldLine<'_>) -> Spine {
     Spine::from_slabs(
-        line.segment_lengths()
-            .enumerate()
-            .map(|(index, length)| {
+        line.document_order()
+            .into_iter()
+            .map(|(seq, length)| {
                 Slab::new(
-                    SegmentId::new(u64::try_from(index).unwrap_or(u64::MAX)),
+                    SegmentId::new(u64::from(seq)),
                     0,
                     length,
                 )

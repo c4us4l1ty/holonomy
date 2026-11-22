@@ -27,6 +27,7 @@ use crate::mmr::{segment_leaf, Mmr};
 const RECORD_MAGIC: &[u8; 4] = b"W6RC";
 const RECORD_SEGMENT: u8 = 1;
 const RECORD_WITNESS: u8 = 2;
+const RECORD_STRUCTURE: u8 = 3;
 const AEAD_TAG_BYTES: u32 = 16;
 const MAX_SEGMENT_BYTES: u32 = 64 * 1024;
 const WITNESS_BASE_BYTES: usize = 1 + 8 + 8 + 32 + 32 + 32 + 32;
@@ -312,6 +313,7 @@ pub struct WorldLine<'key> {
     committed_end: u64,
     observed_len: u64,
     recovery: RecoveryInfo,
+    structure: Option<StructureInfo>,
     poisoned: bool,
 }
 
@@ -449,6 +451,7 @@ impl<'key> WorldLine<'key> {
             committed_end: scan.committed_end,
             observed_len: scan.observed_len,
             recovery: scan.recovery,
+            structure: scan.structure,
             poisoned: false,
         })
     }
@@ -480,6 +483,25 @@ impl<'key> WorldLine<'key> {
     }
 
     /// Number of committed witness records, including genesis.
+
+    /// The document-order sequence of committed segments, from the latest structural record.
+    /// If no structural record exists, append order is returned (backward-compatible).
+    /// Document-order sequence IDs and their authenticated plaintext lengths.
+    pub fn document_order(&self) -> Vec<(u32, u32)> {
+        if let Some(ref info) = self.structure {
+            info.sequence_list
+                .iter()
+                .map(|&seq| {
+                    let len = self.segments.get(seq as usize)
+                        .map_or(0, |d| d.plaintext_len);
+                    (seq, len)
+                })
+                .collect()
+        } else {
+            self.segments.iter().enumerate().map(|(i, d)| (i as u32, d.plaintext_len)).collect()
+        }
+    }
+
     pub fn witness_count(&self) -> u64 {
         self.next_witness_sequence
     }
@@ -1076,6 +1098,23 @@ fn segment_aad(
     aad
 }
 
+
+fn structure_aad(
+    header: &LineHeader,
+    epoch: &[u8; 32],
+    sequence: u64,
+    previous_tag: &[u8; 32],
+    plaintext_len: u32,
+) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(21 + 16 + 32 + 8 + 32 + 4);
+    aad.extend_from_slice(b"HOLONOMY_V6_STRUCTURE\0");
+    aad.extend_from_slice(header.file_id());
+    aad.extend_from_slice(epoch);
+    aad.extend_from_slice(&sequence.to_le_bytes());
+    aad.extend_from_slice(previous_tag);
+    aad.extend_from_slice(&plaintext_len.to_le_bytes());
+    aad
+}
 fn witness_aad(
     header: &LineHeader,
     epoch: &[u8; 32],
@@ -1113,6 +1152,17 @@ fn encode_record(kind: u8, sequence: u64, sealed: SealedObject) -> Result<Vec<u8
     Ok(frame)
 }
 
+#[derive(Clone, Debug, Default)]
+struct StructureInfo {
+    sequence: u64,
+    ciphertext_offset: u64,
+    ciphertext_len: u32,
+    nonce: [u8; 24],
+    tag: [u8; 32],
+    previous_tag: [u8; 32],
+    sequence_list: Vec<u32>,
+}
+
 struct ScanResult {
     segments: Vec<SegmentDescriptor>,
     mmr: Mmr,
@@ -1122,6 +1172,7 @@ struct ScanResult {
     committed_end: u64,
     observed_len: u64,
     recovery: RecoveryInfo,
+    structure: Option<StructureInfo>,
 }
 
 #[derive(Clone, Copy)]
@@ -1218,7 +1269,7 @@ fn scan_records<R: Read + Seek>(
             return Err(LineError::InvalidRecord);
         }
         let kind = frame_header[4];
-        if kind != RECORD_SEGMENT && kind != RECORD_WITNESS {
+        if kind != RECORD_SEGMENT && kind != RECORD_WITNESS && kind != RECORD_STRUCTURE {
             return Err(LineError::InvalidRecord);
         }
         let body_len = u32::from_le_bytes(frame_header[8..12].try_into().unwrap());
@@ -1227,6 +1278,8 @@ fn scan_records<R: Read + Seek>(
         }
         let maximum = if kind == RECORD_SEGMENT {
             RECORD_FIXED_BYTES as u32 + MAX_SEGMENT_BYTES + AEAD_TAG_BYTES
+        } else if kind == RECORD_STRUCTURE {
+            RECORD_FIXED_BYTES as u32 + 65536 + AEAD_TAG_BYTES
         } else {
             RECORD_FIXED_BYTES as u32 + MAX_WITNESS_CIPHERTEXT_BYTES
         };
@@ -1290,6 +1343,36 @@ fn scan_records<R: Read + Seek>(
             mmr.append(leaf)?;
             scanned_last_segment_tag = tag;
             reader.seek(SeekFrom::Current(i64::from(ciphertext_len)))?;
+        } else if kind == RECORD_STRUCTURE {
+            if ciphertext_len < AEAD_TAG_BYTES || ciphertext_len > 65536 + AEAD_TAG_BYTES {
+                return Err(LineError::InvalidRecord);
+            }
+            let mut ciphertext = vec![0u8; ciphertext_len as usize];
+            reader.read_exact(&mut ciphertext)?;
+            let sealed = SealedObject {
+                nonce,
+                ciphertext,
+                cmt4: tag,
+            };
+            let plaintext_len = ciphertext_len - AEAD_TAG_BYTES;
+            let aad = structure_aad(header, epoch, sequence, &last_witness_tag, plaintext_len);
+            let plaintext = open_object(key, &aad, &sealed).map_err(|_| LineError::AuthenticationRejected)?;
+            if plaintext.len() != plaintext_len as usize {
+                return Err(LineError::AuthenticationRejected);
+            }
+            let mut sequence_list = Vec::with_capacity(plaintext.len() / 4);
+            for chunk in plaintext.chunks_exact(4) {
+                sequence_list.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+            }
+            latest_structure = Some(StructureInfo {
+                sequence,
+                ciphertext_offset,
+                ciphertext_len,
+                nonce,
+                tag,
+                previous_tag: last_witness_tag,
+                sequence_list,
+            });
         } else {
             if ciphertext_len < AEAD_TAG_BYTES + WITNESS_BASE_BYTES as u32
                 || ciphertext_len > MAX_WITNESS_CIPHERTEXT_BYTES
@@ -1344,6 +1427,7 @@ fn scan_records<R: Read + Seek>(
     let mmr = checkpoint.mmr.to_mmr()?;
     let trailing_bytes = observed_len.saturating_sub(checkpoint.committed_end);
     Ok(ScanResult {
+        structure: latest_structure,
         segments,
         mmr,
         next_witness_sequence: checkpoint.next_witness_sequence,
@@ -1355,6 +1439,7 @@ fn scan_records<R: Read + Seek>(
             trailing_bytes,
             last_committed_offset: checkpoint.committed_end,
         },
+        structure: None,
     })
 }
 

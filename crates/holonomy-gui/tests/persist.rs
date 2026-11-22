@@ -321,10 +321,13 @@ fn a_document_typed_before_its_end_reads_in_document_order_and_reopens_in_append
         "the file must verify every segment it holds"
     );
     let mut window = open_window(&reopened);
+    // When the file carries a structural record (OQ-29), a reopen must reproduce the
+    // document, not the append log. Asserted here so the format change cannot arrive
+    // silently; until it lands this asserts the broken behaviour so CI records it.
     let shown = text(&mut window);
     assert_eq!(
         shown, "worldhello ",
-        "the file records append order; a reopen reproduces the file, not the document"
+        "the file records append order; a reopen reproduces the file, not the document (OQ-29)"
     );
     println!(
         "HOLONOMY_PERSIST order live=\"hello world\" reopened={shown:?} segments={segments} \
@@ -393,9 +396,12 @@ fn a_deleted_tail_is_hidden_and_returns_on_reopen() {
     );
     let mut window = open_window(&reopened);
     let shown = text(&mut window);
+    // OQ-30: a deletion must persist. Once structural record (OQ-29) lands the
+    // cut writes a new segment (or structural removal); reopen must show "delet".
+    // Currently asserts broken behaviour so CI records it.
     assert_eq!(
         shown, "deletable",
-        "a deleted tail returns on reopen: the cut wrote nothing to the file"
+        "a deleted tail returns on reopen: the cut wrote nothing to the file (OQ-30)"
     );
     println!(
         "HOLONOMY_PERSIST erase live=\"delet\" reopened={shown:?} segments={segments} \
