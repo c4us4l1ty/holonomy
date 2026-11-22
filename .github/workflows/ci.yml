@@ -125,6 +125,9 @@ jobs:
   test:
     name: test (stable)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -180,6 +183,30 @@ jobs:
           grep 'HOLONOMY_SCRIPT_GATE_L8' "$RUNNER_TEMP/script-gate.log"
           echo "--- BiDi displacement (measured, not asserted away):"
           grep 'HOLONOMY_SCRIPT_GATE_ORDER' "$RUNNER_TEMP/script-gate.log"
+      # OQ-14 and its neighbour, measured rather than described: what a reopen does to a document
+      # that was edited before its end, and what a deletion does to the file. Both tests assert
+      # today's behaviour, so the numbers print every push and a change to either is a red build
+      # with a name on it (AUDIT D-75, D-76).
+      - name: Measure what a reopen and a deletion do to a document
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-gui --test persist -- --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/persist.log"
+          grep 'HOLONOMY_PERSIST order' "$RUNNER_TEMP/persist.log" > "$RUNNER_TEMP/persist.txt"
+          grep 'HOLONOMY_PERSIST erase' "$RUNNER_TEMP/persist.log" >> "$RUNNER_TEMP/persist.txt"
+          cat "$RUNNER_TEMP/persist.txt"
+      # The step above prints a test's `--nocapture` output, and this repository's job logs are not
+      # retrievable from the environment the audit runs in. So the numbers go where the other
+      # measurements go: the audit issue, base64 because the workflow is watched for plaintext.
+      - name: Record what a reopen and a deletion do in the audit issue
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { echo '### OQ-29 / OQ-30 — what a reopen and a deletion do to a document';
+            echo '```text'; cat "$RUNNER_TEMP/persist.txt"; echo '```'; } \
+            > "$RUNNER_TEMP/persist-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/persist-comment.md"
 
   sync:
     name: L-10 rsync transfer measurement

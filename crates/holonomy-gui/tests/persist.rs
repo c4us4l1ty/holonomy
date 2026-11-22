@@ -270,3 +270,136 @@ fn bytes_past_the_last_witness_are_reported_and_discarded() {
         reopened.segment_count()
     );
 }
+
+/// OQ-14's neighbour: the file does not record what the *document* looked like.
+///
+/// Asserted here so a user cannot discover it before CI does. A save seals the open leaf, and a
+/// seal is an append ([`holonomy_text::Typing::flush`] → one `append_segments` call), so the
+/// world-line holds segments in the order they were committed and holds nothing that says where
+/// they sit in the document. The load path hands one slab per segment to `Spine::from_slabs` in
+/// file order, so **append order becomes document order** on the next open.
+///
+/// Typing at the end is the case every existing test covers, and it is correct: append order and
+/// document order coincide. Typing *before* existing text is not. The session reads correctly, the
+/// save verifies, and the reopen puts the new text after the old — no bytes lost, no error
+/// raised, a document that has silently changed shape.
+///
+/// This test is the inversion point: when the file grows a structural record, it must be rewritten
+/// to assert that a reopen reproduces the *document*, not the append log.
+#[test]
+fn a_document_typed_before_its_end_reads_in_document_order_and_reopens_in_append_order() {
+    let path = temp_path("order");
+    let document = create(&path.0);
+    let mut window = open_window(&document);
+    type_text(&mut window, "world");
+    assert!(save(&mut window), "the first half must save");
+
+    // `Ctrl+Home` is a document move, not a geometry one, so it needs no layout: it is the plainest
+    // way for a user to put the caret before text that is already in the file. The move also seals,
+    // which is what makes the typed prefix its own segment rather than an edit of the first one.
+    window
+        .press(Key::Home, Modifiers::control())
+        .expect("moved");
+    assert_eq!(window.caret(), 0, "the caret must be at the document start");
+    type_text(&mut window, "hello ");
+    assert_eq!(
+        text(&mut window),
+        "hello world",
+        "the live session must read in document order"
+    );
+    assert!(save(&mut window), "the second half must save");
+    let segments = document.segment_count();
+    let witnesses = document.witness_count();
+    drop(window);
+    drop(document);
+
+    // The file is sound: every committed segment authenticates, in append order.
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("opens");
+    assert_eq!(
+        reopened.verify().expect("verifies").segments_verified,
+        segments,
+        "the file must verify every segment it holds"
+    );
+    let mut window = open_window(&reopened);
+    let shown = text(&mut window);
+    assert_eq!(
+        shown, "worldhello ",
+        "the file records append order; a reopen reproduces the file, not the document"
+    );
+    println!(
+        "HOLONOMY_PERSIST order live=\"hello world\" reopened={shown:?} segments={segments} \
+         witnesses={witnesses}"
+    );
+}
+
+/// OQ-14, measured: a deleted range cuts the tree and nothing else.
+///
+/// A deletion that reaches sealed text is a pointer operation (`Typing::delete` →
+/// `Spine::remove_range`). It writes no record, so the segment the cut removed is still in the
+/// file, still authenticated, and still decryptable by anyone holding the passphrase — and,
+/// because the file has no structural record at all, deleting the tail and reopening brings the
+/// text back.
+///
+/// That last part is what makes this a defect rather than a disclosure: "deleted" currently means
+/// "hidden for this session". The numbers printed here are the ones any compaction policy has to
+/// change, and until it exists the app must not imply otherwise.
+#[test]
+fn a_deleted_tail_is_hidden_and_returns_on_reopen() {
+    let path = temp_path("erase");
+    let document = create(&path.0);
+    let mut window = open_window(&document);
+    type_text(&mut window, "deletable");
+    assert!(
+        save(&mut window),
+        "the text must reach the file to be worth deleting"
+    );
+    let segments = document.segment_count();
+    let witnesses_before = document.witness_count();
+
+    // The text is sealed first, on purpose: a cut *inside* the open buffer is an in-place edit and
+    // would seal a shortened segment, which is a different (and sound) code path. The case that
+    // matters is a cut across bytes the file already holds, which takes the spine path.
+    for _ in 0..4 {
+        window.press(Key::Left, Modifiers::shift()).expect("moved");
+    }
+    window
+        .press(Key::Backspace, Modifiers::none())
+        .expect("deleted");
+    assert_eq!(
+        text(&mut window),
+        "delet",
+        "the live session must show the cut"
+    );
+    assert!(save(&mut window), "a save after a cut must still succeed");
+    assert_eq!(
+        document.segment_count(),
+        segments,
+        "a cut must write no segment of its own"
+    );
+    let witnesses_after_cut = document.witness_count();
+    assert_eq!(
+        witnesses_after_cut, witnesses_before,
+        "a cut must not even warrant: nothing about it reached the file"
+    );
+    drop(window);
+    drop(document);
+
+    // The segment holding the deleted text is still in the file, and still authentic.
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("opens");
+    let verified = reopened.verify().expect("verifies");
+    assert_eq!(
+        verified.segments_verified, segments,
+        "the segment the cut removed is still committed"
+    );
+    let mut window = open_window(&reopened);
+    let shown = text(&mut window);
+    assert_eq!(
+        shown, "deletable",
+        "a deleted tail returns on reopen: the cut wrote nothing to the file"
+    );
+    println!(
+        "HOLONOMY_PERSIST erase live=\"delet\" reopened={shown:?} segments={segments} \
+         witnesses_after_cut={witnesses_after_cut} plaintext_bytes_verified={}",
+        verified.plaintext_bytes_verified
+    );
+}
