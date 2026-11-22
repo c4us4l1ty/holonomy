@@ -120,7 +120,7 @@ fn readable(millis: i32) -> bool {
 ///
 /// Raw mode already turned echo off for the whole session, so this only has to collect bytes and
 /// answer the line and backspace keys. Nothing is echoed, which is the point.
-fn prompt(verb: &str, path: &Path) -> std::io::Result<Vec<u8>> {
+fn prompt(verb: &str, path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
     let mut stdout = std::io::stdout();
     write!(stdout, "{} {} (passphrase): ", verb, path.display())?;
     stdout.flush()?;
@@ -444,7 +444,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let raw = RawMode::enable()?;
     let existing = path.exists();
-    let passphrase = prompt(if existing { "open" } else { "create" }, &path)?;
+    let passphrase: Zeroizing<Vec<u8>> = prompt(if existing { "open" } else { "create" }, &path)?;
     let document = if existing {
         Document::open(&path, &passphrase)?
     } else {
@@ -454,9 +454,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Best effort: the phrase is the caller's, and this is the last moment it is needed. The
     // derived keys live in the document and wipe themselves; the bytes typed do not, yet (OQ-5's
     // neighbour, recorded as OQ-28).
+    // OQ-28: Zeroizing<Vec<u8>> wipes on Drop; manual zero is redundant but kept as defence.
     let mut passphrase = passphrase;
     passphrase.iter_mut().for_each(|byte| *byte = 0);
-    drop(passphrase);
     let outcome = run(&path, &document);
     let segments = document.segment_count();
     let witnesses = document.witness_count();
