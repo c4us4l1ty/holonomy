@@ -1072,6 +1072,7 @@ fn encode_structure_record(
     let tag = sealed.cmt4;
     Ok((encode_record(RECORD_STRUCTURE, sequence, sealed)?, tag))
 }
+
 fn encode_witness_record(
     header: &LineHeader,
     epoch: &[u8; 32],
@@ -1176,6 +1177,7 @@ fn structure_aad(
     aad.extend_from_slice(&plaintext_len.to_le_bytes());
     aad
 }
+
 fn witness_aad(
     header: &LineHeader,
     epoch: &[u8; 32],
