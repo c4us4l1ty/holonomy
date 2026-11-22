@@ -241,8 +241,14 @@ assert today's behaviour so a fix cannot arrive silently:
   `deletable`. A deletion lives in memory only (**OQ-30**, D-76), which is a different and worse
   statement than OQ-14's "deleted bytes are not erased".
 
-Both print `HOLONOMY_PERSIST order` / `HOLONOMY_PERSIST erase`, grepped by a CI step, so the numbers
-are on every push. **M5 is therefore not complete as stated**: "resume" holds for a document that is
+Both print `HOLONOMY_PERSIST order` / `HOLONOMY_PERSIST erase`, grepped by a CI step and posted to
+issue #51, so the numbers are on every push. Measured on 2026-11-21 (CI run 44991335879):
+
+```text
+HOLONOMY_PERSIST order live="hello world" reopened="worldhello " segments=2 witnesses=3
+HOLONOMY_PERSIST erase live="delet" reopened="deletable" segments=1 witnesses_after_cut=2 plaintext_bytes_verified=9
+```
+ **M5 is therefore not complete as stated**: "resume" holds for a document that is
 only ever appended to, and the app does not restrict a user to that. The missing piece is a
 structural record in the format, which is OQ-29 and is a `holonomy-line` change, not a window one.
 

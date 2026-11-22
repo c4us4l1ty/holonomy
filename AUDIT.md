@@ -82,8 +82,10 @@ Listed so they stay dead.
   reopen reads `worldhello `. Pinned by
   `a_document_typed_before_its_end_reads_in_document_order_and_reopens_in_append_order`
   (`holonomy-gui/tests/persist.rs`), which asserts today's behaviour so that fixing it is a red
-  build with a name on it rather than a silent change. Found 2026-11-21 while tracing OQ-14; filed
-  as OQ-29.
+  build with a name on it rather than a silent change. Measured green in **CI run 44991335879 on
+  `e6a3b90`**, whose job posted the real numbers to issue #51:
+  `HOLONOMY_PERSIST order live="hello world" reopened="worldhello " segments=2 witnesses=3`.
+  Found 2026-11-21 while tracing OQ-14; filed as OQ-29.
 
 - **2026-11-21 — D-76 — a deletion is hidden for one session and undone by the next open.**
   OQ-14 recorded that a deletion does not erase, which is true and is the deliberate cost of an
@@ -96,7 +98,10 @@ Listed so they stay dead.
   "saved"; the file never learned about the edit. Pinned by
   `a_deleted_tail_is_hidden_and_returns_on_reopen` (same file), which asserts: a cut writes no new
   segment, the file still verifies every segment it held before the cut, and the deleted text is
-  what the next open shows. Recorded as OQ-30; OQ-14 is amended to point at it, because "deleted
+  what the next open shows. Measured in the same run: `HOLONOMY_PERSIST erase live="delet"
+  reopened="deletable" segments=1 witnesses_after_cut=2 plaintext_bytes_verified=9` — the
+  segment count did not move, the witness count did not move, and all nine plaintext bytes are
+  still there and still verify. Recorded as OQ-30; OQ-14 is amended to point at it, because "deleted
   text is still in the file" and "deleted text comes back" are different sentences and only the
   first one was on the record.
 
