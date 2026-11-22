@@ -999,13 +999,13 @@ mod tests {
                 &[None, Some(1), Some(1), None],
                 &[2, 1],
             ),
-            // Forced RTL base direction (`ParagraphDir::Rtl`) with two LTR runs separated by WS.
+            // Forced RTL base direction (`ParagraphDir::Rtl`) with LTR letter + trailing neutral.
             (
-                &['a', ' ', 'b'],
+                &['a', '!'],
                 ParagraphDir::Rtl,
                 1,
-                &[Some(2), Some(1), Some(2)],
-                &[2, 1, 0],
+                &[Some(2), Some(1)],
+                &[1, 0],
             ),
         ];
 
