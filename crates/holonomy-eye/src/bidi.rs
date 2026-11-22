@@ -55,26 +55,24 @@ impl BidiClass {
     }
 
     fn is_removed_x9(self) -> bool {
-        matches!(self, Self::Rle | Self::Lre | Self::Rlo | Self::Lro | Self::Pdf | Self::Bn)
+        matches!(
+            self,
+            Self::Rle | Self::Lre | Self::Rlo | Self::Lro | Self::Pdf | Self::Bn
+        )
     }
 
     fn is_neutral_or_isolate(self) -> bool {
         matches!(
             self,
-            Self::B
-                | Self::S
-                | Self::Ws
-                | Self::On
-                | Self::Fsi
-                | Self::Lri
-                | Self::Rli
-                | Self::Pdi
+            Self::B | Self::S | Self::Ws | Self::On | Self::Fsi | Self::Lri | Self::Rli | Self::Pdi
         )
     }
 
     fn is_resettable_l1(self) -> bool {
-        matches!(self, Self::Ws | Self::Fsi | Self::Lri | Self::Rli | Self::Pdi)
-            || self.is_removed_x9()
+        matches!(
+            self,
+            Self::Ws | Self::Fsi | Self::Lri | Self::Rli | Self::Pdi
+        ) || self.is_removed_x9()
     }
 }
 
@@ -244,7 +242,9 @@ impl WindowBidi {
                 if offset < para.end || para.start == para.end {
                     Some(para)
                 } else {
-                    self.paragraphs.get(idx + 1).filter(|next| next.start == offset)
+                    self.paragraphs
+                        .get(idx + 1)
+                        .filter(|next| next.start == offset)
                 }
             })
     }
@@ -701,8 +701,8 @@ fn resolve_sequence(
             while end < m && sc[end] == BidiClass::Et {
                 end += 1;
             }
-            let adj_en = (k > 0 && sc[k - 1] == BidiClass::En)
-                || (end < m && sc[end] == BidiClass::En);
+            let adj_en =
+                (k > 0 && sc[k - 1] == BidiClass::En) || (end < m && sc[end] == BidiClass::En);
             if adj_en {
                 for item in &mut sc[k..end] {
                     *item = BidiClass::En;
@@ -998,6 +998,14 @@ mod tests {
                 0,
                 &[None, Some(1), Some(1), None],
                 &[2, 1],
+            ),
+            // Forced RTL base direction (`ParagraphDir::Rtl`) with two LTR runs separated by WS.
+            (
+                &['a', ' ', 'b'],
+                ParagraphDir::Rtl,
+                1,
+                &[Some(2), Some(1), Some(2)],
+                &[2, 1, 0],
             ),
         ];
 

@@ -87,34 +87,54 @@ impl SegmentSource for ProsePages {
     }
 }
 
-fn build_doc(leaves: u64, leaf_height: Fixed) -> (Spine, HeightModel) {
-    let spine = Spine::from_slabs(
-        (0..leaves).map(|id| Slab::new(SegmentId::new(id), 0, LEAF_BYTES)),
-    );
-    assert_eq!(spine.slab_count() as u64, leaves);
-    let mut heights = HeightModel::new(leaves as usize);
-    for idx in 0..leaves as usize {
-        heights.set(idx, leaf_height);
-    }
-    (spine, heights)
+struct Doc {
+    spine: Spine,
+    heights: HeightModel,
+    residency: ResidentSet<ProsePages>,
 }
 
-fn shape_viewport(
-    face: &Face,
-    spine: &Spine,
-    heights: &HeightModel,
-    residency: &mut ResidentSet<ProsePages>,
-    draft: &Draft,
-    sources: &OpenSources,
-    top: Fixed,
-    runs: &[StyledRun],
-) -> (usize, u64) {
-    let win = byte_window(spine, heights, top, VIEWPORT_HEIGHT);
-    let read = window_text(residency, spine, draft, sources, win, b"").expect("window readable");
-    let styled = StyledText::new(read.text(), runs);
-    let laid = layout_styled(styled, read.origin(), PAGE_WIDTH, face);
-    let picture = laid.picture(Some(read.origin()), None);
-    (picture.clusters.len(), win.len())
+impl Doc {
+    fn new(leaves: u64, leaf_height: Fixed, pages: ProsePages) -> Self {
+        let spine =
+            Spine::from_slabs((0..leaves).map(|id| Slab::new(SegmentId::new(id), 0, LEAF_BYTES)));
+        assert_eq!(spine.slab_count() as u64, leaves);
+        let mut heights = HeightModel::new(leaves as usize);
+        for idx in 0..leaves as usize {
+            heights.set(idx, leaf_height);
+        }
+        let residency = ResidentSet::new(pages, BUDGET, 0).expect("budget");
+        Self {
+            spine,
+            heights,
+            residency,
+        }
+    }
+}
+
+struct Rig<'a> {
+    face: &'a Face,
+    draft: Draft,
+    sources: OpenSources,
+    runs: &'a [StyledRun],
+}
+
+impl Rig<'_> {
+    fn shape(&self, doc: &mut Doc, top: Fixed) -> (usize, u64) {
+        let win = byte_window(&doc.spine, &doc.heights, top, VIEWPORT_HEIGHT);
+        let read = window_text(
+            &mut doc.residency,
+            &doc.spine,
+            &self.draft,
+            &self.sources,
+            win,
+            b"",
+        )
+        .expect("window readable");
+        let styled = StyledText::new(read.text(), self.runs);
+        let laid = layout_styled(styled, read.origin(), PAGE_WIDTH, self.face);
+        let picture = laid.picture(Some(read.origin()), None);
+        (picture.clusters.len(), win.len())
+    }
 }
 
 fn within_factor(one: Duration, other: Duration, factor: u32) -> bool {
@@ -149,50 +169,25 @@ fn viewport_layout_with_real_face_is_invariant_at_thirty_million_words() {
 
     let big_leaves = WORDS * BYTES_PER_WORD / u64::from(LEAF_BYTES);
     let small_leaves = (big_leaves / 1_000).max(8);
-    let (small_spine, small_heights) = build_doc(small_leaves, leaf_height);
-    let (big_spine, big_heights) = build_doc(big_leaves, leaf_height);
+    let mut small_doc = Doc::new(small_leaves, leaf_height, pages.clone());
+    let mut big_doc = Doc::new(big_leaves, leaf_height, pages.clone());
 
     let half = Fixed::from_64ths(leaf_height.sixtyfourths() / 2);
     let top_small = half;
     let top_start = half;
-    let top_end = big_heights.prefix((big_leaves - 4) as usize) + half;
+    let top_end = big_doc.heights.prefix((big_leaves - 4) as usize) + half;
 
-    let draft = Draft::new();
-    let sources = OpenSources::new();
-    let mut small_set = ResidentSet::new(pages.clone(), BUDGET, 0).expect("budget");
-    let mut big_set = ResidentSet::new(pages.clone(), BUDGET, 0).expect("budget");
+    let rig = Rig {
+        face: &face,
+        draft: Draft::new(),
+        sources: OpenSources::new(),
+        runs: &runs,
+    };
 
     for _ in 0..WARMUP {
-        let _ = shape_viewport(
-            &face,
-            &small_spine,
-            &small_heights,
-            &mut small_set,
-            &draft,
-            &sources,
-            top_small,
-            &runs,
-        );
-        let _ = shape_viewport(
-            &face,
-            &big_spine,
-            &big_heights,
-            &mut big_set,
-            &draft,
-            &sources,
-            top_start,
-            &runs,
-        );
-        let _ = shape_viewport(
-            &face,
-            &big_spine,
-            &big_heights,
-            &mut big_set,
-            &draft,
-            &sources,
-            top_end,
-            &runs,
-        );
+        let _ = rig.shape(&mut small_doc, top_small);
+        let _ = rig.shape(&mut big_doc, top_start);
+        let _ = rig.shape(&mut big_doc, top_end);
     }
 
     let mut t_small = Vec::with_capacity(SAMPLES);
@@ -205,56 +200,27 @@ fn viewport_layout_with_real_face_is_invariant_at_thirty_million_words() {
     for _ in 0..SAMPLES / BLOCK {
         for _ in 0..BLOCK {
             let t0 = Instant::now();
-            meta_small = black_box(shape_viewport(
-                &face,
-                &small_spine,
-                &small_heights,
-                &mut small_set,
-                &draft,
-                &sources,
-                top_small,
-                &runs,
-            ));
+            meta_small = black_box(rig.shape(&mut small_doc, top_small));
             t_small.push(t0.elapsed());
         }
         for _ in 0..BLOCK {
             let t0 = Instant::now();
-            meta_start = black_box(shape_viewport(
-                &face,
-                &big_spine,
-                &big_heights,
-                &mut big_set,
-                &draft,
-                &sources,
-                top_start,
-                &runs,
-            ));
+            meta_start = black_box(rig.shape(&mut big_doc, top_start));
             t_start.push(t0.elapsed());
         }
         for _ in 0..BLOCK {
             let t0 = Instant::now();
-            meta_end = black_box(shape_viewport(
-                &face,
-                &big_spine,
-                &big_heights,
-                &mut big_set,
-                &draft,
-                &sources,
-                top_end,
-                &runs,
-            ));
+            meta_end = black_box(rig.shape(&mut big_doc, top_end));
             t_end.push(t0.elapsed());
         }
     }
 
     assert_eq!(
-        meta_small,
-        meta_start,
+        meta_small, meta_start,
         "180KB and 180MB@0 shaped different windows"
     );
     assert_eq!(
-        meta_start,
-        meta_end,
+        meta_start, meta_end,
         "180MB@0 and 180MB@end shaped different windows"
     );
     assert!(

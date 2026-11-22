@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use holonomy_ledger::alloc::{claim_quiet, AllocStats, Counting};
-use holonomy_ledger::timing::Distribution;
+use holonomy_ledger::timing::summarise;
 use holonomy_seal::{
     create_capsule_for, open_object, seal_object, ArenaSlot, CanarySet, KdfParamsRecord,
     MasterKeys, ReaperGuard, SchedClass, SecretArenas, TripReason, Tripwire, CALIBRATION_P,
@@ -103,13 +103,11 @@ fn reaper_wipes_full_viewport_keys_and_canaries_under_fifty_ms_with_zero_ghosts(
         negative_report.ghost_bytes,
     );
     assert_eq!(
-        negative_report.ghost_canaries,
-        1,
+        negative_report.ghost_canaries, 1,
         "unarmed canary must be caught as a ghost"
     );
     assert_eq!(
-        negative_report.ghost_bytes,
-        CANARY_BYTES,
+        negative_report.ghost_bytes, CANARY_BYTES,
         "every non-zero byte of the unarmed canary must be detected"
     );
     drop(ctrl_canaries);
@@ -204,8 +202,7 @@ fn reaper_wipes_full_viewport_keys_and_canaries_under_fifty_ms_with_zero_ghosts(
         total_ghosts = total_ghosts.saturating_add(outcome.canaries.ghost_bytes);
         assert_eq!(outcome.canaries.ghost_canaries, 0, "trial {trial}: ghosts");
         assert_eq!(
-            outcome.canaries.ghost_bytes,
-            0,
+            outcome.canaries.ghost_bytes, 0,
             "trial {trial}: ghost bytes"
         );
         assert!(dem.is_zeroized(), "trial {trial}: DEMKey must be zeroized");
@@ -226,8 +223,7 @@ fn reaper_wipes_full_viewport_keys_and_canaries_under_fifty_ms_with_zero_ghosts(
             }
         }
         assert_eq!(
-            surviving_slab_bytes,
-            0,
+            surviving_slab_bytes, 0,
             "trial {trial}: surviving resident plaintext bytes after wipe"
         );
 
@@ -240,8 +236,8 @@ fn reaper_wipes_full_viewport_keys_and_canaries_under_fifty_ms_with_zero_ghosts(
         wall_samples.push(wall_elapsed);
     }
 
-    let reaper_dist = Distribution::from_samples(reaper_samples).expect("non-empty");
-    let wall_dist = Distribution::from_samples(wall_samples).expect("non-empty");
+    let reaper_dist = summarise(reaper_samples);
+    let wall_dist = summarise(wall_samples);
     println!(
         "HOLONOMY_WIPE_GATE trials={} arenas={} bytes_wiped={} ghosts={} sched={:?} \
          reaper_p50_us={} reaper_p99_us={} reaper_max_us={} wall_p50_us={} wall_p99_us={} \

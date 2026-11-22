@@ -275,7 +275,7 @@ impl SlabText {
             unsafe { core::ptr::write_volatile(ptr.add(offset), 0u8) };
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        self.bytes.truncate(0);
+        self.bytes.clear();
         cap
     }
 

@@ -166,8 +166,7 @@ fn bidi_runs_reorder_visually_with_zero_displacement() {
             "mixed ltr+rtl+ltr",
             "abc \u{5e9}\u{5dc}\u{5d5}\u{5dd} def",
             &[
-                "a", "b", "c", " ", "\u{5dd}", "\u{5d5}", "\u{5dc}", "\u{5e9}", " ", "d", "e",
-                "f",
+                "a", "b", "c", " ", "\u{5dd}", "\u{5d5}", "\u{5dc}", "\u{5e9}", " ", "d", "e", "f",
             ],
         ),
         (
@@ -230,8 +229,7 @@ fn bidi_runs_reorder_visually_with_zero_displacement() {
             .iter()
             .any(|span| span.x <= cluster.x && cluster.end() <= span.end);
         assert_eq!(
-            covered,
-            selected,
+            covered, selected,
             "cluster {:?} selection mismatch",
             cluster
         );
@@ -259,10 +257,7 @@ fn check_l8(view: &View, laid: &Layout<'_>, label: &str) -> (u64, u64) {
         assert_eq!(hit.line, painted.line, "{label}: line changed at {byte}");
         assert_eq!(hit.x, painted.x, "{label}: x changed at {byte}");
         let line = &laid.lines()[painted.line];
-        let device_xs: Vec<Fixed> = line
-            .boundaries()
-            .map(|(x, _)| view.to_device(x))
-            .collect();
+        let device_xs: Vec<Fixed> = line.boundaries().map(|(x, _)| view.to_device(x)).collect();
         let distinct = device_xs.windows(2).all(|pair| pair[0] != pair[1]);
         if distinct && hit.byte != byte {
             disagreements += 1;
