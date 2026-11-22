@@ -390,14 +390,7 @@ impl WorldLine {
         let empty_mmr = Mmr::new();
         let zero_tag = [0u8; 32];
         let (genesis, genesis_tag) = encode_witness_record(
-            &header,
-            &epoch,
-            &key,
-            0,
-            &zero_tag,
-            &zero_tag,
-            &empty_mmr,
-            None,
+            &header, &epoch, &key, 0, &zero_tag, &zero_tag, &empty_mmr, None,
         )?;
 
         let mut stage_options = OpenOptions::new();
@@ -1455,9 +1448,12 @@ fn validate_manifest_against_pending(
         if slab.len == 0 {
             return Err(LineError::InvalidManifest("manifest slab has zero length"));
         }
-        let end = slab.start.checked_add(slab.len).ok_or(LineError::InvalidManifest(
-            "manifest slab byte range overflows u32",
-        ))?;
+        let end = slab
+            .start
+            .checked_add(slab.len)
+            .ok_or(LineError::InvalidManifest(
+                "manifest slab byte range overflows u32",
+            ))?;
         let index = usize::try_from(slab.segment)
             .map_err(|_| LineError::InvalidManifest("manifest slab names out-of-range segment"))?;
         if index >= total_segments {
@@ -1518,8 +1514,7 @@ fn read_manifest_from<R: Read + Seek>(
     if plaintext.len() != plaintext_len as usize {
         return Err(LineError::AuthenticationRejected);
     }
-    let slabs =
-        decode_manifest_plain(&plaintext).map_err(|_| LineError::AuthenticationRejected)?;
+    let slabs = decode_manifest_plain(&plaintext).map_err(|_| LineError::AuthenticationRejected)?;
     validate_manifest_against_pending(allowed_segments, &[], &slabs)
         .map_err(|_| LineError::AuthenticationRejected)?;
     Ok(slabs)

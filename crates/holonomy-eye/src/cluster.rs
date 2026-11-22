@@ -734,7 +734,10 @@ mod tests {
         assert_eq!(cluster_cells("\u{1100}\u{1161}\u{11A8}"), 2);
         assert_eq!(cluster_cells("Ａ"), 2);
         assert_eq!(cluster_cells("🙂"), 2);
-        assert_eq!(cluster_cells("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), 2);
+        assert_eq!(
+            cluster_cells("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            2
+        );
         assert_eq!(cluster_cells("🇯🇵"), 2);
         assert_eq!(cluster_cells("🇯"), 1);
         assert_eq!(cluster_cells("\u{2764}"), 1);

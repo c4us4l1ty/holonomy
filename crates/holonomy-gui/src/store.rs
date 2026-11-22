@@ -353,16 +353,15 @@ impl Document {
             create_capsule_for(new_keys.unwrap_key(), None).map_err(|_| StoreError::Params)?;
         let new_header = LineHeader::new(header.kdf_params, new_salt, new_capsule)
             .map_err(|error| StoreError::Line(error.to_string()))?;
-        let compacted = line
-            .line
-            .compact_active_to(destination, new_header, &new_dem, approval)
-            .map_err(|error| match error {
-                LineError::Io(io_err) => StoreError::Io(io_err),
-                LineError::CompactionConfirmationRequired | LineError::AuthenticationRejected => {
-                    StoreError::Refused
-                }
-                other => StoreError::Line(other.to_string()),
-            })?;
+        let compacted =
+            line.line
+                .compact_active_to(destination, new_header, &new_dem, approval)
+                .map_err(|error| match error {
+                    LineError::Io(io_err) => StoreError::Io(io_err),
+                    LineError::CompactionConfirmationRequired
+                    | LineError::AuthenticationRejected => StoreError::Refused,
+                    other => StoreError::Line(other.to_string()),
+                })?;
         Ok(Self {
             line: Rc::new(RefCell::new(Line {
                 path: destination.to_path_buf(),
@@ -437,12 +436,30 @@ impl SegmentSink for DocumentSink {
     fn append_segment_with_spine(
         &mut self,
         plaintext: &[u8],
-        build_spine: impl FnOnce(SegmentId) -> Vec<Slab>,
+        before: &[Slab],
+        after: &[Slab],
     ) -> Result<Appended, String> {
         let mut line = self.0.line.borrow_mut();
         let next_segment = SegmentId::new(line.line.segment_count());
-        let slabs = build_spine(next_segment);
-        let manifest = to_line_slabs(&slabs);
+        let Ok(len) = u32::try_from(plaintext.len()) else {
+            return Err("segment exceeds u32".to_owned());
+        };
+        let mut manifest = Vec::with_capacity(before.len() + 1 + after.len());
+        manifest.extend(before.iter().map(|slab| LineSlab {
+            segment: slab.segment.get(),
+            start: slab.offset,
+            len: slab.len,
+        }));
+        manifest.push(LineSlab {
+            segment: next_segment.get(),
+            start: 0,
+            len,
+        });
+        manifest.extend(after.iter().map(|slab| LineSlab {
+            segment: slab.segment.get(),
+            start: slab.offset,
+            len: slab.len,
+        }));
         let receipt = if line.line.is_implicit_after_append(&[plaintext], &manifest) {
             line.line
                 .append_segments(&[plaintext])

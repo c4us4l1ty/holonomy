@@ -2115,7 +2115,12 @@ mod tests {
         assert!(typing.has_uncommitted_structure());
         typing.flush().expect("committed empty document");
         assert!(!typing.has_uncommitted_structure());
-        assert!(typing.sink.spines.last().expect("recorded empty").is_empty());
+        assert!(typing
+            .sink
+            .spines
+            .last()
+            .expect("recorded empty")
+            .is_empty());
     }
 
     #[test]
@@ -2136,6 +2141,11 @@ mod tests {
         );
         typing.flush().expect("flushed undone state");
         assert!(!typing.has_uncommitted_structure());
-        assert!(typing.sink.spines.last().expect("recorded empty").is_empty());
+        assert!(typing
+            .sink
+            .spines
+            .last()
+            .expect("recorded empty")
+            .is_empty());
     }
 }

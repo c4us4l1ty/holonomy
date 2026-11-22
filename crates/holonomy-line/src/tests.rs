@@ -779,7 +779,7 @@ fn incomplete_tail_recovers_to_last_witness_then_is_removed_on_append() {
         &line.last_witness_tag,
         &orphan.tag,
         &prospective_mmr,
-        &[],
+        None,
     )
     .unwrap();
     let orphan_bytes = orphan.frame.len() as u64 + 23;

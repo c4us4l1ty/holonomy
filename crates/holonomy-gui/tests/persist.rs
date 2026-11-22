@@ -494,7 +494,10 @@ fn nfc_and_nfd_passphrases_open_the_same_document_and_compaction_purges_deleted_
     // Reopen with the canonically equivalent NFC spelling (OQ-28).
     let reopened = Document::open(&source_path.0, nfc).expect("NFC opens NFD-created document");
     assert_eq!(
-        reopened.verify().expect("verifies").plaintext_bytes_verified,
+        reopened
+            .verify()
+            .expect("verifies")
+            .plaintext_bytes_verified,
         35,
         "before compaction, the deleted prefix still lives in the append-only segment"
     );
