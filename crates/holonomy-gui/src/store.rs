@@ -113,7 +113,7 @@ pub struct Document {
 
 struct Line {
     path: PathBuf,
-    line: WorldLine<'static>,
+    line: WorldLine,
     /// The key the world-line borrows; see the module note on why it is leaked.
     #[allow(dead_code)]
     key: &'static DEMKey,
@@ -276,7 +276,7 @@ impl Document {
 /// `hello `, and the session reads `hello world` while this reloads `worldhello `. The tests in
 /// `holonomy-gui/tests/persist.rs` assert that, so the day a structural record exists the change is
 /// visible rather than silent. Do not "fix" this here — the missing information is in the format.
-fn spine_of(line: &WorldLine<'_>) -> Spine {
+fn spine_of(line: &WorldLine) -> Spine {
     Spine::from_slabs(
         line.document_order()
             .into_iter()

@@ -24,3 +24,4 @@ libc.workspace = true
 holonomy-line = { path = "../holonomy-line" }
 # The passphrase, the capsule and the DEM key the segments are sealed with.
 holonomy-seal = { path = "../holonomy-seal" }
+zeroize = { workspace = true }

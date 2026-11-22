@@ -50,7 +50,7 @@ fn material(passphrase: &[u8], salt: [u8; 64]) -> (Capsule, DEMKey) {
     create_capsule_for(keys.unwrap_key(), None).expect("a capsule")
 }
 
-fn create_line<'key>(path: &Temp, capsule: Capsule, dem: &'key DEMKey) -> WorldLine<'key> {
+fn create_line<'key>(path: &Temp, capsule: Capsule, dem: &'key DEMKey) -> WorldLine {
     let params = KdfParamsRecord {
         m_kib: 8_192,
         t: 1,
@@ -61,14 +61,14 @@ fn create_line<'key>(path: &Temp, capsule: Capsule, dem: &'key DEMKey) -> WorldL
 }
 
 /// Reads one committed segment into an editable slab, as a fault-in would.
-fn resident(line: &WorldLine<'_>, segment: u64, slack: usize) -> SlabText {
+fn resident(line: &WorldLine, segment: u64, slack: usize) -> SlabText {
     let bytes = line.open_segment(segment).expect("committed").to_vec();
     SlabText::from_plaintext(bytes, slack).expect("the segment is text")
 }
 
 /// The world-line as the commit boundary sees it.
 struct LineSink<'a, 'key> {
-    line: &'a mut WorldLine<'key>,
+    line: &'a mut WorldLine,
 }
 
 impl SegmentSink for LineSink<'_, '_> {
@@ -89,7 +89,7 @@ impl SegmentSink for LineSink<'_, '_> {
 
 /// The world-line as the resident set sees it.
 struct LineSource<'a, 'key> {
-    line: &'a WorldLine<'key>,
+    line: &'a WorldLine,
 }
 
 impl SegmentSource for LineSource<'_, '_> {
