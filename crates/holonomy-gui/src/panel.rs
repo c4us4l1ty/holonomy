@@ -56,12 +56,25 @@ impl Facts {
         document: &Document,
         verified_segments: Option<u64>,
     ) -> Self {
+        Self::gather_with(residency, document, probe_capability(), verified_segments)
+    }
+
+    /// Assembles the facts from the live resident set, the live document and a previously probed
+    /// lock capability, so an open security panel refreshes live counts without re-probing `mlock`
+    /// on idle ticks (L-5).
+    #[must_use]
+    pub fn gather_with<S: SegmentSource>(
+        residency: &ResidentSet<S>,
+        document: &Document,
+        capability: LockCapability,
+        verified_segments: Option<u64>,
+    ) -> Self {
         Self {
             resident_bytes: residency.resident_bytes(),
             allocated_bytes: residency.allocated_bytes(),
             budget_bytes: residency.budget_bytes(),
             resident_segments: residency.resident_segments(),
-            capability: probe_capability(),
+            capability,
             segments: document.segment_count(),
             witnesses: document.witness_count(),
             recovered_bytes: document.trailing_bytes(),

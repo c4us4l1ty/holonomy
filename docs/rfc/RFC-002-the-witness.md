@@ -47,34 +47,43 @@ of sealed slabs*.
    authenticated header, record metadata, and witness chain (but still seeks over segment bodies)
    so same-length metadata edits cannot turn a save into a newly unreadable log.
 5. **Open**: read the fixed header, segment metadata, and authenticated witnesses; seek over
-   segment ciphertext bodies. Verify the witness chain and MMR roots, then hand segment
-   descriptors to the Spine. Opening never bulk-reads or decrypts segment bodies (L-3's cost
-   model). The current implementation scans all record metadata and witness frames; its work
-   is O(number of records), not O(document plaintext bytes).
+   segment ciphertext bodies and superseded spine manifests, opening only the active manifest
+   referenced by the final witness when one exists. Verify the witness chain and MMR roots, then
+   hand active `LineSlab` spans to the Spine. Opening never bulk-reads or decrypts segment bodies
+   (L-3's cost model). The current implementation scans all record metadata and witness frames;
+   its work is O(number of records + active manifest slabs), not O(document plaintext bytes).
 6. **Envelope↔line handshake**: every witness authenticates a fingerprint of the complete
    header epoch (file ID, KDF record, salt, and capsule). A capsule replayed across files or
    epochs cannot open the existing witness chain (RFC-001 A4 rollback case).
-7. **Compaction**: explicit only. The caller selects the history to retain, supplies a new
-   header/key pair, and consumes a file-scoped approval minted by `holonomy-seal` only after
-   re-entering and re-deriving the passphrase. Compaction writes and verifies a same-directory
-   staging file, then publishes it with a no-replace link and directory sync; failure leaves the
-   source untouched and cleans the staging path best-effort. Creation and compaction tests assert
-   that a pre-existing destination is preserved. It re-bases the new witness chain and never runs
-   automatically. Cloud mirrors may still retain the pre-compaction file and its history; users
-   must prune those copies separately (AUDIT OQ-2).
+7. **Compaction**: explicit only (`WorldLine::compact_to`, `WorldLine::compact_active_to`, and CLI
+   `holonomy compact <src> <dst>`). The caller supplies a new header/key pair and consumes a
+   file-scoped approval minted by `holonomy-seal` only after re-entering and re-deriving the
+   passphrase. Compaction writes and verifies a same-directory staging file (keeping at most one
+   source segment's plaintext resident at a time), then publishes it with a no-replace link and
+   directory sync; failure leaves the source untouched and cleans the staging path best-effort.
+   Creation and compaction tests assert that a pre-existing destination is preserved. It re-bases
+   the new witness chain and never runs automatically. Cloud mirrors may still retain the
+   pre-compaction file and its history; users must prune those copies separately (AUDIT OQ-2).
 
-## Wire shape (version 1)
+## Wire shape (versions 1 and 2)
 
 - The fixed header carries magic/version, a random 128-bit file ID, the fenced KDF record, a
   64-byte salt, and the fixed-size capsule. The KDF record is rejected before Argon2 unless
   memory is within the 64–256 MiB fence, rounded to a 4 MiB step, and time/lanes match the
   calibrated v1 schedule. `ParamsClass::Test` is not a valid production header.
-- Every record has a bounded frame header and one of two types: sealed segment or sealed
-  witness. Segment ciphertext is at most 64 KiB plus the AEAD tag. Witness plaintext stores
-  the MMR peaks, allowing the root and count to be recomputed without a growing witness body.
+- Every record has a bounded frame header and one of three types: sealed segment (`1`), sealed
+  witness (`2`), or sealed spine manifest (`3`, `RECORD_MANIFEST`). Segment ciphertext is at most
+  64 KiB plus the AEAD tag. An append-only world-line writes version-1 witnesses (MMR peaks only,
+  zero manifest overhead). Once a structural edit (mid-segment split, insertion before the end, or
+  deletion across sealed text) is committed, version-2 witnesses append a 44-byte `ManifestRef`
+  (`sequence`, `ciphertext_len`, `tag`) naming the active `RECORD_MANIFEST` of `(segment, start,
+  len)` spans — or zero spans when the entire document has been deleted (`OQ-29`, `OQ-30`).
+- Once a manifest is active on a world-line, every subsequent witness must carry a `ManifestRef`
+  so an unreferenced version-1 witness cannot strip a prior cut or deletion.
 - The segment MMR leaf commits to file/epoch IDs, sequence, nonce, ciphertext length,
   predecessor tag, and CMT-4 tag. CMT-4 then authenticates the ciphertext when that segment is
-  faulted in or during full `verify`.
+  faulted in or during full `verify` (which also authenticates historical manifests against the
+  segment bounds at their commit points).
 - Mutating storage currently requires Unix directory-sync and advisory-lock primitives. Other
   targets return `UnsupportedDurability` for creation/appends instead of claiming L-6 without
   an implemented durable commit path.

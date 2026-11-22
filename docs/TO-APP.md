@@ -228,36 +228,18 @@ bytes past the last committed witness — what a kill mid-append leaves — are 
 create documents under `ParamsClass::Test`'s schedule so the suite does not spend 256 MiB per open;
 the container itself (Argon2, capsule, witness chain, `fsync`) is real in every one.
 
-**"Survive" was tested for one shape of document and no other.** Every test above types at the end
-and saves. Two added on 2026-11-21 type *before* existing text and delete *from* it, and both
-assert today's behaviour so a fix cannot arrive silently:
+**Mid-document edits, deletions, and explicit compaction are durable.** Append-only world-lines
+keep version-1 witnesses; once a cut, mid-segment insertion, or deletion across sealed text is
+saved, the world-line writes a sealed `RECORD_MANIFEST` of `(segment, start, len)` spans and a
+version-2 witness (`OQ-29`, `OQ-30`). Deletions write **zero** replacement segments, open seeks
+over all segment bodies and superseded manifests, emptying a document commits a zero-slab manifest
+so reopen yields `""`, and `holonomy compact <src> <dst>` re-confirms the passphrase and writes a
+fresh, re-keyed world-line holding only the surviving active spine (`OQ-14`). Both persistence
+invariants continue to print `HOLONOMY_PERSIST order` and `HOLONOMY_PERSIST erase` on every push.
 
-- `a_document_typed_before_its_end_reads_in_document_order_and_reopens_in_append_order` — append
-  `world`, save, put the caret at 0, type `hello `, save. The session reads `hello world`; the
-  reopen reads `worldhello `. Every segment authenticates and nothing is lost, but the file records
-  no *position*, so append order becomes document order (**OQ-29**, D-75).
-- `a_deleted_tail_is_hidden_and_returns_on_reopen` — delete the last four bytes of a saved
-  `deletable` and save. The cut writes no segment; the file still verifies; the reopen shows
-  `deletable`. A deletion lives in memory only (**OQ-30**, D-76), which is a different and worse
-  statement than OQ-14's "deleted bytes are not erased".
-
-Both print `HOLONOMY_PERSIST order` / `HOLONOMY_PERSIST erase`, grepped by a CI step and posted to
-issue #51, so the numbers are on every push. Measured on 2026-11-21 (CI run 44991335879):
-
-```text
-HOLONOMY_PERSIST order live="hello world" reopened="worldhello " segments=2 witnesses=3
-HOLONOMY_PERSIST erase live="delet" reopened="deletable" segments=1 witnesses_after_cut=2 plaintext_bytes_verified=9
-```
- **M5 is therefore not complete as stated**: "resume" holds for a document that is
-only ever appended to, and the app does not restrict a user to that. The missing piece is a
-structural record in the format, which is OQ-29 and is a `holonomy-line` change, not a window one.
-
-**Two residuals, recorded rather than hidden.** `WorldLine<'key>` borrows its `DEMKey`, so a
-`Document` that owns both would be self-referential; the key is leaked once per opened document
-(32 bytes, for the process's life, which is how long the window holds it anyway) instead of reaching
-for `unsafe` — the key's `Drop`, and its zeroizing, never runs (**OQ-27**; an owning `WorldLine`
-removes both). And the passphrase bytes typed at the prompt are zeroed after use but are a `Vec<u8>`
-that was never in a `Zeroizing`, so a copy may survive in allocator slack (**OQ-28**).
+**Both key-hygiene residuals in M5 are closed.** `WorldLine` owns its `DEMKey` directly so no key
+is leaked across document opens (`OQ-27`), and passphrase prompts pre-allocate a bounded
+`Zeroizing<Vec<u8>>` before NFC-normalizing into `holonomy_seal::PassphraseInput` (`OQ-28`).
 
 ### M6 — Chrome, honestly (Block 7 and Block 9)
 
@@ -362,16 +344,12 @@ the app opens, takes keys, and draws through `term.rs`. M4b-ii, the GPUI adapter
 environment: adding the dependency needs registry access to regenerate `Cargo.lock`, which nothing
 here has.
 
-**M5 mostly done (2026-11-21, qualified the same day).** The window is durable for a document that
-is appended to: a `.wavefunction` is created or opened under a passphrase, a seal appends and
-witnesses, `Ctrl+S` writes through, the autosave fires 1.5 s after typing stops, quitting seals what
-is open, and a run that died mid-append is recovered by discarding the bytes past the last committed
-witness and saying how many. A failed save is reported as one and exits non-zero (D-49), and the
-phrase is refused if it is empty or the tty closed before a line arrived (D-63). What the file
-does **not** record is the shape of the document: text typed before existing text reopens in save
-order (**OQ-29**), and a deletion is a memory edit that the next open undoes (**OQ-30**). Both are
-asserted by tests and printed by CI; neither is a window bug, so M5's remaining work is a format
-change.
+**M5 done (2026-11-22).** A `.wavefunction` is created or opened under an NFC-normalized
+`PassphraseInput` (`OQ-28`), `WorldLine` owns its `DEMKey` (`OQ-27`), a seal appends and witnesses,
+mid-segment insertions and deletions commit sealed `RECORD_MANIFEST` sub-segment geometry with zero
+segment rewrites (`OQ-29`, `OQ-30`), `Ctrl+S` writes through, the autosave fires 1.5 s after typing
+stops, quitting seals what is open, a failed save exits non-zero (D-49), and `holonomy verify` /
+`holonomy compact` expose full verification and passphrase-confirmed active compaction (`OQ-14`).
 
 **M6 done (2026-11-21).** `Ctrl+G` asks the document for the security panel, and every number in it
 comes from the thing it describes — the live resident set, a real `mlock` probe in this process
@@ -384,10 +362,8 @@ The distance left, plainly: the remaining gates (M7), packaging (M8), plus the G
 `gated`** — all ten read `spec`, and `xtask gates --check` fails the build if that file and
 `crates/holonomy-ledger/src/laws.rs` ever disagree.
 
-What is still not here, in the order it would meet a user: **text you delete comes back when you
-reopen the file** (OQ-30) and **text typed before existing text reopens in save order** (OQ-29) —
-both from the file having no structural record; then no GPU or font rendering (the window is a
-grid of characters, and a wide character claims one cell — OQ-25), one document at a time, the DEM
-key of each opened document leaked for the process lifetime (OQ-27), the typed passphrase zeroed
-but never held in a `Zeroizing` buffer (OQ-28), and no power-loss qualification (the L-6 rehearsal
-is an ENOSPC test and says so in its own job name).
+What is still not here, in the order it would meet a user: no GPU or font rendering (the window is
+a terminal cell grid whose wide characters use UCD 18.0.0 two-cell advances — `OQ-25` closed; RTL
+text still has no visual bidi reordering — `OQ-11`), one document at a time, deleted bytes remain
+encrypted in the append-only `.wavefunction` until explicit `holonomy compact` (`OQ-14`), and no
+power-loss qualification (the L-6 rehearsal is an ENOSPC test and says so in its own job name).

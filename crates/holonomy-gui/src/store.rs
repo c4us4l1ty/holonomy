@@ -32,9 +32,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use holonomy_line::{LineError, LineHeader, WorldLine};
+use holonomy_line::{LineError, LineHeader, LineSlab, WorldLine};
 use holonomy_seal::{
-    calibrate, create_capsule_for, generate_kdf_salt, open_capsule_for, KdfParamsRecord, MasterKeys,
+    calibrate, confirm_compaction, create_capsule_for, generate_kdf_salt, open_capsule_for,
+    KdfParamsRecord, MasterKeys, PassphraseInput,
 };
 use holonomy_text::{Appended, SegmentId, SegmentSink, SegmentSource, Slab, Spine};
 
@@ -102,6 +103,20 @@ fn map_open(error: LineError) -> StoreError {
     }
 }
 
+/// Normalizes a passphrase for document creation, mapping invalid or empty input to
+/// [`StoreError::Params`] (AUDIT OQ-28).
+fn normalize_for_create(passphrase: &[u8]) -> Result<PassphraseInput, StoreError> {
+    let text = std::str::from_utf8(passphrase).map_err(|_| StoreError::Params)?;
+    PassphraseInput::new(text).map_err(|_| StoreError::Params)
+}
+
+/// Normalizes a passphrase for document open or compaction confirmation, mapping invalid or empty
+/// input to the single coarse [`StoreError::Refused`] (AUDIT AC-3, OQ-28).
+fn normalize_for_open(passphrase: &[u8]) -> Result<PassphraseInput, StoreError> {
+    let text = std::str::from_utf8(passphrase).map_err(|_| StoreError::Refused)?;
+    PassphraseInput::new(text).map_err(|_| StoreError::Refused)
+}
+
 /// An opened world-line and the geometry it presents to a window.
 #[derive(Clone)]
 pub struct Document {
@@ -110,6 +125,7 @@ pub struct Document {
 
 struct Line {
     path: PathBuf,
+    keys: MasterKeys,
     line: WorldLine,
 }
 
@@ -118,10 +134,21 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// As [`create_with`], plus whatever the calibration refuses.
+    /// As [`Self::create_with`], plus whatever the calibration refuses.
     pub fn create(path: &Path, passphrase: &[u8]) -> Result<Self, StoreError> {
+        let input = normalize_for_create(passphrase)?;
+        Self::create_input(path, &input)
+    }
+
+    /// Creates a document from an already NFC-normalized [`PassphraseInput`], calibrating this
+    /// host's Argon2 schedule first (AUDIT OQ-28).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::create_with_input`], plus whatever the calibration refuses.
+    pub fn create_input(path: &Path, passphrase: &PassphraseInput) -> Result<Self, StoreError> {
         let calibration = calibrate();
-        Self::create_with(path, passphrase, calibration.params)
+        Self::create_with_input(path, passphrase, calibration.params)
     }
 
     /// Creates a document under an explicit key schedule.
@@ -133,14 +160,31 @@ impl Document {
     /// # Errors
     ///
     /// [`StoreError::Io`] if the path cannot hold a new file (it never replaces one), and
-    /// [`StoreError::Params`] if the schedule is refused.
+    /// [`StoreError::Params`] if the schedule or passphrase is refused.
     pub fn create_with(
         path: &Path,
         passphrase: &[u8],
         params: KdfParamsRecord,
     ) -> Result<Self, StoreError> {
+        let input = normalize_for_create(passphrase)?;
+        Self::create_with_input(path, &input, params)
+    }
+
+    /// Creates a document under an explicit key schedule from an already NFC-normalized
+    /// [`PassphraseInput`].
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Io`] if the path cannot hold a new file, and [`StoreError::Params`] if the
+    /// schedule is refused.
+    pub fn create_with_input(
+        path: &Path,
+        passphrase: &PassphraseInput,
+        params: KdfParamsRecord,
+    ) -> Result<Self, StoreError> {
         let salt = generate_kdf_salt().map_err(|_| StoreError::Params)?;
-        let keys = MasterKeys::derive_with(passphrase, &salt, None, &params)
+        let keys = passphrase
+            .with_bytes(|bytes| MasterKeys::derive_with(bytes, &salt, None, &params))
             .map_err(|_| StoreError::Params)?;
         let (capsule, dem) =
             create_capsule_for(keys.unwrap_key(), None).map_err(|_| StoreError::Params)?;
@@ -150,6 +194,7 @@ impl Document {
         Ok(Self {
             line: Rc::new(RefCell::new(Line {
                 path: path.to_path_buf(),
+                keys,
                 line,
             })),
         })
@@ -157,16 +202,30 @@ impl Document {
 
     /// Opens an existing document.
     ///
-    /// Reads the public header only, replays the recorded key schedule against the passphrase, and
-    /// asks the capsule for the DEM key before the world-line authenticates a byte.
+    /// Reads the public header only, NFC-normalizes the passphrase, replays the recorded key
+    /// schedule, and asks the capsule for the DEM key before the world-line authenticates a byte.
     ///
     /// # Errors
     ///
     /// [`StoreError::Refused`] for a wrong passphrase or an altered file — one answer for both,
     /// on purpose — and [`StoreError::Io`] if the file cannot be read.
     pub fn open(path: &Path, passphrase: &[u8]) -> Result<Self, StoreError> {
+        let input = normalize_for_open(passphrase)?;
+        Self::open_input(path, &input)
+    }
+
+    /// Opens an existing document from an already NFC-normalized [`PassphraseInput`] (AUDIT OQ-28).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Refused`] for a wrong passphrase or an altered file, and [`StoreError::Io`]
+    /// if the file cannot be read.
+    pub fn open_input(path: &Path, passphrase: &PassphraseInput) -> Result<Self, StoreError> {
         let header = LineHeader::read(path).map_err(map_open)?;
-        let keys = MasterKeys::derive_with(passphrase, &header.salt, None, &header.kdf_params)
+        let keys = passphrase
+            .with_bytes(|bytes| {
+                MasterKeys::derive_with(bytes, &header.salt, None, &header.kdf_params)
+            })
             .map_err(|_| StoreError::Refused)?;
         let dem = open_capsule_for(keys.unwrap_key(), &header.capsule, None)
             .map_err(|_| StoreError::Refused)?;
@@ -174,6 +233,7 @@ impl Document {
         Ok(Self {
             line: Rc::new(RefCell::new(Line {
                 path: path.to_path_buf(),
+                keys,
                 line,
             })),
         })
@@ -204,11 +264,9 @@ impl Document {
         self.line.borrow().line.recovery_info().trailing_bytes
     }
 
-    /// The document's geometry: one slab per committed segment, its length taken from the
-    /// authenticated record header. No plaintext is read.
-    ///
-    /// Read [`spine_of`]'s note before relying on this: the geometry is *file* order, which is
-    /// document order only for a document that was never edited before its end (OQ-29).
+    /// The document's geometry: one slab per active segment span, taken from the authenticated
+    /// spine manifest (or implicit append order when no structural edit has occurred). No segment
+    /// plaintext is read (AUDIT OQ-29, OQ-30).
     ///
     /// # Errors
     ///
@@ -240,6 +298,79 @@ impl Document {
         line.line.verify().map_err(map_open)
     }
 
+    /// Rewrites only the active document spine into a fresh, re-keyed `.wavefunction` at
+    /// `destination`, discarding deleted byte spans and superseded history after re-confirming the
+    /// passphrase (`AUDIT OQ-14`).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Refused`] if `confirmed_passphrase` does not match this document's unlocked
+    /// capability or source verification fails, [`StoreError::Io`] if `destination` already exists
+    /// or cannot be written, and [`StoreError::Line`] if `destination` is invalid.
+    pub fn compact_to(
+        &self,
+        destination: &Path,
+        confirmed_passphrase: &[u8],
+    ) -> Result<Self, StoreError> {
+        let input = normalize_for_open(confirmed_passphrase)?;
+        self.compact_to_input(destination, &input)
+    }
+
+    /// Rewrites only the active document spine into a fresh, re-keyed `.wavefunction` at
+    /// `destination` using an already NFC-normalized confirmation passphrase (`AUDIT OQ-14`,
+    /// `OQ-28`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::compact_to`].
+    pub fn compact_to_input(
+        &self,
+        destination: &Path,
+        confirmed_passphrase: &PassphraseInput,
+    ) -> Result<Self, StoreError> {
+        let line = self
+            .line
+            .try_borrow()
+            .map_err(|_| StoreError::Line("the document is busy".to_owned()))?;
+        let header = line.line.header();
+        let approval = confirmed_passphrase
+            .with_bytes(|bytes| {
+                confirm_compaction(
+                    bytes,
+                    &header.salt,
+                    None,
+                    &header.kdf_params,
+                    line.keys.unwrap_key(),
+                    header.file_id(),
+                )
+            })
+            .map_err(|_| StoreError::Refused)?;
+        let new_salt = generate_kdf_salt().map_err(|_| StoreError::Params)?;
+        let new_keys = confirmed_passphrase
+            .with_bytes(|bytes| MasterKeys::derive_with(bytes, &new_salt, None, &header.kdf_params))
+            .map_err(|_| StoreError::Params)?;
+        let (new_capsule, new_dem) =
+            create_capsule_for(new_keys.unwrap_key(), None).map_err(|_| StoreError::Params)?;
+        let new_header = LineHeader::new(header.kdf_params, new_salt, new_capsule)
+            .map_err(|error| StoreError::Line(error.to_string()))?;
+        let compacted =
+            line.line
+                .compact_active_to(destination, new_header, &new_dem, approval)
+                .map_err(|error| match error {
+                    LineError::Io(io_err) => StoreError::Io(io_err),
+                    LineError::CompactionConfirmationRequired
+                    | LineError::AuthenticationRejected => StoreError::Refused,
+                    other => StoreError::Line(other.to_string()),
+                })?;
+        Ok(Self {
+            line: Rc::new(RefCell::new(Line {
+                path: destination.to_path_buf(),
+                keys: new_keys,
+                line: compacted,
+            })),
+        })
+    }
+
     /// The sink half of the document, for a session that seals leaves into it.
     #[must_use]
     pub fn sink(&self) -> DocumentSink {
@@ -253,19 +384,31 @@ impl Document {
     }
 }
 
-/// The spine a world-line presents: one slab per segment, in authenticated document order (OQ-29).
+/// The spine a world-line presents: one [`Slab`] per active [`LineSlab`], in authenticated
+/// document order (AUDIT OQ-29, OQ-30).
 ///
-/// A witness carries the order of sealed segment ids when it differs from append order; a file
-/// written before that feature falls back to append order, which is correct for a document that
-/// was only ever appended to. Each slab spans the whole retained segment, so a leaf split by a
-/// caret move is recorded once by its id rather than once per fragment.
+/// An append-only world-line presents its implicit full-segment slabs; a world-line with a
+/// committed manifest presents its exact sub-segment spans (or zero slabs when the document was
+/// emptied).
 fn spine_of(line: &WorldLine) -> Spine {
     Spine::from_slabs(
-        line.document_order()
+        line.document_slabs()
             .into_iter()
-            .map(|(seq, length)| Slab::new(SegmentId::new(u64::from(seq)), 0, length))
+            .map(|slab| Slab::new(SegmentId::new(slab.segment), slab.start, slab.len))
             .collect::<Vec<_>>(),
     )
+}
+
+/// Converts a text-layer [`Slab`] slice into container [`LineSlab`] records.
+fn to_line_slabs(slabs: &[Slab]) -> Vec<LineSlab> {
+    slabs
+        .iter()
+        .map(|slab| LineSlab {
+            segment: slab.segment().get(),
+            start: slab.start(),
+            len: slab.len(),
+        })
+        .collect()
 }
 
 /// Appends one sealed leaf per call — the sink half of a [`Document`].
@@ -290,32 +433,52 @@ impl SegmentSink for DocumentSink {
         })
     }
 
-    fn document_order(&mut self, order: &[SegmentId]) -> Result<(), String> {
+    fn append_segment_with_spine(
+        &mut self,
+        plaintext: &[u8],
+        before: &[Slab],
+        after: &[Slab],
+    ) -> Result<Appended, String> {
         let mut line = self.0.line.borrow_mut();
-        let desired: Vec<u32> = order
-            .iter()
-            .map(|id| u32::try_from(id.get()).unwrap_or(u32::MAX))
-            .collect();
-        // A file with no committed order reads in append order. Do not spend a witness on an
-        // append-only document: its order is already implicit in the segment sequence.
-        let current: Vec<u32> = {
-            let committed = line.line.document_order();
-            if committed.is_empty() {
-                (0..u32::try_from(line.line.segment_count()).unwrap_or(u32::MAX)).collect()
-            } else {
-                committed.into_iter().map(|(id, _)| id).collect()
-            }
+        let next_segment = SegmentId::new(line.line.segment_count());
+        let Ok(len) = u32::try_from(plaintext.len()) else {
+            return Err("segment exceeds u32".to_owned());
         };
-        if desired == current {
+        let mut manifest = Vec::with_capacity(before.len() + 1 + after.len());
+        manifest.extend(to_line_slabs(before));
+        manifest.push(LineSlab {
+            segment: next_segment.get(),
+            start: 0,
+            len,
+        });
+        manifest.extend(to_line_slabs(after));
+        let receipt = if line.line.is_implicit_after_append(&[plaintext], &manifest) {
+            line.line
+                .append_segments(&[plaintext])
+                .map_err(|error| error.to_string())?
+        } else {
+            line.line
+                .append_segments_with_manifest(&[plaintext], &manifest)
+                .map_err(|error| error.to_string())?
+        };
+        Ok(Appended {
+            segment: next_segment,
+            witness_sequence: receipt.witness_sequence,
+            segment_root: receipt.segment_root,
+            bytes_written: receipt.bytes_appended,
+        })
+    }
+
+    fn commit_spine(&mut self, slabs: &[Slab]) -> Result<(), String> {
+        let mut line = self.0.line.borrow_mut();
+        let desired = to_line_slabs(slabs);
+        if desired == line.line.document_slabs() {
             return Ok(());
         }
         line.line
-            .append_structure(&desired)
+            .commit_manifest(&desired)
+            .map(|_| ())
             .map_err(|error| error.to_string())
-    }
-
-    fn load_segment(&mut self, segment: SegmentId) -> Result<Option<Vec<u8>>, String> {
-        self.0.source().load(segment).map(Some)
     }
 }
 

@@ -415,6 +415,21 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Ok(())
     }
 
+    /// Discards cached leaf heights when a deletion, undo, or redo swaps the spine root, even when
+    /// the leaf count happens to stay the same (for example, trimming the tail of a single leaf).
+    /// In-buffer edits keep the same [`holonomy_text::Spine`] `Arc`, so they remain O(1).
+    fn invalidate_after_cut_or_restore(&mut self, before: &holonomy_text::Spine) {
+        if !self.typing.spine().ptr_eq(before) {
+            let leaves = self.typing.spine().slab_count() as usize;
+            self.measured = Measured::new(leaves);
+            self.len_synced = self.typing.spine().len();
+            self.tail = None;
+            if self.typing.document_len() == 0 {
+                self.scroll = Fixed::ZERO;
+            }
+        }
+    }
+
     /// Deletes the selection, reporting whether there was one.
     ///
     /// # Errors
@@ -425,7 +440,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         if start >= end {
             return Ok(false);
         }
+        let before = self.typing.spine().clone();
         self.typing.delete(start, end)?;
+        self.invalidate_after_cut_or_restore(&before);
         self.selection = Selection::caret(start);
         Ok(true)
     }
@@ -447,7 +464,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let Some(start) = self.cluster_before(caret)? else {
             return Ok(false);
         };
+        let before = self.typing.spine().clone();
         self.typing.delete(start, caret)?;
+        self.invalidate_after_cut_or_restore(&before);
         self.selection = Selection::caret(start);
         Ok(true)
     }
@@ -465,7 +484,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let Some(end) = self.cluster_after(caret)? else {
             return Ok(false);
         };
+        let before = self.typing.spine().clone();
         self.typing.delete(caret, end)?;
+        self.invalidate_after_cut_or_restore(&before);
         self.selection = Selection::caret(caret);
         Ok(true)
     }
@@ -539,8 +560,10 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     ///
     /// As [`Typing::undo`].
     pub fn undo(&mut self) -> Result<bool, ShellError> {
+        let before = self.typing.spine().clone();
         let undone = self.typing.undo()?;
         if undone {
+            self.invalidate_after_cut_or_restore(&before);
             self.selection = Selection::caret(self.typing.caret());
         }
         Ok(undone)
@@ -552,8 +575,10 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     ///
     /// As [`Typing::redo`].
     pub fn redo(&mut self) -> Result<bool, ShellError> {
+        let before = self.typing.spine().clone();
         let redone = self.typing.redo()?;
         if redone {
+            self.invalidate_after_cut_or_restore(&before);
             self.selection = Selection::caret(self.typing.caret());
         }
         Ok(redone)
@@ -1191,6 +1216,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// the geometry had to be guessed.
     fn choose_window(&mut self) -> Result<(u64, u64, Window, bool), ShellError> {
         if self.measured.is_empty() {
+            self.scroll = Fixed::ZERO;
             return Ok((0, 0, Window::empty(), false));
         }
         if self.measured.total() <= Fixed::ZERO {
@@ -1232,6 +1258,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             if height >= self.viewport {
                 break;
             }
+        }
+        if leaf == leaves {
+            self.scroll_to(self.scroll);
         }
         let window = ShapedWindow::leaves_of(self.typing.spine(), 0, leaf);
         Ok((window.start(), window.end(), window.leaves(), true))

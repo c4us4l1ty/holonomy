@@ -32,6 +32,9 @@ use holonomy_gui::panel::Facts;
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
+use holonomy_seal::{
+    probe_capability, LockCapability, PassphraseInput, MAX_PASSPHRASE_INPUT_BYTES,
+};
 use holonomy_shell::Editor;
 use holonomy_shell::Effect;
 use holonomy_text::{ResidentSet, Typing};
@@ -117,49 +120,122 @@ fn readable(millis: i32) -> bool {
     }
 }
 
-/// Asks for the passphrase with echo off, and returns what was typed.
-///
-/// Raw mode already turned echo off for the whole session, so this only has to collect bytes and
-/// answer the line and backspace keys. Nothing is echoed, which is the point.
-fn prompt(verb: &str, path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
-    let mut stdout = std::io::stdout();
-    write!(stdout, "{} {} (passphrase): ", verb, path.display())?;
-    stdout.flush()?;
-    let mut stdin = std::io::stdin();
-    let mut phrase = Vec::new();
+/// Turns terminal echo off for a one-line prompt when `stdin` is a tty, without clearing the
+/// screen on drop (used by `verify` and `compact`).
+struct EchoGuard {
+    saved: Option<libc::termios>,
+}
+
+impl EchoGuard {
+    fn acquire() -> std::io::Result<Self> {
+        // SAFETY: `isatty`/`tcgetattr`/`tcsetattr` operate on `STDIN_FILENO` with a zeroed local
+        // `termios`.
+        unsafe {
+            if libc::isatty(libc::STDIN_FILENO) == 0 {
+                return Ok(Self { saved: None });
+            }
+            let mut current: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut current) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let saved = current;
+            current.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+            current.c_iflag &= !libc::ICRNL;
+            current.c_cc[libc::VMIN] = 1;
+            current.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &current) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self { saved: Some(saved) })
+        }
+    }
+}
+
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        if let Some(saved) = &self.saved {
+            // SAFETY: restoring the exact `termios` captured in `acquire`.
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, saved);
+            }
+        }
+    }
+}
+
+/// Removes one UTF-8 scalar value from the tail of a raw input buffer, so Backspace on a
+/// multi-byte character never leaves orphaned continuation bytes behind.
+fn pop_utf8_scalar(buffer: &mut Vec<u8>) {
+    while let Some(byte) = buffer.pop() {
+        if (byte & 0b1100_0000) != 0b1000_0000 {
+            break;
+        }
+    }
+}
+
+/// Reads and NFC-normalizes a passphrase from `reader` into a [`PassphraseInput`] without heap
+/// reallocation (`AUDIT OQ-28`).
+fn read_passphrase_from(
+    reader: &mut impl Read,
+    echo_newline: Option<&mut dyn Write>,
+) -> std::io::Result<PassphraseInput> {
+    let mut phrase = Zeroizing::new(Vec::with_capacity(MAX_PASSPHRASE_INPUT_BYTES));
     let mut byte = [0u8; 1];
     loop {
-        if stdin.read(&mut byte)? == 0 {
-            // D-63: end of input is not an empty passphrase. `Ctrl+D` at a terminal, or a tty that
-            // went away, used to fall through here and hand `create`/`open` an empty phrase — which
-            // nothing downstream refuses, so the document was made and reported as saved while
-            // being protected by nothing at all. The read returning zero means the user did not
-            // finish the sentence the prompt asked for.
-            writeln!(stdout)?;
+        if reader.read(&mut byte)? == 0 {
+            // D-63: end of input is not an empty passphrase.
+            if let Some(out) = echo_newline {
+                writeln!(out)?;
+            }
             return Err(std::io::Error::other(
                 "the passphrase was not completed (end of input)",
             ));
         }
         match byte[0] {
             b'\r' | b'\n' => break,
-            0x7f | 0x08 => {
-                phrase.pop();
-            }
+            0x7f | 0x08 => pop_utf8_scalar(&mut phrase),
             0x03 => {
-                writeln!(stdout)?;
+                if let Some(out) = echo_newline {
+                    writeln!(out)?;
+                }
                 return Err(std::io::Error::other("cancelled at the passphrase"));
             }
-            byte => phrase.push(byte),
+            next => {
+                if phrase.len() >= MAX_PASSPHRASE_INPUT_BYTES {
+                    if let Some(out) = echo_newline {
+                        writeln!(out)?;
+                    }
+                    return Err(std::io::Error::other(
+                        "the passphrase exceeds the input byte limit",
+                    ));
+                }
+                phrase.push(next);
+            }
         }
     }
-    writeln!(stdout)?;
-    stdout.flush()?;
-    if phrase.is_empty() {
-        // The same rule as end-of-input, for the same reason: a file protected by nothing looks
-        // exactly like a file protected by something until the day it matters.
-        return Err(std::io::Error::other("the passphrase was empty"));
+    if let Some(out) = echo_newline {
+        writeln!(out)?;
+        out.flush()?;
     }
-    Ok(Zeroizing::new(phrase))
+    let raw = std::str::from_utf8(&phrase)
+        .map_err(|_| std::io::Error::other("the passphrase is not valid UTF-8"))?;
+    PassphraseInput::new(raw).map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+/// Asks for the passphrase with echo off, and returns an NFC-normalized [`PassphraseInput`] whose
+/// raw and normalized buffers are both pre-allocated and zeroized on drop (`AUDIT OQ-28`).
+fn prompt(verb: &str, path: &Path) -> std::io::Result<PassphraseInput> {
+    let mut stdout = std::io::stdout();
+    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
+    if is_tty {
+        write!(stdout, "{} {} (passphrase): ", verb, path.display())?;
+        stdout.flush()?;
+    }
+    let mut stdin = std::io::stdin();
+    if is_tty {
+        read_passphrase_from(&mut stdin, Some(&mut stdout))
+    } else {
+        read_passphrase_from(&mut stdin, None)
+    }
 }
 
 /// Builds the window over a document, with the file's own geometry.
@@ -295,7 +371,7 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
     let mut decoder = Decoder::new();
     let mut bytes = [0u8; 256];
     let mut message = String::new();
-    let mut panel: Option<Vec<String>> = None;
+    let mut panel: Option<(LockCapability, Option<u64>)> = None;
     print!("\x1b[?25l\x1b[2J");
     // What the screen currently shows, so an unchanged view is not written again (D-68).
     // `None` means "nothing has been written yet", which is what makes the first pass paint.
@@ -304,8 +380,12 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
         let (now_columns, now_rows) = size();
         // The panel gives way, never the surface: `1 + panel + 1` lines that do not fit make the
         // terminal scroll, and then the caret the renderer places is a row off (D-48).
-        let panel_lines = term::panel_fits(&panel.clone().unwrap_or_default(), now_rows);
-        let surface_rows = now_rows.saturating_sub(1 + panel_lines.len()).max(1);
+        let panel_room = if panel.is_some() {
+            now_rows.saturating_sub(2).min(4)
+        } else {
+            0
+        };
+        let surface_rows = now_rows.saturating_sub(1 + panel_room).max(1);
         app.surface_mut().resize(now_columns, surface_rows);
         app.resize(
             Fixed::units(now_columns as i64),
@@ -319,6 +399,13 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
         // clears `has_pending`, a keystroke can move the caret over unchanged text, and Ctrl+G
         // swaps the panel.
         let repainted = app.draw()?;
+        let panel_lines = match panel {
+            Some((capability, verified)) => {
+                let facts = Facts::gather_with(app.residency(), document, capability, verified);
+                term::panel_fits(&facts.lines(), now_rows)
+            }
+            None => Vec::new(),
+        };
         let line = status(
             path,
             document,
@@ -326,7 +413,10 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
             app.has_pending(),
             message.as_str(),
         );
-        let caret = app.surface().caret_cell();
+        let caret = app
+            .surface()
+            .caret_cell()
+            .filter(|&(_, row)| row < surface_rows);
         // The terminal's own size is part of what is on screen: a taller window with the same
         // width repaints no cell and would otherwise never be filled at its new height.
         let size_now = (now_columns, surface_rows);
@@ -345,6 +435,8 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
             )?;
             if let Some((column, row)) = caret {
                 write!(stdout, "\x1b[?25h\x1b[{};{}H", row + 1, column + 1)?;
+            } else {
+                write!(stdout, "\x1b[?25l")?;
             }
             stdout.flush()?;
             shown = Some((size_now, line, caret, panel_lines.clone()));
@@ -401,7 +493,7 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
                                 .verify()
                                 .ok()
                                 .map(|report| report.segments_verified);
-                            Some(Facts::gather(app.residency(), document, verified).lines())
+                            Some((probe_capability(), verified))
                         };
                         continue;
                     }
@@ -435,60 +527,126 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
     })
 }
 
+fn usage_text() -> &'static str {
+    concat!(
+        "usage:\n",
+        "  holonomy <document.wavefunction>\n",
+        "  holonomy verify <document.wavefunction>\n",
+        "  holonomy compact <source.wavefunction> <destination.wavefunction>\n",
+        "  the file is created if it does not exist, opened if it does"
+    )
+}
+
+fn run_verify(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let _echo = EchoGuard::acquire()?;
+    let passphrase = prompt("verify", path)?;
+    let document = Document::open_input(path, &passphrase)?;
+    drop(passphrase);
+    let report = document.verify()?;
+    println!(
+        "{}: verified ({} segments, {} witnesses, {} plaintext bytes)",
+        path.display(),
+        report.segments_verified,
+        report.witnesses_verified,
+        report.plaintext_bytes_verified,
+    );
+    Ok(())
+}
+
+fn run_compact(source: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let _echo = EchoGuard::acquire()?;
+    let open_passphrase = prompt("open", source)?;
+    let document = Document::open_input(source, &open_passphrase)?;
+    drop(open_passphrase);
+    let confirm_passphrase = prompt("confirm compaction into", destination)?;
+    let compacted = document.compact_to_input(destination, &confirm_passphrase)?;
+    drop(confirm_passphrase);
+    let report = compacted.verify()?;
+    println!(
+        "{}: compacted from {} ({} segments, {} witnesses, {} plaintext bytes)",
+        destination.display(),
+        source.display(),
+        report.segments_verified,
+        report.witnesses_verified,
+        report.plaintext_bytes_verified,
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A window needs a terminal; saying so is better than a stack of escape sequences in a pipe.
-    let mut args = std::env::args().skip(1);
-    let Some(path) = args.next().map(PathBuf::from) else {
-        eprintln!("usage: holonomy <document.wavefunction>");
-        eprintln!("  the file is created if it does not exist, opened if it does");
-        std::process::exit(2);
-    };
-    let raw = RawMode::enable()?;
-    let existing = path.exists();
-    let passphrase: Zeroizing<Vec<u8>> = prompt(if existing { "open" } else { "create" }, &path)?;
-    let document = if existing {
-        Document::open(&path, &passphrase)?
-    } else {
-        Document::create(&path, &passphrase)?
-    };
-    let started = document.trailing_bytes();
-    // Best effort: the phrase is the caller's, and this is the last moment it is needed. The
-    // derived keys live in the document and wipe themselves; the bytes typed do not, yet (OQ-5's
-    // neighbour, recorded as OQ-28).
-    // OQ-28: Zeroizing<Vec<u8>> wipes on Drop; manual zero is redundant but kept as defence.
-    let mut passphrase = passphrase;
-    passphrase.iter_mut().for_each(|byte| *byte = 0);
-    let outcome = run(&path, &document);
-    let segments = document.segment_count();
-    let witnesses = document.witness_count();
-    drop(raw);
-    if started != 0 {
-        println!(
-            "recovered: {started} bytes past the last committed witness were discarded — \
-             a previous run died mid-append"
-        );
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => {
+            eprintln!("{}", usage_text());
+            std::process::exit(2);
+        }
+        [flag] if flag == "--help" || flag == "-h" => {
+            println!("{}", usage_text());
+            Ok(())
+        }
+        [subcommand, target] if subcommand == "verify" => {
+            let path = Path::new(target);
+            run_verify(path)
+        }
+        [subcommand, source, destination] if subcommand == "compact" => {
+            let src = Path::new(source);
+            let dst = Path::new(destination);
+            run_compact(src, dst)
+        }
+        [subcommand, ..] if subcommand == "verify" || subcommand == "compact" => {
+            eprintln!("{}", usage_text());
+            std::process::exit(2);
+        }
+        [single] => {
+            let path = PathBuf::from(single);
+            let raw = RawMode::enable()?;
+            let existing = path.exists();
+            let passphrase = prompt(if existing { "open" } else { "create" }, &path)?;
+            let document = if existing {
+                Document::open_input(&path, &passphrase)?
+            } else {
+                Document::create_input(&path, &passphrase)?
+            };
+            let started = document.trailing_bytes();
+            drop(passphrase);
+            let outcome = run(&path, &document);
+            let segments = document.segment_count();
+            let witnesses = document.witness_count();
+            drop(raw);
+            if started != 0 {
+                println!(
+                    "recovered: {started} bytes past the last committed witness were discarded — \
+                     a previous run died mid-append"
+                );
+            }
+            println!(
+                "{}",
+                closing(
+                    &path,
+                    segments,
+                    witnesses,
+                    outcome_words(
+                        outcome.is_err(),
+                        match outcome {
+                            Ok(Ended::SaveFailed) => Some(false),
+                            Ok(Ended::Saved) => Some(true),
+                            Ok(Ended::NothingToWrite) | Err(_) => None,
+                        }
+                    )
+                )
+            );
+            if matches!(outcome, Ok(Ended::SaveFailed)) {
+                // A window that could not write must not exit as though it had.
+                std::process::exit(1);
+            }
+            outcome.map(|_| ())
+        }
+        _ => {
+            eprintln!("{}", usage_text());
+            std::process::exit(2);
+        }
     }
-    println!(
-        "{}",
-        closing(
-            &path,
-            segments,
-            witnesses,
-            outcome_words(
-                outcome.is_err(),
-                match outcome {
-                    Ok(Ended::SaveFailed) => Some(false),
-                    Ok(Ended::Saved) => Some(true),
-                    Ok(Ended::NothingToWrite) | Err(_) => None,
-                }
-            )
-        )
-    );
-    if matches!(outcome, Ok(Ended::SaveFailed)) {
-        // A window that could not write must not exit as though it had.
-        std::process::exit(1);
-    }
-    outcome.map(|_| ())
 }
 
 #[cfg(test)]
@@ -562,5 +720,22 @@ mod tests {
             !unchanged(Some(&shown), false, (80, 30), &line, caret, &panel),
             "a resized terminal must be repainted at its new height"
         );
+    }
+
+    #[test]
+    fn passphrase_prompt_normalizes_nfc_and_backspaces_whole_scalars() {
+        let mut nfd = "cafe\u{0301}中\x7f!\n".as_bytes();
+        let mut nfc = "caf\u{00E9}!\n".as_bytes();
+        let parsed_nfd = read_passphrase_from(&mut nfd, None).expect("reads NFD");
+        let parsed_nfc = read_passphrase_from(&mut nfc, None).expect("reads NFC");
+        let left = parsed_nfd.with_bytes(<[u8]>::to_vec);
+        let right = parsed_nfc.with_bytes(<[u8]>::to_vec);
+        assert_eq!(left, right);
+        assert_eq!(left, "caf\u{00E9}!".as_bytes());
+
+        let mut eof = b"unterminated".as_slice();
+        assert!(read_passphrase_from(&mut eof, None).is_err());
+        let mut empty = b"\n".as_slice();
+        assert!(read_passphrase_from(&mut empty, None).is_err());
     }
 }

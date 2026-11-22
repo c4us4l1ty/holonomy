@@ -77,16 +77,12 @@ Recorded so no future version quietly upgrades these into claims:
 - Timing side channels on the KDF (wrong-passphrase latency) are bounded to a fixed cost
   profile; nothing beyond that uniformity is claimed.
 - **Undo history doubles as exposure history**: the world-line keeps old drafts by design
-  (Vision III). Opt-in compaction (RFC-002 §7) is the *designed* control over that
-  tradeoff, and it is not yet the user's: `WorldLine::compact_to` exists and is tested, but
-  nothing in the app or the shell can reach it (AUDIT OQ-14, amended 2026-11-21), so today
-  there is no way to remove a draft from a file short of rewriting it by hand.
-- **A deletion is not persisted.** A cut removes a range from the document's geometry in
-  memory and writes nothing, so the deleted text stays committed and comes back on the next
-  open (AUDIT OQ-30). This is a defect, not a tradeoff, and it is independent of whether the
-  bytes are ever erased — persisting the cut needs a structural record (OQ-29), erasing the
-  bytes needs the compaction pass above. Until both land, the app must not be read as
-  offering deletion in the sense a user means.
+  (Vision III). Deleting text and saving commits a sub-segment spine manifest (`RECORD_MANIFEST`)
+  so deleted text stays deleted on reopen (AUDIT OQ-29, OQ-30), while the old ciphertext remains
+  in the append-only `.wavefunction` until explicit compaction (`holonomy compact <src> <dst>`,
+  gated by passphrase re-confirmation via `confirm_compaction`) rewrites only the active spine
+  into a fresh, re-keyed world-line (RFC-002 §7, AUDIT OQ-14). Cloud mirrors may still retain
+  copies of the pre-compaction file.
 - A byte-perfect rollback to an earlier valid witness prefix cannot be distinguished from a
   legitimately shorter file without trusted monotonic state outside the copied `.wavefunction`.
   v6 claims integrity of the bytes present and crash consistency, not freshness against this

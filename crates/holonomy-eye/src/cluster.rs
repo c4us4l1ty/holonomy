@@ -414,6 +414,68 @@ impl<'a> Iterator for Clusters<'a> {
     }
 }
 
+/// How many terminal cells `cluster` occupies (`0` for hard line breaks and bare controls, `2`
+/// for East Asian wide/fullwidth clusters, default-emoji-presentation clusters, VS16 emoji
+/// sequences and regional-indicator flag pairs, and `1` otherwise — AUDIT OQ-25).
+///
+/// Both `holonomy_gui::term::CellShaper` and the terminal ANSI renderer consult this single
+/// function so cell-grid layout and terminal cursor columns agree by construction. UAX #11
+/// `Ambiguous` width is treated as `1` (the standard non-East-Asian recommendation).
+#[must_use]
+pub fn cluster_cells(cluster: &str) -> u8 {
+    let mut chars = cluster.chars();
+    let Some(first) = chars.next() else {
+        return 0;
+    };
+    let first_prop = property(first);
+    if first_prop.is_break() {
+        return 0;
+    }
+    let mut ri_count = u8::from(first_prop == Property::RegionalIndicator);
+    let mut has_vs15 = false;
+    let mut has_vs16 = false;
+    let mut has_keycap = false;
+    let mut wide = tables::wide(first);
+    for character in chars {
+        match character {
+            '\u{FE0E}' => {
+                has_vs15 = true;
+                has_vs16 = false;
+            }
+            '\u{FE0F}' => {
+                has_vs16 = true;
+                has_vs15 = false;
+            }
+            '\u{20E3}' => {
+                has_keycap = true;
+            }
+            _ => {
+                if property(character) == Property::RegionalIndicator {
+                    ri_count = ri_count.saturating_add(1);
+                }
+                if tables::wide(character) {
+                    wide = true;
+                }
+            }
+        }
+    }
+    if ri_count >= 2 {
+        return 2;
+    }
+    let keycap_base = matches!(first, '0'..='9' | '#' | '*');
+    if has_vs16 && (first_prop == Property::Pictographic || (has_keycap && keycap_base)) {
+        return 2;
+    }
+    if has_vs15 && first_prop == Property::Pictographic {
+        return 1;
+    }
+    if wide {
+        2
+    } else {
+        1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +693,14 @@ mod tests {
             }
             previous = Some(last);
         }
+        let mut previous_wide: Option<char> = None;
+        for &(first, last) in tables::WIDE_RANGES {
+            assert!(first <= last, "{first:?} > {last:?}");
+            if let Some(end) = previous_wide {
+                assert!(end < first, "wide ranges out of order at {first:?}");
+            }
+            previous_wide = Some(last);
+        }
     }
 
     #[test]
@@ -651,9 +721,39 @@ mod tests {
         assert_eq!(ranges(Property::HangulT), 2);
         assert_eq!(ranges(Property::Pictographic), 156);
         assert_eq!(tables::BREAK.len(), 750);
-        // The two conjunct tables are data of their own, and their sizes are pinned the same way.
+        // The two conjunct tables and the OQ-25 wide-range table are pinned the same way.
         assert_eq!(tables::INCB_CONSONANT.len(), 78);
         assert_eq!(tables::INCB_LINKER.len(), 23);
+        assert_eq!(tables::WIDE_RANGES.len(), 129);
+    }
+
+    #[test]
+    fn cluster_cells_assigns_zero_one_and_two_columns_from_the_database() {
+        assert_eq!(cluster_cells(""), 0);
+        assert_eq!(cluster_cells("\n"), 0);
+        assert_eq!(cluster_cells("\r\n"), 0);
+        assert_eq!(cluster_cells("a"), 1);
+        assert_eq!(cluster_cells("e\u{0301}"), 1);
+        assert_eq!(cluster_cells("中"), 2);
+        assert_eq!(cluster_cells("한"), 2);
+        assert_eq!(cluster_cells("\u{1100}\u{1161}\u{11A8}"), 2);
+        assert_eq!(cluster_cells("Ａ"), 2);
+        assert_eq!(cluster_cells("🙂"), 2);
+        assert_eq!(
+            cluster_cells("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            2
+        );
+        assert_eq!(cluster_cells("🇯🇵"), 2);
+        assert_eq!(cluster_cells("🇯"), 1);
+        assert_eq!(cluster_cells("\u{2764}"), 1);
+        assert_eq!(cluster_cells("\u{2764}\u{FE0F}"), 2);
+        assert_eq!(cluster_cells("\u{231A}\u{FE0E}"), 1);
+        assert_eq!(cluster_cells("1\u{FE0F}\u{20E3}"), 2);
+        assert_eq!(cluster_cells("#\u{FE0F}\u{20E3}"), 2);
+        assert_eq!(cluster_cells("1\u{20E3}"), 1);
+        assert_eq!(cluster_cells("\t"), 0);
+        assert_eq!(cluster_cells("\x1b"), 0);
+        assert_eq!(cluster_cells("\u{200B}"), 0);
     }
 
     #[test]

@@ -221,6 +221,8 @@ pub trait Surface {
     fn caret(&mut self, x: Fixed, y: Fixed, height: Fixed);
 }
 
+type CellSpan = Option<(Box<str>, usize)>;
+
 /// A surface that draws into a grid of characters: the crudest window there is, and the only one
 /// that needs no GPU.
 ///
@@ -234,6 +236,7 @@ pub struct CellSurface {
     columns: usize,
     rows: usize,
     cells: Vec<Vec<char>>,
+    spans: Vec<Vec<CellSpan>>,
     caret: Option<(usize, usize)>,
     selections: Vec<(usize, usize, usize, usize)>,
     clusters: u64,
@@ -248,6 +251,7 @@ impl CellSurface {
             columns,
             rows,
             cells: vec![vec![' '; columns]; rows],
+            spans: vec![vec![None; columns]; rows],
             caret: None,
             selections: Vec::new(),
             clusters: 0,
@@ -270,14 +274,21 @@ impl CellSurface {
     /// dragged larger.
     pub fn resize(&mut self, columns: usize, rows: usize) {
         let mut cells = vec![vec![' '; columns]; rows];
+        let mut spans = vec![vec![None; columns]; rows];
         for (row, line) in self.cells.iter().take(rows).enumerate() {
             for (column, cell) in line.iter().take(columns).enumerate() {
                 cells[row][column] = *cell;
             }
         }
+        for (row, line) in self.spans.iter().take(rows).enumerate() {
+            for (column, span) in line.iter().take(columns).enumerate() {
+                spans[row][column].clone_from(span);
+            }
+        }
         self.columns = columns;
         self.rows = rows;
         self.cells = cells;
+        self.spans = spans;
     }
 
     /// The cell a logical coordinate falls in.
@@ -321,6 +332,17 @@ impl CellSurface {
             .unwrap_or(' ')
     }
 
+    /// The full grapheme cluster anchored at `(column, row)` and its cell advance, when a cluster
+    /// was placed there (OQ-25).
+    #[must_use]
+    pub fn cluster_at(&self, column: usize, row: usize) -> Option<(&str, usize)> {
+        self.spans
+            .get(row)
+            .and_then(|line| line.get(column))
+            .and_then(|entry| entry.as_ref())
+            .map(|(text, span)| (text.as_ref(), *span))
+    }
+
     /// Whether a cell is inside a selection run.
     #[must_use]
     pub fn selected(&self, column: usize, row: usize) -> bool {
@@ -335,6 +357,9 @@ impl Surface for CellSurface {
         for line in &mut self.cells {
             line.fill(' ');
         }
+        for line in &mut self.spans {
+            line.fill(None);
+        }
         self.caret = None;
         self.selections.clear();
         self.clusters = 0;
@@ -342,16 +367,18 @@ impl Surface for CellSurface {
 
     fn size(&mut self, _width: Fixed, _height: Fixed) {}
 
-    fn cluster(&mut self, x: Fixed, y: Fixed, text: &str, _advance: Fixed, _style: Style) {
+    fn cluster(&mut self, x: Fixed, y: Fixed, text: &str, advance: Fixed, _style: Style) {
         let column = self.cell(x);
         let row = self.cell(y);
         if column >= self.columns || row >= self.rows {
             return;
         }
-        // One cell per cluster's first character: this surface shows *where* text is, not how it
-        // is hinted, and a mark with no cell of its own still occupies its base's cell.
+        // One cell per cluster's first character on `cells` for grid probes; `spans` carries the
+        // complete cluster and its cell advance so a terminal renderer emits marks and wide glyphs
+        // at their true column width (OQ-25).
         if let Some(character) = text.chars().next() {
             self.cells[row][column] = character;
+            self.spans[row][column] = Some((text.into(), self.cell(advance).max(1)));
             self.clusters += 1;
         }
     }
@@ -468,7 +495,12 @@ where
         // Decided before `intent` is moved into `apply`, which is where it is consumed.
         let moves_the_caret = matches!(
             intent,
-            Intent::Type(_) | Intent::Backspace | Intent::DeleteForward
+            Intent::Type(_)
+                | Intent::Backspace
+                | Intent::DeleteForward
+                | Intent::Move { .. }
+                | Intent::Undo
+                | Intent::Redo
         );
         let mut effects = self.editor.apply(intent)?;
         // D-53/D-57: the caret a keystroke leaves behind is the window's to keep on screen, and
@@ -483,7 +515,7 @@ where
         // performed. Best effort on the error: the edit has already landed, and a leaf the reader
         // could not lay out is the *frame's* problem — propagating it would report a keystroke that
         // reached the document as a refused edit, the same lie D-47 was about, one layer down.
-        if moves_the_caret {
+        if moves_the_caret && !effects.is_empty() {
             if let Ok(revealed) = self.editor.apply(Intent::RevealCaret) {
                 if !revealed.is_empty() && !effects.contains(&Effect::Redraw) {
                     effects.push(Effect::Redraw);
@@ -553,14 +585,17 @@ where
         self.editor.document_len()
     }
 
-    /// Whether the document holds bytes the file does not have yet — what "unsaved" means.
+    /// Whether the document holds bytes or structural edits the file does not have yet — what
+    /// "unsaved" means.
     ///
     /// This is read from the session, not remembered in a flag: a caret move **seals** the open
-    /// leaf, so an arrow key commits what was typed, and a window that tracked "unsaved" itself
-    /// said the opposite of the truth about bytes that already had a witness (D-47).
+    /// leaf, so an arrow key commits what was typed, while a deletion across sealed text or an
+    /// undo of a sealed root keeps the session dirty until a flush commits its spine manifest
+    /// (D-47, OQ-30).
     #[must_use]
     pub fn has_pending(&self) -> bool {
         !self.editor.typing().pending().is_empty()
+            || self.editor.typing().has_uncommitted_structure()
     }
 
     /// The selection, as ordered ends, when it is not empty.

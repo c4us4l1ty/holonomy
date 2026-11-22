@@ -241,3 +241,101 @@ fn a_page_is_the_screen_the_window_is_showing_now() {
         window.editor().viewport().sixtyfourths()
     );
 }
+
+#[test]
+fn wide_characters_and_combining_marks_agree_with_terminal_columns() {
+    // OQ-25: `中` occupies two terminal cells, `e\u{0301}` occupies one while retaining its mark,
+    // and `a` occupies one — total four cells, placing the ANSI cursor at 1-based column 5.
+    let mut window = window();
+    type_bytes(&mut window, "中e\u{0301}a".as_bytes());
+    window.draw().expect("drew");
+    let drawn = screen(window.surface(), COLUMNS, " 笔记.wavefunction ");
+    assert!(
+        drawn.contains("中e\u{0301}a\x1b[K\r\n"),
+        "wide glyph or combining mark was mangled or padded with a stray cell:\n{drawn:?}"
+    );
+    assert!(
+        drawn.contains("\x1b[1;5H"),
+        "caret must sit at column 5 after 2 + 1 + 1 cells:\n{drawn:?}"
+    );
+
+    // Truncating a wide status line to 5 columns keeps ` 笔记` (1 + 2 + 2 = 5 cells) rather than
+    // counting characters and overflowing the row.
+    let narrow = screen(window.surface(), 5, " 笔记.wavefunction");
+    assert!(
+        narrow.contains("\x1b[7m 笔记\x1b[0m"),
+        "wide status line was not truncated by display columns:\n{narrow:?}"
+    );
+}
+
+#[test]
+fn tabs_controls_and_escapes_claim_one_safe_cell_without_terminal_injection() {
+    let mut window = window();
+    // Tab via tty + zero-width space via direct insert + hostile escape in document and filename.
+    type_bytes(&mut window, b"a\tb");
+    let injected = "\u{200B}\x1b]2;pwn\x07z";
+    window.editor().type_text(injected).expect("typed");
+    window.draw().expect("drew");
+
+    let drawn = screen(window.surface(), COLUMNS, " evil\x1b]2;bad\x07\nname ");
+    assert!(
+        !drawn.contains("\x1b]2;"),
+        "control cluster injected an OSC sequence into terminal output:\n{drawn:?}"
+    );
+    assert!(
+        !drawn.contains('\t'),
+        "raw tab reached terminal output and desynchronized columns:\n{drawn:?}"
+    );
+    assert!(
+        drawn.contains("a b  ]2;pwn z\x1b[K\r\n"),
+        "control and zero-width clusters must each occupy one safe space cell:\n{drawn:?}"
+    );
+    // 13 clusters (`a`, `\t`, `b`, `\u{200B}`, `\x1b`, `]`, `2`, `;`, `p`, `w`, `n`, `\x07`, `z`)
+    // -> 1-based column 14.
+    assert!(
+        drawn.contains("\x1b[1;14H"),
+        "caret column disagreed with safe cell advances:\n{drawn:?}"
+    );
+}
+
+#[test]
+fn off_screen_caret_never_jumps_onto_status_and_navigation_follows_caret() {
+    let mut window = window();
+    type_bytes(&mut window, b"0\n1\n2\n3\n4\n5");
+    window.editor().reflow().expect("measured");
+
+    // Scroll to the top of a 6-line single leaf on a 4-row surface: the caret on line 5 is below
+    // the visible rows and must not place the cursor onto row 6 (the status/panel area).
+    window.editor().scroll_to(Fixed::ZERO);
+    // Force a redraw after the direct scroll call.
+    window
+        .resize(Fixed::units(COLUMNS as i64), Fixed::units(ROWS as i64))
+        .expect("resized");
+    window.press(Key::PageUp, Modifiers::none()).expect("paged");
+    window.draw().expect("drew");
+    let scrolled_up = screen(window.surface(), COLUMNS, "status");
+    assert!(
+        !scrolled_up.contains("\x1b[6;"),
+        "off-screen caret jumped past the surface onto the status row:\n{scrolled_up:?}"
+    );
+
+    // Ctrl+Home moves the caret to line 0, and Ctrl+End moves it back to line 5 while scrolling
+    // the viewport so the caret is visible on row 4 (`\x1b[4;2H`).
+    window
+        .press(Key::Home, Modifiers::control())
+        .expect("ctrl+home");
+    assert_eq!(window.editor().scroll(), Fixed::ZERO);
+    window
+        .press(Key::End, Modifiers::control())
+        .expect("ctrl+end");
+    assert!(
+        window.editor().scroll() > Fixed::ZERO,
+        "Ctrl+End did not scroll the viewport to reveal the caret"
+    );
+    window.draw().expect("drew");
+    let at_end = screen(window.surface(), COLUMNS, "status");
+    assert!(
+        at_end.contains("\x1b[4;2H"),
+        "caret at document end was not placed on the bottom visible surface row:\n{at_end:?}"
+    );
+}
