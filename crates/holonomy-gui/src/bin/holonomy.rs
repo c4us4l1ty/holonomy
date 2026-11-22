@@ -32,7 +32,9 @@ use holonomy_gui::panel::Facts;
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
-use holonomy_seal::{probe_capability, LockCapability, PassphraseInput, MAX_PASSPHRASE_INPUT_BYTES};
+use holonomy_seal::{
+    probe_capability, LockCapability, PassphraseInput, MAX_PASSPHRASE_INPUT_BYTES,
+};
 use holonomy_shell::Editor;
 use holonomy_shell::Effect;
 use holonomy_text::{ResidentSet, Typing};
