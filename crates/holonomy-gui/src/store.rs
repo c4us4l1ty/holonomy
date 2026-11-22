@@ -404,9 +404,9 @@ fn to_line_slabs(slabs: &[Slab]) -> Vec<LineSlab> {
     slabs
         .iter()
         .map(|slab| LineSlab {
-            segment: slab.segment.get(),
-            start: slab.offset,
-            len: slab.len,
+            segment: slab.segment().get(),
+            start: slab.start(),
+            len: slab.len(),
         })
         .collect()
 }
@@ -445,21 +445,13 @@ impl SegmentSink for DocumentSink {
             return Err("segment exceeds u32".to_owned());
         };
         let mut manifest = Vec::with_capacity(before.len() + 1 + after.len());
-        manifest.extend(before.iter().map(|slab| LineSlab {
-            segment: slab.segment.get(),
-            start: slab.offset,
-            len: slab.len,
-        }));
+        manifest.extend(to_line_slabs(before));
         manifest.push(LineSlab {
             segment: next_segment.get(),
             start: 0,
             len,
         });
-        manifest.extend(after.iter().map(|slab| LineSlab {
-            segment: slab.segment.get(),
-            start: slab.offset,
-            len: slab.len,
-        }));
+        manifest.extend(to_line_slabs(after));
         let receipt = if line.line.is_implicit_after_append(&[plaintext], &manifest) {
             line.line
                 .append_segments(&[plaintext])

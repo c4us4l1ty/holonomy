@@ -628,11 +628,7 @@ impl WorldLine {
             return Ok(self.current_receipt());
         }
         if let Some(existing) = &self.manifest {
-            if existing
-                .len()
-                .checked_add(plaintext_segments.len())
-                .is_none_or(|total| total > MAX_MANIFEST_SLABS)
-            {
+            if existing.len().saturating_add(plaintext_segments.len()) > MAX_MANIFEST_SLABS {
                 return Err(LineError::InvalidManifest(
                     "manifest exceeds maximum slab count",
                 ));
