@@ -23,23 +23,20 @@
 //! code in this crate that cannot be tested in CI.
 
 use crate::{CellSurface, Key, Modifiers};
-use holonomy_eye::{Fixed, Shaper, Style};
+use holonomy_eye::{cluster_cells, Clusters, Fixed, Shaper, Style};
 
-/// A monospace face: one logical unit per cluster, one unit per line, ascent inside it.
+/// A monospace face: `0`, `1`, or `2` logical units per cluster (`holonomy_eye::cluster_cells`),
+/// one unit per line, ascent inside it.
 ///
-/// The terminal draws one character per cell and one line per row, so this *is* the screen's
-/// geometry. A wide character (which the terminal draws in two cells) is not modelled yet: the
-/// cluster claims one cell, and the renderer's own width would disagree — recorded as OQ-25.
+/// Both this shaper and [`screen_with`] read the same UCD display-width table (`OQ-25`), so East
+/// Asian wide characters, fullwidth forms, and emoji occupy two cells in layout and two columns on
+/// the terminal.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CellShaper;
 
 impl Shaper for CellShaper {
     fn advance(&self, cluster: &str, _style: Style) -> Fixed {
-        if matches!(cluster, "\n" | "\r" | "\r\n") {
-            Fixed::ZERO
-        } else {
-            Fixed::ONE
-        }
+        Fixed::units(i64::from(cluster_cells(cluster)))
     }
 
     fn line_height(&self, _style: Style) -> Fixed {
@@ -293,11 +290,26 @@ pub fn panel_fits(panel: &[String], rows: usize) -> Vec<String> {
     panel.iter().take(room).cloned().collect()
 }
 
+/// Truncates `text` to at most `columns` terminal display cells, never splitting a cluster.
+fn truncate_to_columns(text: &str, columns: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(columns.saturating_mul(4)));
+    let mut used = 0usize;
+    for (_, cluster) in Clusters::new(text) {
+        let width = usize::from(cluster_cells(cluster));
+        if used + width > columns {
+            break;
+        }
+        out.push_str(cluster);
+        used += width;
+    }
+    out
+}
+
 /// The screen with a panel above the status line — what `Ctrl+G` draws.
 ///
 /// Same renderer, one extra block: the panel's lines are the security panel's own text (see
-/// [`crate::panel`]), truncated to the terminal's width, so a number that is too long to show is
-/// visibly cut rather than silently wrong.
+/// [`crate::panel`]), truncated to the terminal's cell width, so a number or filename that is too
+/// wide to show is visibly cut rather than wrapping and scrolling the screen (D-48, OQ-25).
 #[must_use]
 pub fn screen_with(
     surface: &CellSurface,
@@ -309,18 +321,31 @@ pub fn screen_with(
     out.push_str("\x1b[H");
     for row in 0..surface.rows() {
         let mut line = String::with_capacity(columns);
-        for column in 0..columns {
-            line.push(surface.at(column, row));
+        let mut column = 0;
+        while column < columns {
+            if let Some((cluster, span)) = surface.cluster_at(column, row) {
+                let width = span.max(1);
+                if column + width <= columns {
+                    line.push_str(cluster);
+                    column += width;
+                } else {
+                    line.push(' ');
+                    column += 1;
+                }
+            } else {
+                line.push(surface.at(column, row));
+                column += 1;
+            }
         }
-        out.push_str(line.trim_end());
+        out.push_str(line.trim_end_matches(' '));
         out.push_str("\x1b[K\r\n");
     }
     for line in panel {
-        out.push_str(&line.chars().take(columns).collect::<String>());
+        out.push_str(&truncate_to_columns(line, columns));
         out.push_str("\x1b[K\r\n");
     }
     out.push_str("\x1b[7m");
-    out.push_str(&status.chars().take(columns).collect::<String>());
+    out.push_str(&truncate_to_columns(status, columns));
     out.push_str("\x1b[0m\x1b[K");
     if let Some((column, row)) = surface.caret_cell() {
         out.push_str(&format!("\x1b[{};{}H", row + 1, column + 1));

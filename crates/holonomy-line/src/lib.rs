@@ -27,13 +27,19 @@ use crate::mmr::{segment_leaf, Mmr};
 const RECORD_MAGIC: &[u8; 4] = b"W6RC";
 const RECORD_SEGMENT: u8 = 1;
 const RECORD_WITNESS: u8 = 2;
+const RECORD_MANIFEST: u8 = 3;
 const AEAD_TAG_BYTES: u32 = 16;
 const MAX_SEGMENT_BYTES: u32 = 64 * 1024;
 const WITNESS_BASE_BYTES: usize = 1 + 8 + 8 + 32 + 32 + 32 + 32;
-// A version-2 witness may also carry the document order of up to 4096 segments.
-const MAX_WITNESS_ORDER_IDS: usize = 4096;
-const MAX_WITNESS_BYTES: usize = WITNESS_BASE_BYTES + 64 * 32 + 4 + MAX_WITNESS_ORDER_IDS * 4;
+const WITNESS_MANIFEST_REF_BYTES: usize = 8 + 4 + 32;
+const MAX_WITNESS_BYTES: usize = WITNESS_BASE_BYTES + 64 * 32 + WITNESS_MANIFEST_REF_BYTES;
 const MAX_WITNESS_CIPHERTEXT_BYTES: u32 = (MAX_WITNESS_BYTES as u32) + AEAD_TAG_BYTES;
+const MANIFEST_HEADER_BYTES: usize = 4;
+const MANIFEST_ENTRY_BYTES: usize = 8 + 4 + 4;
+const MAX_MANIFEST_SLABS: usize = 1_048_576;
+const MAX_MANIFEST_BYTES: u32 =
+    (MANIFEST_HEADER_BYTES + MAX_MANIFEST_SLABS * MANIFEST_ENTRY_BYTES) as u32;
+const MAX_MANIFEST_CIPHERTEXT_BYTES: u32 = MAX_MANIFEST_BYTES + AEAD_TAG_BYTES;
 
 // Test-only hooks exercise short writes and failed durability barriers through the same
 // append path used in production. The thread-local scope keeps unrelated parallel tests from
@@ -171,6 +177,8 @@ pub enum LineError {
     InvalidCreationDestination,
     /// The requested compacted output path cannot serve as a distinct, safe destination.
     InvalidCompactionDestination,
+    /// A proposed spine manifest names an empty, overflowing, or out-of-range segment span.
+    InvalidManifest(&'static str),
 }
 
 impl core::fmt::Display for LineError {
@@ -215,6 +223,9 @@ impl core::fmt::Display for LineError {
             }
             Self::InvalidCompactionDestination => {
                 f.write_str("compaction requires a distinct destination file path")
+            }
+            Self::InvalidManifest(reason) => {
+                write!(f, "invalid world-line spine manifest: {reason}")
             }
         }
     }
@@ -266,6 +277,23 @@ pub struct AppendReceipt {
     pub segment_root: [u8; 32],
 }
 
+/// One contiguous plaintext span of a committed segment in document order.
+///
+/// A world-line that has only ever been appended to has an implicit manifest of one full-length
+/// slab per segment (`0..segment_count`); once a cut, mid-segment insertion, or deletion has been
+/// committed, the latest witness names an authenticated manifest of [`LineSlab`] spans — or an
+/// empty manifest when the entire document has been deleted — so reopening never decrypts segment
+/// bodies and never resurrects removed text (AUDIT OQ-29, OQ-30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineSlab {
+    /// Zero-based sequence number of the committed segment.
+    pub segment: u64,
+    /// Starting byte offset inside that segment's plaintext.
+    pub start: u32,
+    /// Non-zero byte length inside that segment's plaintext (`start + len <= plaintext_len`).
+    pub len: u32,
+}
+
 /// Result of fully authenticating all committed segment bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyReport {
@@ -298,6 +326,24 @@ struct SegmentDescriptor {
     previous_tag: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ManifestRef {
+    sequence: u64,
+    ciphertext_len: u32,
+    tag: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestDescriptor {
+    sequence: u64,
+    segment_limit: usize,
+    ciphertext_offset: u64,
+    ciphertext_len: u32,
+    nonce: [u8; 24],
+    tag: [u8; 32],
+    previous_witness_tag: [u8; 32],
+}
+
 /// An opened append-only world-line. The key is an opaque capability owned by the handle;
 /// this crate can request seal/open operations but cannot read key bytes.
 pub struct WorldLine {
@@ -307,6 +353,8 @@ pub struct WorldLine {
     key: DEMKey,
     file_identity: FileIdentity,
     segments: Vec<SegmentDescriptor>,
+    manifests: Vec<ManifestDescriptor>,
+    manifest: Option<Vec<LineSlab>>,
     mmr: Mmr,
     next_witness_sequence: u64,
     last_witness_tag: [u8; 32],
@@ -314,7 +362,6 @@ pub struct WorldLine {
     committed_end: u64,
     observed_len: u64,
     recovery: RecoveryInfo,
-    document_order: Vec<u32>,
     poisoned: bool,
 }
 
@@ -350,7 +397,7 @@ impl WorldLine {
             &zero_tag,
             &zero_tag,
             &empty_mmr,
-            &[],
+            None,
         )?;
 
         let mut stage_options = OpenOptions::new();
@@ -421,6 +468,8 @@ impl WorldLine {
             key,
             file_identity,
             segments: Vec::new(),
+            manifests: Vec::new(),
+            manifest: None,
             mmr: empty_mmr,
             next_witness_sequence: 1,
             last_witness_tag: genesis_tag,
@@ -431,13 +480,13 @@ impl WorldLine {
                 trailing_bytes: 0,
                 last_committed_offset: committed_end,
             },
-            document_order: Vec::new(),
             poisoned: false,
         })
     }
 
     /// Open a file using an already-unwrapped document key. This scans header and witness
-    /// metadata but seeks over every segment ciphertext body.
+    /// metadata, seeks over every segment body and historical manifest, and opens only the
+    /// active spine manifest when one has been committed.
     pub fn open(path: impl AsRef<Path>, key: DEMKey) -> Result<Self, LineError> {
         let path = path.as_ref().to_path_buf();
         let mut file = open_worldline_file(&path, true, false)?;
@@ -454,6 +503,8 @@ impl WorldLine {
             key,
             file_identity,
             segments: scan.segments,
+            manifests: scan.manifests,
+            manifest: scan.manifest,
             mmr: scan.mmr,
             next_witness_sequence: scan.next_witness_sequence,
             last_witness_tag: scan.last_witness_tag,
@@ -461,7 +512,6 @@ impl WorldLine {
             committed_end: scan.committed_end,
             observed_len: scan.observed_len,
             recovery: scan.recovery,
-            document_order: scan.document_order,
             poisoned: false,
         })
     }
@@ -492,30 +542,72 @@ impl WorldLine {
             .map(|descriptor| descriptor.plaintext_len)
     }
 
-    /// Document-order sequence IDs and their authenticated plaintext lengths.
+    /// Whether an explicit spine manifest has been committed on this world-line.
+    #[must_use]
+    pub fn has_manifest(&self) -> bool {
+        self.manifest.is_some()
+    }
+
+    /// The active document's [`LineSlab`] geometry, without opening any segment ciphertext.
     ///
-    /// The order is carried inside the latest authenticated witness (OQ-29). A file written
-    /// before that feature carries none, in which case append order is returned — which is the
-    /// document order of a document that was only ever appended to.
-    pub fn document_order(&self) -> Vec<(u32, u32)> {
-        if self.document_order.is_empty() {
-            self.segments
-                .iter()
-                .enumerate()
-                .map(|(i, descriptor)| (i as u32, descriptor.plaintext_len))
-                .collect()
-        } else {
-            self.document_order
-                .iter()
-                .map(|&id| {
-                    let length = self
-                        .segments
-                        .get(id as usize)
-                        .map_or(0, |descriptor| descriptor.plaintext_len);
-                    (id, length)
-                })
-                .collect()
+    /// When no structural manifest has been committed, the implicit append-order geometry
+    /// (`0..segment_count`, each spanning its full authenticated plaintext length) is returned.
+    /// When a manifest has been committed, its exact authenticated slab list — which may be empty
+    /// if the entire document was deleted — is returned (AUDIT OQ-29, OQ-30).
+    #[must_use]
+    pub fn document_slabs(&self) -> Vec<LineSlab> {
+        if let Some(manifest) = &self.manifest {
+            return manifest.clone();
         }
+        self.segments
+            .iter()
+            .map(|descriptor| LineSlab {
+                segment: descriptor.sequence,
+                start: 0,
+                len: descriptor.plaintext_len,
+            })
+            .collect()
+    }
+
+    /// Whether `desired` equals the implicit append-order geometry that would result from
+    /// appending `plaintext_segments` with no explicit manifest.
+    #[must_use]
+    pub fn is_implicit_after_append(
+        &self,
+        plaintext_segments: &[&[u8]],
+        desired: &[LineSlab],
+    ) -> bool {
+        if self.manifest.is_some() {
+            return false;
+        }
+        if desired.len() != self.segments.len() + plaintext_segments.len() {
+            return false;
+        }
+        for (index, descriptor) in self.segments.iter().enumerate() {
+            let expected = LineSlab {
+                segment: descriptor.sequence,
+                start: 0,
+                len: descriptor.plaintext_len,
+            };
+            if desired[index] != expected {
+                return false;
+            }
+        }
+        let base = self.segments.len();
+        for (offset, plaintext) in plaintext_segments.iter().enumerate() {
+            let Ok(len) = u32::try_from(plaintext.len()) else {
+                return false;
+            };
+            let expected = LineSlab {
+                segment: (base + offset) as u64,
+                start: 0,
+                len,
+            };
+            if desired[base + offset] != expected {
+                return false;
+            }
+        }
+        true
     }
 
     /// Number of committed witness records, including genesis.
@@ -530,10 +622,81 @@ impl WorldLine {
 
     /// Append one or more sealed segments and commit them with one witness. Empty input is a
     /// no-op. Every non-empty segment must fit the 64 KiB quantum.
+    ///
+    /// When no spine manifest is active, this writes a version-1 witness with zero manifest
+    /// overhead; when a manifest is already active, the newly appended segments are appended to
+    /// the manifest in the same atomic transaction.
     pub fn append_segments(
         &mut self,
         plaintext_segments: &[&[u8]],
     ) -> Result<AppendReceipt, LineError> {
+        self.validate_append_inputs(plaintext_segments)?;
+        if plaintext_segments.is_empty() {
+            return Ok(self.current_receipt());
+        }
+        if let Some(existing) = &self.manifest {
+            if existing
+                .len()
+                .checked_add(plaintext_segments.len())
+                .is_none_or(|total| total > MAX_MANIFEST_SLABS)
+            {
+                return Err(LineError::InvalidManifest(
+                    "manifest exceeds maximum slab count",
+                ));
+            }
+        }
+        let result = self.commit_internal(plaintext_segments, None);
+        if result.is_err() {
+            // I/O may have left a partial, uncommitted tail. A fresh open is the only operation
+            // that can unambiguously determine whether the witness reached durable storage.
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Atomically append one or more sealed segments and commit `manifest` as the active
+    /// document geometry under a single witness commit point.
+    pub fn append_segments_with_manifest(
+        &mut self,
+        plaintext_segments: &[&[u8]],
+        manifest: &[LineSlab],
+    ) -> Result<AppendReceipt, LineError> {
+        if plaintext_segments.is_empty() {
+            return self.commit_manifest(manifest);
+        }
+        self.validate_append_inputs(plaintext_segments)?;
+        validate_manifest_against_pending(&self.segments, plaintext_segments, manifest)?;
+        let result = self.commit_internal(plaintext_segments, Some(manifest));
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Commit `manifest` as the active document geometry without reading, decrypting, or
+    /// appending any segment plaintext.
+    ///
+    /// An empty `manifest` (`&[]`) records an explicitly emptied document (`Select All` + `Delete`)
+    /// so reopening yields zero bytes rather than falling back to append order (AUDIT OQ-30).
+    pub fn commit_manifest(&mut self, manifest: &[LineSlab]) -> Result<AppendReceipt, LineError> {
+        if !durability_supported() {
+            return Err(LineError::UnsupportedDurability);
+        }
+        if self.poisoned {
+            return Err(LineError::ReopenRequired);
+        }
+        if self.next_witness_sequence == u64::MAX {
+            return Err(LineError::TooManySegments);
+        }
+        validate_manifest_against_pending(&self.segments, &[], manifest)?;
+        let result = self.commit_internal(&[], Some(manifest));
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn validate_append_inputs(&self, plaintext_segments: &[&[u8]]) -> Result<(), LineError> {
         if !durability_supported() {
             return Err(LineError::UnsupportedDurability);
         }
@@ -548,75 +711,17 @@ impl WorldLine {
                 return Err(LineError::SegmentTooLarge);
             }
         }
-        if plaintext_segments.is_empty() {
-            return Ok(self.current_receipt());
+        if !plaintext_segments.is_empty() {
+            let pending_segments =
+                u64::try_from(plaintext_segments.len()).map_err(|_| LineError::TooManySegments)?;
+            self.mmr
+                .count()
+                .checked_add(pending_segments)
+                .ok_or(LineError::TooManySegments)?;
+            if self.next_witness_sequence == u64::MAX {
+                return Err(LineError::TooManySegments);
+            }
         }
-        let pending_segments =
-            u64::try_from(plaintext_segments.len()).map_err(|_| LineError::TooManySegments)?;
-        self.mmr
-            .count()
-            .checked_add(pending_segments)
-            .ok_or(LineError::TooManySegments)?;
-        if self.next_witness_sequence == u64::MAX {
-            return Err(LineError::TooManySegments);
-        }
-
-        let result = self.append_validated(plaintext_segments);
-        if result.is_err() {
-            // I/O may have left a partial, uncommitted tail. A fresh open is the only operation
-            // that can unambiguously determine whether the witness reached durable storage.
-            self.poisoned = true;
-        }
-        result
-    }
-
-    /// Commit the document order of committed segments.
-    ///
-    /// The list is written into a new witness record, authenticated by the same AEAD key as every
-    /// other witness, so a reopen can rebuild the document rather than the append log (OQ-29).
-    /// An unchanged or empty order is a no-op; a cut that shortens a leaf still needs a new
-    /// segment to be appended first (OQ-30).
-    pub fn append_structure(&mut self, sequence_list: &[u32]) -> Result<(), LineError> {
-        if self.poisoned {
-            return Err(LineError::ReopenRequired);
-        }
-        if sequence_list.is_empty() || sequence_list == self.document_order.as_slice() {
-            return Ok(());
-        }
-        if self.next_witness_sequence == u64::MAX {
-            return Err(LineError::TooManySegments);
-        }
-        let witness_sequence = self.next_witness_sequence;
-        let (frame, tag) = encode_witness_record(
-            &self.header,
-            &self.epoch,
-            &self.key,
-            witness_sequence,
-            &self.last_witness_tag,
-            &self.last_segment_tag,
-            &self.mmr,
-            sequence_list,
-        )?;
-        let mut file = open_worldline_file(&self.path, true, true)?;
-        validate_regular_file(&file)?;
-        if file_identity(&file)? != self.file_identity {
-            return Err(LineError::ConcurrentModification);
-        }
-        file.seek(SeekFrom::End(0))?;
-        write_append_bytes(&mut file, &frame)?;
-        if sync_append_file(&file).is_err() {
-            return Err(LineError::DurabilityUncertain);
-        }
-        let committed_end = file.stream_position()?;
-        self.last_witness_tag = tag;
-        self.next_witness_sequence = witness_sequence + 1;
-        self.committed_end = committed_end;
-        self.observed_len = committed_end;
-        self.recovery = RecoveryInfo {
-            trailing_bytes: 0,
-            last_committed_offset: committed_end,
-        };
-        self.document_order = sequence_list.to_vec();
         Ok(())
     }
 
@@ -631,8 +736,9 @@ impl WorldLine {
         self.read_segment(descriptor)
     }
 
-    /// Authenticate every committed segment body, one at a time. This is the explicit full-file
-    /// integrity pass used by `verify`; ordinary open never reads segment ciphertext.
+    /// Authenticate every committed manifest and segment body, one at a time. This is the
+    /// explicit full-file integrity pass used by `verify`; ordinary open never reads segment
+    /// ciphertext or historical manifests.
     pub fn verify(&self) -> Result<VerifyReport, LineError> {
         if self.poisoned {
             return Err(LineError::ReopenRequired);
@@ -644,6 +750,10 @@ impl WorldLine {
             || current.epoch != self.epoch
         {
             return Err(LineError::ConcurrentModification);
+        }
+
+        for manifest in &current.manifests {
+            let _ = current.read_manifest(manifest)?;
         }
 
         let mut plaintext_bytes_verified = 0u64;
@@ -720,6 +830,59 @@ impl WorldLine {
         Ok(compacted)
     }
 
+    /// Rewrite only the active [`Self::document_slabs`] into a fresh, re-keyed world-line at
+    /// `destination`, omitting all deleted byte ranges and superseded history (AUDIT OQ-14).
+    ///
+    /// At most one source segment's [`OpenedPlaintext`] is resident in memory at any instant;
+    /// the source world-line is verified first and never modified.
+    pub fn compact_active_to(
+        &self,
+        destination: impl AsRef<Path>,
+        new_header: LineHeader,
+        new_key: &DEMKey,
+        approval: CompactionApproval,
+    ) -> Result<WorldLine, LineError> {
+        if self.poisoned {
+            return Err(LineError::ReopenRequired);
+        }
+        let destination = destination.as_ref().to_path_buf();
+        if destination.file_name().is_none() || destination == self.path {
+            return Err(LineError::InvalidCompactionDestination);
+        }
+        new_header.validate()?;
+        if !approval.is_for_file(self.header.file_id()) {
+            return Err(LineError::CompactionConfirmationRequired);
+        }
+        if new_header.file_id() == self.header.file_id() {
+            return Err(LineError::CompactionIdentityReuse);
+        }
+
+        self.verify()?;
+        let slabs = self.document_slabs();
+        let temporary = compaction_path(&destination, new_header.file_id());
+        if temporary == destination {
+            return Err(LineError::InvalidCompactionDestination);
+        }
+        let mut compacted = WorldLine::create(&temporary, new_header, new_key.duplicate())?;
+        let mut publication =
+            CompactionPublication::new(temporary, destination.clone(), compacted.file_identity);
+        for slab in &slabs {
+            let plaintext = self.open_segment(slab.segment)?;
+            let start = slab.start as usize;
+            let end = start
+                .checked_add(slab.len as usize)
+                .ok_or(LineError::InvalidRecord)?;
+            let slice = plaintext.get(start..end).ok_or(LineError::InvalidRecord)?;
+            compacted.append_segments(&[slice])?;
+            // `plaintext` drops and zeroizes before the next slab's segment is opened.
+        }
+        compacted.verify()?;
+        publication.publish()?;
+        compacted.path = destination;
+        publication.commit();
+        Ok(compacted)
+    }
+
     fn current_receipt(&self) -> AppendReceipt {
         AppendReceipt {
             witness_sequence: self.next_witness_sequence.saturating_sub(1),
@@ -729,9 +892,10 @@ impl WorldLine {
         }
     }
 
-    fn append_validated(
+    fn commit_internal(
         &mut self,
         plaintext_segments: &[&[u8]],
+        explicit_manifest: Option<&[LineSlab]>,
     ) -> Result<AppendReceipt, LineError> {
         let mut file = open_worldline_file(&self.path, true, true)?;
         validate_regular_file(&file)?;
@@ -760,6 +924,8 @@ impl WorldLine {
             || disk_state.next_witness_sequence != self.next_witness_sequence
             || disk_state.mmr != self.mmr
             || disk_state.segments != self.segments
+            || disk_state.manifests != self.manifests
+            || disk_state.manifest != self.manifest
         {
             return Err(LineError::ConcurrentModification);
         }
@@ -775,6 +941,33 @@ impl WorldLine {
                 last_committed_offset: self.committed_end,
             };
         }
+
+        let next_manifest = match explicit_manifest {
+            Some(slabs) => Some(slabs.to_vec()),
+            None => {
+                if let Some(existing) = &self.manifest {
+                    let mut extended = Vec::new();
+                    extended
+                        .try_reserve(existing.len() + plaintext_segments.len())
+                        .map_err(|_| LineError::ResourceExhausted)?;
+                    extended.extend_from_slice(existing);
+                    let base = self.mmr.count();
+                    for (index, plaintext) in plaintext_segments.iter().enumerate() {
+                        let len = u32::try_from(plaintext.len())
+                            .map_err(|_| LineError::SegmentTooLarge)?;
+                        extended.push(LineSlab {
+                            segment: base + index as u64,
+                            start: 0,
+                            len,
+                        });
+                    }
+                    Some(extended)
+                } else {
+                    None
+                }
+            }
+        };
+
         file.seek(SeekFrom::End(0))?;
         let mut mmr = self.mmr.clone();
         let mut last_segment_tag = self.last_segment_tag;
@@ -818,7 +1011,49 @@ impl WorldLine {
             last_segment_tag = encoded.tag;
         }
 
-        // Data records are durable before the commit point is written.
+        let mut new_manifest_descriptor = None;
+        let manifest_ref = if let Some(slabs) = &next_manifest {
+            self.manifests
+                .try_reserve(1)
+                .map_err(|_| LineError::ResourceExhausted)?;
+            let manifest_sequence =
+                u64::try_from(self.manifests.len()).map_err(|_| LineError::TooManySegments)?;
+            let encoded = encode_manifest_record(
+                &self.header,
+                &self.epoch,
+                &self.key,
+                manifest_sequence,
+                &self.last_witness_tag,
+                slabs,
+            )?;
+            let record_offset = file.stream_position()?;
+            write_append_bytes(&mut file, &encoded.frame)?;
+            bytes_written = bytes_written
+                .checked_add(encoded.frame.len() as u64)
+                .ok_or(LineError::ResourceExhausted)?;
+            let ciphertext_offset = record_offset
+                .checked_add(RECORD_HEADER_BYTES as u64 + RECORD_FIXED_BYTES as u64)
+                .ok_or(LineError::ResourceExhausted)?;
+            let segment_limit = self.segments.len() + new_descriptors.len();
+            new_manifest_descriptor = Some(ManifestDescriptor {
+                sequence: manifest_sequence,
+                segment_limit,
+                ciphertext_offset,
+                ciphertext_len: encoded.ciphertext_len,
+                nonce: encoded.nonce,
+                tag: encoded.tag,
+                previous_witness_tag: self.last_witness_tag,
+            });
+            Some(ManifestRef {
+                sequence: manifest_sequence,
+                ciphertext_len: encoded.ciphertext_len,
+                tag: encoded.tag,
+            })
+        } else {
+            None
+        };
+
+        // Data and manifest records are durable before the witness commit point is written.
         sync_append_file(&file)?;
         let witness_sequence = self.next_witness_sequence;
         let (witness_frame, witness_tag) = encode_witness_record(
@@ -829,7 +1064,7 @@ impl WorldLine {
             &self.last_witness_tag,
             &last_segment_tag,
             &mmr,
-            &self.document_order,
+            manifest_ref,
         )?;
         write_append_bytes(&mut file, &witness_frame)?;
         bytes_written = bytes_written
@@ -841,6 +1076,10 @@ impl WorldLine {
         let committed_end = file.stream_position()?;
 
         self.segments.extend(new_descriptors);
+        if let Some(descriptor) = new_manifest_descriptor {
+            self.manifests.push(descriptor);
+        }
+        self.manifest = next_manifest;
         self.mmr = mmr;
         self.last_segment_tag = last_segment_tag;
         self.last_witness_tag = witness_tag;
@@ -860,6 +1099,26 @@ impl WorldLine {
             bytes_appended: bytes_written,
             segment_root: self.mmr.root(),
         })
+    }
+
+    fn read_manifest(&self, descriptor: &ManifestDescriptor) -> Result<Vec<LineSlab>, LineError> {
+        let mut file = open_worldline_file(&self.path, true, false)?;
+        validate_regular_file(&file)?;
+        if file_identity(&file)? != self.file_identity {
+            return Err(LineError::ConcurrentModification);
+        }
+        let allowed = self
+            .segments
+            .get(..descriptor.segment_limit)
+            .ok_or(LineError::InvalidRecord)?;
+        read_manifest_from(
+            &mut file,
+            &self.header,
+            &self.epoch,
+            &self.key,
+            descriptor,
+            allowed,
+        )
     }
 
     fn read_segment(&self, descriptor: &SegmentDescriptor) -> Result<OpenedPlaintext, LineError> {
@@ -1079,6 +1338,193 @@ fn encode_segment_record(
     })
 }
 
+struct EncodedManifest {
+    frame: Vec<u8>,
+    ciphertext_len: u32,
+    nonce: [u8; 24],
+    tag: [u8; 32],
+}
+
+fn encode_manifest_record(
+    header: &LineHeader,
+    epoch: &[u8; 32],
+    key: &DEMKey,
+    sequence: u64,
+    previous_witness_tag: &[u8; 32],
+    slabs: &[LineSlab],
+) -> Result<EncodedManifest, LineError> {
+    let plaintext = encode_manifest_plain(slabs)?;
+    let plaintext_len = u32::try_from(plaintext.len()).map_err(|_| {
+        LineError::InvalidManifest("manifest plaintext exceeds maximum record length")
+    })?;
+    let aad = manifest_aad(header, epoch, sequence, previous_witness_tag, plaintext_len);
+    let sealed = seal_object(key, &aad, &plaintext);
+    let ciphertext_len =
+        u32::try_from(sealed.ciphertext.len()).map_err(|_| LineError::InvalidRecord)?;
+    let nonce = sealed.nonce;
+    let tag = sealed.cmt4;
+    let frame = encode_record(RECORD_MANIFEST, sequence, sealed)?;
+    Ok(EncodedManifest {
+        frame,
+        ciphertext_len,
+        nonce,
+        tag,
+    })
+}
+
+fn encode_manifest_plain(slabs: &[LineSlab]) -> Result<Vec<u8>, LineError> {
+    if slabs.len() > MAX_MANIFEST_SLABS {
+        return Err(LineError::InvalidManifest(
+            "manifest exceeds maximum slab count",
+        ));
+    }
+    let count = u32::try_from(slabs.len())
+        .map_err(|_| LineError::InvalidManifest("manifest exceeds maximum slab count"))?;
+    let total = MANIFEST_HEADER_BYTES + slabs.len() * MANIFEST_ENTRY_BYTES;
+    let mut out = Vec::new();
+    out.try_reserve_exact(total)
+        .map_err(|_| LineError::ResourceExhausted)?;
+    out.extend_from_slice(&count.to_le_bytes());
+    for slab in slabs {
+        if slab.len == 0 || slab.start.checked_add(slab.len).is_none() {
+            return Err(LineError::InvalidManifest(
+                "manifest slab has zero or overflowing byte span",
+            ));
+        }
+        out.extend_from_slice(&slab.segment.to_le_bytes());
+        out.extend_from_slice(&slab.start.to_le_bytes());
+        out.extend_from_slice(&slab.len.to_le_bytes());
+    }
+    Ok(out)
+}
+
+fn decode_manifest_plain(bytes: &[u8]) -> Result<Vec<LineSlab>, LineError> {
+    if bytes.len() < MANIFEST_HEADER_BYTES || bytes.len() > MAX_MANIFEST_BYTES as usize {
+        return Err(LineError::InvalidRecord);
+    }
+    let mut offset = 0usize;
+    let count = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?) as usize;
+    if count > MAX_MANIFEST_SLABS {
+        return Err(LineError::InvalidRecord);
+    }
+    let expected_len = MANIFEST_HEADER_BYTES
+        .checked_add(
+            count
+                .checked_mul(MANIFEST_ENTRY_BYTES)
+                .ok_or(LineError::InvalidRecord)?,
+        )
+        .ok_or(LineError::InvalidRecord)?;
+    if bytes.len() != expected_len {
+        return Err(LineError::InvalidRecord);
+    }
+    let mut slabs = Vec::new();
+    slabs
+        .try_reserve_exact(count)
+        .map_err(|_| LineError::ResourceExhausted)?;
+    for _ in 0..count {
+        let segment = take_u64(bytes, &mut offset)?;
+        let start = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+        let len = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+        if len == 0 || start.checked_add(len).is_none() {
+            return Err(LineError::InvalidRecord);
+        }
+        slabs.push(LineSlab {
+            segment,
+            start,
+            len,
+        });
+    }
+    Ok(slabs)
+}
+
+fn validate_manifest_against_pending(
+    committed: &[SegmentDescriptor],
+    pending: &[&[u8]],
+    manifest: &[LineSlab],
+) -> Result<(), LineError> {
+    if manifest.len() > MAX_MANIFEST_SLABS {
+        return Err(LineError::InvalidManifest(
+            "manifest exceeds maximum slab count",
+        ));
+    }
+    let total_segments = committed
+        .len()
+        .checked_add(pending.len())
+        .ok_or(LineError::TooManySegments)?;
+    for slab in manifest {
+        if slab.len == 0 {
+            return Err(LineError::InvalidManifest("manifest slab has zero length"));
+        }
+        let end = slab.start.checked_add(slab.len).ok_or(LineError::InvalidManifest(
+            "manifest slab byte range overflows u32",
+        ))?;
+        let index = usize::try_from(slab.segment)
+            .map_err(|_| LineError::InvalidManifest("manifest slab names out-of-range segment"))?;
+        if index >= total_segments {
+            return Err(LineError::InvalidManifest(
+                "manifest slab names uncommitted segment",
+            ));
+        }
+        let seg_len = if index < committed.len() {
+            committed[index].plaintext_len
+        } else {
+            u32::try_from(pending[index - committed.len()].len())
+                .map_err(|_| LineError::SegmentTooLarge)?
+        };
+        if end > seg_len {
+            return Err(LineError::InvalidManifest(
+                "manifest slab exceeds segment plaintext length",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_manifest_from<R: Read + Seek>(
+    reader: &mut R,
+    header: &LineHeader,
+    epoch: &[u8; 32],
+    key: &DEMKey,
+    descriptor: &ManifestDescriptor,
+    allowed_segments: &[SegmentDescriptor],
+) -> Result<Vec<LineSlab>, LineError> {
+    if descriptor.ciphertext_len < AEAD_TAG_BYTES + MANIFEST_HEADER_BYTES as u32
+        || descriptor.ciphertext_len > MAX_MANIFEST_CIPHERTEXT_BYTES
+    {
+        return Err(LineError::InvalidRecord);
+    }
+    let plaintext_len = descriptor.ciphertext_len - AEAD_TAG_BYTES;
+    reader.seek(SeekFrom::Start(descriptor.ciphertext_offset))?;
+    let mut ciphertext = Vec::new();
+    ciphertext
+        .try_reserve_exact(descriptor.ciphertext_len as usize)
+        .map_err(|_| LineError::ResourceExhausted)?;
+    ciphertext.resize(descriptor.ciphertext_len as usize, 0);
+    reader.read_exact(&mut ciphertext)?;
+    let sealed = SealedObject {
+        nonce: descriptor.nonce,
+        ciphertext,
+        cmt4: descriptor.tag,
+    };
+    let aad = manifest_aad(
+        header,
+        epoch,
+        descriptor.sequence,
+        &descriptor.previous_witness_tag,
+        plaintext_len,
+    );
+    let plaintext =
+        open_object(key, &aad, &sealed).map_err(|_| LineError::AuthenticationRejected)?;
+    if plaintext.len() != plaintext_len as usize {
+        return Err(LineError::AuthenticationRejected);
+    }
+    let slabs =
+        decode_manifest_plain(&plaintext).map_err(|_| LineError::AuthenticationRejected)?;
+    validate_manifest_against_pending(allowed_segments, &[], &slabs)
+        .map_err(|_| LineError::AuthenticationRejected)?;
+    Ok(slabs)
+}
+
 // All eight fields are the authenticated witness payload; a wrapper struct would only restate
 // them at every call site.
 #[allow(clippy::too_many_arguments)]
@@ -1090,7 +1536,7 @@ fn encode_witness_record(
     previous_witness_tag: &[u8; 32],
     last_segment_tag: &[u8; 32],
     mmr: &Mmr,
-    document_order: &[u32],
+    manifest_ref: Option<ManifestRef>,
 ) -> Result<(Vec<u8>, [u8; 32]), LineError> {
     let plaintext = encode_witness_plain(
         sequence,
@@ -1098,30 +1544,36 @@ fn encode_witness_record(
         last_segment_tag,
         epoch,
         mmr,
-        document_order,
-    )?;
+        manifest_ref,
+    );
     let aad = witness_aad(header, epoch, sequence, previous_witness_tag);
     let sealed = seal_object(key, &aad, &plaintext);
     let tag = sealed.cmt4;
     Ok((encode_record(RECORD_WITNESS, sequence, sealed)?, tag))
 }
 
-/// Encode a witness payload. Version 1 (no order list) is kept byte-for-byte for commits made
-/// before OQ-29; version 2 appends the document order of segment ids after the MMR peaks, inside
-/// the same authenticated body, so a reopen can rebuild the document rather than the append log.
+/// Encode a witness payload.
+///
+/// Version 1 (`manifest_ref: None`) is kept byte-for-byte identical for world-lines that have
+/// only ever been appended to. Version 2 appends a fixed 44-byte authenticated reference
+/// (`sequence`, `ciphertext_len`, `cmt4` tag) to the active [`RECORD_MANIFEST`] record after the
+/// MMR peaks, keeping every witness `O(log segments)` in size while committing to arbitrary
+/// slab-span geometry and deletions (AUDIT OQ-29, OQ-30).
 fn encode_witness_plain(
     sequence: u64,
     previous_witness_tag: &[u8; 32],
     last_segment_tag: &[u8; 32],
     epoch: &[u8; 32],
     mmr: &Mmr,
-    document_order: &[u32],
-) -> Result<Vec<u8>, LineError> {
-    if document_order.len() > MAX_WITNESS_ORDER_IDS {
-        return Err(LineError::TooManySegments);
-    }
-    let mut out = Vec::with_capacity(WITNESS_BASE_BYTES + 4 + document_order.len() * 4);
-    out.push(if document_order.is_empty() { 1 } else { 2 });
+    manifest_ref: Option<ManifestRef>,
+) -> Vec<u8> {
+    let extra = if manifest_ref.is_some() {
+        WITNESS_MANIFEST_REF_BYTES
+    } else {
+        0
+    };
+    let mut out = Vec::with_capacity(WITNESS_BASE_BYTES + 64 * 32 + extra);
+    out.push(if manifest_ref.is_none() { 1 } else { 2 });
     out.extend_from_slice(&sequence.to_le_bytes());
     out.extend_from_slice(&mmr.count().to_le_bytes());
     out.extend_from_slice(previous_witness_tag);
@@ -1129,13 +1581,12 @@ fn encode_witness_plain(
     out.extend_from_slice(epoch);
     out.extend_from_slice(&mmr.root());
     mmr.encode_peaks(&mut out);
-    if !document_order.is_empty() {
-        out.extend_from_slice(&(document_order.len() as u32).to_le_bytes());
-        for &id in document_order {
-            out.extend_from_slice(&id.to_le_bytes());
-        }
+    if let Some(mref) = manifest_ref {
+        out.extend_from_slice(&mref.sequence.to_le_bytes());
+        out.extend_from_slice(&mref.ciphertext_len.to_le_bytes());
+        out.extend_from_slice(&mref.tag);
     }
-    Ok(out)
+    out
 }
 
 struct DecodedWitness {
@@ -1145,7 +1596,7 @@ struct DecodedWitness {
     last_segment_tag: [u8; 32],
     epoch: [u8; 32],
     mmr: Mmr,
-    document_order: Vec<u32>,
+    manifest_ref: Option<ManifestRef>,
 }
 
 fn decode_witness_plain(bytes: &[u8]) -> Result<DecodedWitness, LineError> {
@@ -1172,23 +1623,17 @@ fn decode_witness_plain(bytes: &[u8]) -> Result<DecodedWitness, LineError> {
     }
     offset = peaks_end;
 
-    let document_order = if bytes[0] == 2 {
-        let count = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
-        let count = count as usize;
-        if count == 0 || count > MAX_WITNESS_ORDER_IDS {
-            return Err(LineError::InvalidRecord);
-        }
-        let mut order = Vec::with_capacity(count);
-        for _ in 0..count {
-            let id = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
-            if u64::from(id) >= segment_count {
-                return Err(LineError::InvalidRecord);
-            }
-            order.push(id);
-        }
-        order
+    let manifest_ref = if bytes[0] == 2 {
+        let m_seq = take_u64(bytes, &mut offset)?;
+        let m_len = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+        let m_tag = take_array::<32>(bytes, &mut offset)?;
+        Some(ManifestRef {
+            sequence: m_seq,
+            ciphertext_len: m_len,
+            tag: m_tag,
+        })
     } else {
-        Vec::new()
+        None
     };
     if offset != bytes.len() {
         return Err(LineError::InvalidRecord);
@@ -1200,7 +1645,7 @@ fn decode_witness_plain(bytes: &[u8]) -> Result<DecodedWitness, LineError> {
         last_segment_tag,
         epoch,
         mmr: peaks,
-        document_order,
+        manifest_ref,
     })
 }
 
@@ -1211,12 +1656,29 @@ fn segment_aad(
     previous_tag: &[u8; 32],
     plaintext_len: u32,
 ) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(21 + 16 + 32 + 8 + 32 + 4);
+    let mut aad = Vec::with_capacity(20 + 16 + 32 + 8 + 32 + 4);
     aad.extend_from_slice(b"HOLONOMY_V6_SEGMENT\0");
     aad.extend_from_slice(header.file_id());
     aad.extend_from_slice(epoch);
     aad.extend_from_slice(&sequence.to_le_bytes());
     aad.extend_from_slice(previous_tag);
+    aad.extend_from_slice(&plaintext_len.to_le_bytes());
+    aad
+}
+
+fn manifest_aad(
+    header: &LineHeader,
+    epoch: &[u8; 32],
+    sequence: u64,
+    previous_witness_tag: &[u8; 32],
+    plaintext_len: u32,
+) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(21 + 16 + 32 + 8 + 32 + 4);
+    aad.extend_from_slice(b"HOLONOMY_V6_MANIFEST\0");
+    aad.extend_from_slice(header.file_id());
+    aad.extend_from_slice(epoch);
+    aad.extend_from_slice(&sequence.to_le_bytes());
+    aad.extend_from_slice(previous_witness_tag);
     aad.extend_from_slice(&plaintext_len.to_le_bytes());
     aad
 }
@@ -1227,7 +1689,7 @@ fn witness_aad(
     sequence: u64,
     previous_witness_tag: &[u8; 32],
 ) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(21 + 16 + 32 + 8 + 32);
+    let mut aad = Vec::with_capacity(20 + 16 + 32 + 8 + 32);
     aad.extend_from_slice(b"HOLONOMY_V6_WITNESS\0");
     aad.extend_from_slice(header.file_id());
     aad.extend_from_slice(epoch);
@@ -1260,6 +1722,8 @@ fn encode_record(kind: u8, sequence: u64, sealed: SealedObject) -> Result<Vec<u8
 
 struct ScanResult {
     segments: Vec<SegmentDescriptor>,
+    manifests: Vec<ManifestDescriptor>,
+    manifest: Option<Vec<LineSlab>>,
     mmr: Mmr,
     next_witness_sequence: u64,
     last_witness_tag: [u8; 32],
@@ -1267,12 +1731,13 @@ struct ScanResult {
     committed_end: u64,
     observed_len: u64,
     recovery: RecoveryInfo,
-    document_order: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
 struct Checkpoint {
     committed_segment_count: usize,
+    committed_manifest_count: usize,
+    active_manifest: Option<usize>,
     mmr: MmrCheckpoint,
     next_witness_sequence: u64,
     last_witness_tag: [u8; 32],
@@ -1338,12 +1803,12 @@ fn scan_records<R: Read + Seek>(
     reader.seek(SeekFrom::Start(HEADER_BYTES as u64))?;
 
     let mut segments = Vec::new();
+    let mut manifests = Vec::new();
     let mut mmr = Mmr::new();
     let mut scanned_last_segment_tag = [0u8; 32];
     let mut next_witness_sequence = 0u64;
     let mut last_witness_tag = [0u8; 32];
-    let mut checkpoint = None;
-    let mut latest_document_order: Vec<u32> = Vec::new();
+    let mut checkpoint: Option<Checkpoint> = None;
 
     loop {
         let record_start = reader.stream_position()?;
@@ -1365,17 +1830,18 @@ fn scan_records<R: Read + Seek>(
             return Err(LineError::InvalidRecord);
         }
         let kind = frame_header[4];
-        if kind != RECORD_SEGMENT && kind != RECORD_WITNESS {
+        if kind != RECORD_SEGMENT && kind != RECORD_WITNESS && kind != RECORD_MANIFEST {
             return Err(LineError::InvalidRecord);
         }
         let body_len = u32::from_le_bytes(frame_header[8..12].try_into().unwrap());
         if body_len < RECORD_FIXED_BYTES as u32 {
             return Err(LineError::InvalidRecord);
         }
-        let maximum = if kind == RECORD_SEGMENT {
-            RECORD_FIXED_BYTES as u32 + MAX_SEGMENT_BYTES + AEAD_TAG_BYTES
-        } else {
-            RECORD_FIXED_BYTES as u32 + MAX_WITNESS_CIPHERTEXT_BYTES
+        let maximum = match kind {
+            RECORD_SEGMENT => RECORD_FIXED_BYTES as u32 + MAX_SEGMENT_BYTES + AEAD_TAG_BYTES,
+            RECORD_WITNESS => RECORD_FIXED_BYTES as u32 + MAX_WITNESS_CIPHERTEXT_BYTES,
+            RECORD_MANIFEST => RECORD_FIXED_BYTES as u32 + MAX_MANIFEST_CIPHERTEXT_BYTES,
+            _ => unreachable!(),
         };
         if body_len > maximum {
             return Err(LineError::InvalidRecord);
@@ -1437,6 +1903,32 @@ fn scan_records<R: Read + Seek>(
             mmr.append(leaf)?;
             scanned_last_segment_tag = tag;
             reader.seek(SeekFrom::Current(i64::from(ciphertext_len)))?;
+        } else if kind == RECORD_MANIFEST {
+            let Some(prev) = checkpoint else {
+                return Err(LineError::InvalidRecord);
+            };
+            if manifests.len() != prev.committed_manifest_count
+                || ciphertext_len < AEAD_TAG_BYTES + MANIFEST_HEADER_BYTES as u32
+                || ciphertext_len > MAX_MANIFEST_CIPHERTEXT_BYTES
+                || sequence != manifests.len() as u64
+            {
+                return Err(LineError::InvalidRecord);
+            }
+            manifests
+                .try_reserve(1)
+                .map_err(|_| LineError::ResourceExhausted)?;
+            manifests.push(ManifestDescriptor {
+                sequence,
+                segment_limit: segments.len(),
+                ciphertext_offset,
+                ciphertext_len,
+                nonce,
+                tag,
+                previous_witness_tag: last_witness_tag,
+            });
+            // Seek past historical manifests during the scan; only the active manifest named by
+            // the final witness is opened below.
+            reader.seek(SeekFrom::Current(i64::from(ciphertext_len)))?;
         } else {
             if ciphertext_len < AEAD_TAG_BYTES + WITNESS_BASE_BYTES as u32
                 || ciphertext_len > MAX_WITNESS_CIPHERTEXT_BYTES
@@ -1465,17 +1957,47 @@ fn scan_records<R: Read + Seek>(
                 || (sequence == 0
                     && (witness.segment_count != 0
                         || witness.previous_witness_tag != [0u8; 32]
-                        || witness.last_segment_tag != [0u8; 32]))
+                        || witness.last_segment_tag != [0u8; 32]
+                        || witness.manifest_ref.is_some()))
             {
                 return Err(LineError::AuthenticationRejected);
             }
-            if !witness.document_order.is_empty() {
-                latest_document_order = witness.document_order;
-            }
+            let prev_manifest_count = checkpoint.map_or(0, |c| c.committed_manifest_count);
+            let prev_active = checkpoint.and_then(|c| c.active_manifest);
+            let active_manifest = match witness.manifest_ref {
+                None => {
+                    if manifests.len() != prev_manifest_count || prev_active.is_some() {
+                        return Err(LineError::AuthenticationRejected);
+                    }
+                    None
+                }
+                Some(mref) => {
+                    let index = usize::try_from(mref.sequence)
+                        .map_err(|_| LineError::AuthenticationRejected)?;
+                    let wrote_new =
+                        manifests.len() == prev_manifest_count + 1 && index == prev_manifest_count;
+                    let kept_prev =
+                        manifests.len() == prev_manifest_count && prev_active == Some(index);
+                    if !wrote_new && !kept_prev {
+                        return Err(LineError::AuthenticationRejected);
+                    }
+                    let descriptor = manifests
+                        .get(index)
+                        .ok_or(LineError::AuthenticationRejected)?;
+                    if descriptor.ciphertext_len != mref.ciphertext_len
+                        || descriptor.tag != mref.tag
+                    {
+                        return Err(LineError::AuthenticationRejected);
+                    }
+                    Some(index)
+                }
+            };
             last_witness_tag = tag;
             next_witness_sequence = sequence.checked_add(1).ok_or(LineError::TooManySegments)?;
             checkpoint = Some(Checkpoint {
                 committed_segment_count: segments.len(),
+                committed_manifest_count: manifests.len(),
+                active_manifest,
                 mmr: MmrCheckpoint::from_mmr(&mmr),
                 next_witness_sequence,
                 last_witness_tag,
@@ -1491,11 +2013,24 @@ fn scan_records<R: Read + Seek>(
 
     let checkpoint = checkpoint.ok_or(LineError::NoCommittedWitness)?;
     segments.truncate(checkpoint.committed_segment_count);
+    manifests.truncate(checkpoint.committed_manifest_count);
+    let manifest = if let Some(index) = checkpoint.active_manifest {
+        let descriptor = manifests.get(index).ok_or(LineError::InvalidRecord)?;
+        let allowed = segments
+            .get(..descriptor.segment_limit)
+            .ok_or(LineError::InvalidRecord)?;
+        Some(read_manifest_from(
+            reader, header, epoch, key, descriptor, allowed,
+        )?)
+    } else {
+        None
+    };
     let mmr = checkpoint.mmr.to_mmr()?;
     let trailing_bytes = observed_len.saturating_sub(checkpoint.committed_end);
     Ok(ScanResult {
-        document_order: latest_document_order,
         segments,
+        manifests,
+        manifest,
         mmr,
         next_witness_sequence: checkpoint.next_witness_sequence,
         last_witness_tag: checkpoint.last_witness_tag,

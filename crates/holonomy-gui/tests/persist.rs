@@ -323,12 +323,8 @@ fn a_document_typed_before_its_end_reads_in_document_order_after_a_reopen() {
     );
 }
 
-/// OQ-30: a deletion that reaches sealed text is committed on the next save.
-///
-/// `Typing::delete` is still a pointer operation, so the cut itself writes nothing. At the next
-/// save the file-backed sink can read the surviving leaves, so the session materializes them as a
-/// new sealed segment and records it as the document order. The old bytes remain in the file (OQ-14)
-/// but are no longer part of the document a reopen rebuilds.
+/// OQ-30: a deletion that reaches sealed text commits an authenticated sub-segment spine manifest
+/// on the next save, with zero segment rewrites and a single witness commit.
 #[test]
 fn a_deleted_tail_is_committed_on_save_and_hidden_after_a_reopen() {
     let path = temp_path("erase");
@@ -344,40 +340,47 @@ fn a_deleted_tail_is_committed_on_save_and_hidden_after_a_reopen() {
 
     // The text is sealed first, on purpose: a cut *inside* the open buffer is an in-place edit and
     // would seal a shortened segment, which is a different (and sound) code path. The case that
-    // matters is a cut across bytes the file already holds, which takes the spine path.
+    // matters is a cut across bytes the file already holds, which takes the spine manifest path.
     for _ in 0..4 {
         window.press(Key::Left, Modifiers::shift()).expect("moved");
     }
     window
         .press(Key::Backspace, Modifiers::none())
         .expect("deleted");
+    assert!(
+        window.has_pending(),
+        "a structural cut across sealed text leaves the window unsaved until flushed"
+    );
     assert_eq!(
         text(&mut window),
         "delet",
         "the live session must show the cut"
     );
     assert!(save(&mut window), "a save after a cut must still succeed");
+    assert!(
+        !window.has_pending(),
+        "saving the spine manifest clears the unsaved state"
+    );
     assert_eq!(
         document.segment_count(),
-        segments + 1,
-        "a cut across sealed text rewrites its surviving bytes as a new segment (OQ-30)"
+        segments,
+        "a cut across sealed text commits a sub-segment slab manifest with zero segment rewrites"
     );
     let witnesses_after_cut = document.witness_count();
     assert_eq!(
         witnesses_after_cut,
-        witnesses_before + 2,
-        "the rewrite and its document-order commit each warrant once (OQ-30)"
+        witnesses_before + 1,
+        "committing the spine manifest warrants once"
     );
     drop(window);
     drop(document);
 
-    // The segment holding the deleted text is still in the file, and still authentic.
+    // The segment holding the deleted text is still in the file until compaction, and authentic.
     let reopened = Document::open(&path.0, PASSPHRASE).expect("opens");
     let verified = reopened.verify().expect("verifies");
     assert_eq!(
-        verified.segments_verified,
-        segments + 1,
-        "the shortened leaf is authenticated alongside the old one"
+        verified.segments_verified, segments,
+        "only the original segment exists on the world-line"
     );
     let mut window = open_window(&reopened);
     let shown = text(&mut window);
@@ -390,4 +393,133 @@ fn a_deleted_tail_is_committed_on_save_and_hidden_after_a_reopen() {
          witnesses_after_cut={witnesses_after_cut} plaintext_bytes_verified={}",
         verified.plaintext_bytes_verified
     );
+}
+
+#[test]
+fn mid_segment_insertion_empty_deletion_and_post_save_undo_survive_reopen() {
+    let path = temp_path("spine-manifest");
+    let document = create(&path.0);
+    let mut window = open_window(&document);
+    type_text(&mut window, "hello world");
+    assert!(save(&mut window));
+    assert_eq!(document.segment_count(), 1);
+
+    // Move into the middle of the single sealed segment ("hello |world") and insert "brave ".
+    for _ in 0..5 {
+        window.press(Key::Left, Modifiers::none()).expect("moved");
+    }
+    type_text(&mut window, "brave ");
+    assert_eq!(text(&mut window), "hello brave world");
+    assert!(save(&mut window));
+    assert_eq!(
+        document.segment_count(),
+        2,
+        "splitting a sealed segment appends only the newly typed middle leaf"
+    );
+    drop(window);
+    drop(document);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("opens");
+    let mut window = open_window(&reopened);
+    assert_eq!(text(&mut window), "hello brave world");
+
+    // Undo after reopen is inert; type a burst, save it, then undo that burst (`Ctrl+Z`) and save.
+    window.press(Key::End, Modifiers::control()).expect("end");
+    type_text(&mut window, "!");
+    assert!(save(&mut window));
+    window
+        .press(Key::Character('z'), Modifiers::control())
+        .expect("undo");
+    assert_eq!(text(&mut window), "hello brave world");
+    assert!(
+        window.has_pending(),
+        "undoing a sealed edit marks the spine dirty"
+    );
+    assert!(save(&mut window));
+    drop(window);
+    drop(reopened);
+
+    let after_undo = Document::open(&path.0, PASSPHRASE).expect("opens");
+    let mut window = open_window(&after_undo);
+    assert_eq!(text(&mut window), "hello brave world");
+
+    // Select all + Backspace + Save commits an explicit empty manifest so reopen yields "".
+    window
+        .press(Key::Character('a'), Modifiers::control())
+        .expect("select all");
+    window
+        .press(Key::Backspace, Modifiers::none())
+        .expect("erase all");
+    assert_eq!(text(&mut window), "");
+    assert!(window.has_pending());
+    assert!(save(&mut window));
+    drop(window);
+    drop(after_undo);
+
+    let emptied = Document::open(&path.0, PASSPHRASE).expect("opens");
+    let mut window = open_window(&emptied);
+    assert_eq!(
+        text(&mut window),
+        "",
+        "emptying a sealed document must reopen empty rather than falling back to append order"
+    );
+}
+
+#[test]
+fn nfc_and_nfd_passphrases_open_the_same_document_and_compaction_purges_deleted_history() {
+    let source_path = temp_path("compact-src");
+    let dest_path = temp_path("compact-dst");
+    let nfd = "cafe\u{0301} secret".as_bytes();
+    let nfc = "caf\u{00E9} secret".as_bytes();
+
+    let document =
+        Document::create_with(&source_path.0, nfd, store::test_params()).expect("creates with NFD");
+    let mut window = open_window(&document);
+    type_text(&mut window, "discarded prefix -- surviving prose");
+    assert!(save(&mut window));
+    window.press(Key::Home, Modifiers::control()).expect("home");
+    for _ in 0..20 {
+        window
+            .press(Key::Right, Modifiers::shift())
+            .expect("select prefix");
+    }
+    window
+        .press(Key::Backspace, Modifiers::none())
+        .expect("delete prefix");
+    assert_eq!(text(&mut window), "surviving prose");
+    assert!(save(&mut window));
+    drop(window);
+    drop(document);
+
+    // Reopen with the canonically equivalent NFC spelling (OQ-28).
+    let reopened = Document::open(&source_path.0, nfc).expect("NFC opens NFD-created document");
+    assert_eq!(
+        reopened.verify().expect("verifies").plaintext_bytes_verified,
+        35,
+        "before compaction, the deleted prefix still lives in the append-only segment"
+    );
+
+    // Wrong confirmation passphrase refuses compaction without creating the destination file.
+    assert!(matches!(
+        reopened.compact_to(&dest_path.0, b"wrong confirmation"),
+        Err(store::StoreError::Refused)
+    ));
+    assert!(!dest_path.0.exists());
+
+    // Matching confirmation passphrase compacts only the active spine into a fresh world-line.
+    let compacted = reopened
+        .compact_to(&dest_path.0, nfd)
+        .expect("compacts with confirmed passphrase");
+    let report = compacted.verify().expect("compacted verifies");
+    assert_eq!(report.segments_verified, 1);
+    assert_eq!(
+        report.plaintext_bytes_verified,
+        "surviving prose".len() as u64,
+        "compacted world-line holds only the surviving prose bytes (OQ-14)"
+    );
+    drop(compacted);
+
+    let reopened_compacted = Document::open(&dest_path.0, nfc).expect("reopens compacted");
+    let mut window = open_window(&reopened_compacted);
+    assert_eq!(text(&mut window), "surviving prose");
 }

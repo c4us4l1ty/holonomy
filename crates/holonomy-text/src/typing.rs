@@ -250,9 +250,10 @@ pub struct Typing<S> {
     steps: Vec<Step>,
     /// States an undo left behind, oldest first — the redo stack.
     undone: Vec<Step>,
-    /// A cut across sealed text the file cannot express by pointers alone (OQ-30). The next save
-    /// materializes the surviving document into a new leaf, if the sink can read sealed bytes.
-    rewrite_pending: bool,
+    /// Whether the sealed spine differs from what has been committed to the sink (for example
+    /// after a deletion across sealed text, or an undo/redo of a root step). Cleared only after
+    /// the sink confirms the manifest or combined append commit (OQ-29, OQ-30).
+    structure_dirty: bool,
 }
 
 impl<S: SegmentSink> Typing<S> {
@@ -280,7 +281,7 @@ impl<S: SegmentSink> Typing<S> {
             sealed_bytes: 0,
             steps: Vec::new(),
             undone: Vec::new(),
-            rewrite_pending: false,
+            structure_dirty: false,
         }
     }
 
@@ -320,12 +321,11 @@ impl<S: SegmentSink> Typing<S> {
     ///
     /// A range inside the open buffer is one in-place edit, and the keystroke path stays the
     /// keystroke path. A range that reaches sealed text seals what is open first — so every offset
-    /// is the tree's own and no correction is needed — and then takes the range out of the spine.
-    /// Either way **no bytes are written**: the world-line keeps what was deleted, which is OQ-14's
-    /// subject, and the leaf fragments a cut leaves behind are OQ-9's. That also means a cut across
-    /// sealed text is not *persisted* — the spine is memory, a sink only appends, and the next
-    /// open rebuilds the geometry from the segments it finds (OQ-30). A caller that shows "saved"
-    /// after a deletion is describing the seal that followed it, not the deletion.
+    /// is the tree's own and no correction is needed — and then takes the range out of the spine
+    /// and marks the spine geometry dirty for the next [`Self::flush`]. Either way **no segment
+    /// plaintext is read or rewritten**: the world-line keeps the historical ciphertext until
+    /// explicit compaction (OQ-14), while the manifest committed on save records the exact
+    /// surviving slab spans so deleted text does not return on reopen (OQ-29, OQ-30).
     ///
     /// Deleting the whole open buffer takes the leaf with it and abandons the source: the tree may
     /// not carry a leaf that names nothing.
@@ -379,7 +379,7 @@ impl<S: SegmentSink> Typing<S> {
         self.push_root(start);
         self.spine = self.spine.remove_range(start, end)?;
         self.next_at = Some(start);
-        self.rewrite_pending = true;
+        self.structure_dirty = true;
         Ok(())
     }
 
@@ -550,7 +550,6 @@ impl<S: SegmentSink> Typing<S> {
 
     /// Moves the session to a length, touching at most one leaf — never bytes.
     fn restore_mark(&mut self, mark: Mark) -> Result<(), TypingError> {
-        self.rewrite_pending = false;
         match (mark, self.open) {
             (Mark::Live { at, len }, Some(open)) if open.at != at => {
                 // The open leaf is not the one this state was taken over — undo and redo can move a
@@ -606,7 +605,7 @@ impl<S: SegmentSink> Typing<S> {
         pending: usize,
         held: Option<Vec<u8>>,
     ) -> Result<(), TypingError> {
-        self.rewrite_pending = false;
+        self.structure_dirty = true;
         if let Some(open) = self.open {
             self.sources.close(open.source);
             self.open = None;
@@ -908,6 +907,13 @@ impl<S: SegmentSink> Typing<S> {
         &self.buffer.as_bytes()[..live]
     }
 
+    /// Whether the sealed spine carries a cut, deletion, or root-level undo/redo that has not yet
+    /// been committed to the sink (OQ-29, OQ-30).
+    #[must_use]
+    pub fn has_uncommitted_structure(&self) -> bool {
+        self.structure_dirty
+    }
+
     /// The document's length, drafts applied — what the user would call "how long is this".
     #[must_use]
     pub fn document_len(&self) -> u64 {
@@ -957,109 +963,37 @@ impl<S: SegmentSink> Typing<S> {
         Ok(())
     }
 
-    /// The real segment ids named by the spine, in document order, with repeats removed. A leaf
-    /// that was split by a caret move names the same segment twice; the order records it once.
-    fn sealed_order(&self) -> Vec<SegmentId> {
-        let mut order: Vec<SegmentId> = Vec::new();
-        for span in self.spine.spans_in(0, self.spine.len()) {
-            if let Some(id) = self.sources.locate(span.slab().segment()).segment() {
-                if !order.contains(&id) {
-                    order.push(id);
-                }
-            }
-        }
-        order
-    }
-
-    /// Tell a sink that can persist document order what the current document looks like (OQ-29).
-    fn report_document_order(&mut self) -> Result<(), TypingError> {
-        let order = self.sealed_order();
-        self.sink
-            .document_order(&order)
-            .map_err(|reason| TypingError::Append { reason })
-    }
-
-    /// A cut across sealed text rewrote the spine but wrote no bytes. Materialize the surviving
-    /// document into one new leaf so a reopen cannot bring the removed text back (OQ-30).
-    fn rewrite_sealed(&mut self) -> Result<(), TypingError> {
-        let spans = self.spine.spans_in(0, self.spine.len());
-        let mut cache: Vec<(SegmentId, Vec<u8>)> = Vec::new();
-        for span in &spans {
-            let Some(id) = self.sources.locate(span.slab().segment()).segment() else {
-                return Err(TypingError::Append {
-                    reason: "a sealed leaf has no segment id".to_owned(),
-                });
-            };
-            if !cache.iter().any(|(cached, _)| *cached == id) {
-                match self
-                    .sink
-                    .load_segment(id)
-                    .map_err(|reason| TypingError::Append { reason })?
-                {
-                    Some(bytes) => cache.push((id, bytes)),
-                    // A sink without sealed reads keeps the old pointer-only cut.
-                    None => {
-                        self.rewrite_pending = false;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        let mut rebuilt = Vec::new();
-        for span in &spans {
-            let id = self
-                .sources
-                .locate(span.slab().segment())
-                .segment()
-                .expect("checked above");
-            let bytes = &cache
-                .iter()
-                .find(|(cached, _)| *cached == id)
-                .expect("cached above")
-                .1;
-            let start = span.slab().start() as usize;
-            let end = span.slab().end() as usize;
-            let slice = bytes.get(start..end).ok_or_else(|| TypingError::Append {
-                reason: "a sealed leaf names bytes outside its segment".to_owned(),
+    /// Resolves a sealed slab's provisional or direct source address into its world-line segment.
+    fn resolve_slab(&self, slab: Slab) -> Result<Slab, TypingError> {
+        let segment = self
+            .sources
+            .locate(slab.segment())
+            .segment()
+            .ok_or_else(|| TypingError::Append {
+                reason: format!("sealed leaf {} has no segment id", slab.segment()),
             })?;
-            rebuilt.extend_from_slice(slice);
+        Ok(Slab::new(segment, slab.start(), slab.len()))
+    }
+
+    /// Commits the current fully-sealed spine geometry to the sink without reading or appending
+    /// any segment bytes (OQ-29, OQ-30).
+    fn commit_current_spine(&mut self) -> Result<(), TypingError> {
+        let mut slabs = Vec::new();
+        for span in self.spine.spans_in(0, self.spine.len()) {
+            slabs.push(self.resolve_slab(span.slab())?);
         }
-        self.rewrite_pending = false;
-        let length = rebuilt.len();
-        if length == 0 {
-            self.spine = Spine::empty();
-            self.draft.clear();
-            self.next_at = Some(0);
-            self.sink
-                .document_order(&[])
-                .map_err(|reason| TypingError::Append { reason })?;
-            return Ok(());
-        }
-        let appended = self
-            .sink
-            .append_segment(&rebuilt)
-            .map_err(|reason| TypingError::Append { reason })?;
-        let source = self.sources.open();
-        self.sources
-            .seal(source, appended.segment)
-            .expect("the register handed this id out");
-        let length = u32::try_from(length).expect("a document leaf fits in u32");
-        self.spine = Spine::from_slabs([Slab::new(source, 0, length)]);
-        self.draft.clear();
-        self.open = None;
-        self.next_at = Some(u64::from(length));
-        self.sealed_bytes += u64::from(length);
         self.sink
-            .document_order(&[appended.segment])
+            .commit_spine(&slabs)
             .map_err(|reason| TypingError::Append { reason })?;
+        self.structure_dirty = false;
         Ok(())
     }
 
     /// Seals the open source: append once, rename, correct the leaf's length, drop the draft.
     fn seal(&mut self) -> Result<(), TypingError> {
         let Some(open) = self.open else {
-            return if self.rewrite_pending {
-                self.rewrite_sealed()
+            return if self.structure_dirty {
+                self.commit_current_spine()
             } else {
                 Ok(())
             };
@@ -1084,11 +1018,23 @@ impl<S: SegmentSink> Typing<S> {
             self.open = None;
             self.next_at = Some(open.at);
             self.undone.clear();
+            if self.structure_dirty {
+                self.commit_current_spine()?;
+            }
             return Ok(());
+        }
+        let end = open.at + u64::from(open.registered);
+        let mut before = Vec::new();
+        for span in self.spine.spans_in(0, open.at) {
+            before.push(self.resolve_slab(span.slab())?);
+        }
+        let mut after = Vec::new();
+        for span in self.spine.spans_in(end, self.spine.len()) {
+            after.push(self.resolve_slab(span.slab())?);
         }
         let appended: Appended = self
             .sink
-            .append_segment(&self.buffer.as_bytes()[..len])
+            .append_segment_with_spine(&self.buffer.as_bytes()[..len], &before, &after)
             .map_err(|reason| TypingError::Append { reason })?;
         self.sources
             .seal(open.source, appended.segment)
@@ -1098,7 +1044,6 @@ impl<S: SegmentSink> Typing<S> {
             0,
             u32::try_from(len).expect("capacity fits in u32"),
         );
-        let end = open.at + u64::from(open.registered);
         // The state being sealed, kept so an undo can come back to it (D-43). It has to be taken
         // now: the replace below is what makes the leaf final, and the buffer is dropped after it.
         let settled = self.settled_spine()?;
@@ -1108,10 +1053,7 @@ impl<S: SegmentSink> Typing<S> {
         self.sealed_bytes += u64::try_from(len).expect("a buffer fits in u64");
         self.next_at = Some(open.at + u64::try_from(len).expect("a buffer fits in u64"));
         self.open = None;
-        self.report_document_order()?;
-        if self.rewrite_pending {
-            self.rewrite_sealed()?;
-        }
+        self.structure_dirty = false;
         // A seal used to be a floor that cleared the history — and that was D-43: the buffer is
         // dropped here, so no state behind the seal could produce the bytes it promised, and every
         // caret move seals (an open leaf's caret is its end), so one arrow key made the typing
@@ -2074,5 +2016,126 @@ mod tests {
         assert_eq!(typing.pending(), b"ghij");
         assert_eq!(typing.document_len(), 20);
         assert_eq!(typing.spine().slab_count(), 3);
+    }
+
+    #[derive(Debug, Default)]
+    struct SpineRecorder {
+        segments: Vec<Vec<u8>>,
+        spines: Vec<Vec<Slab>>,
+        fail_commit: bool,
+    }
+
+    impl SegmentSink for SpineRecorder {
+        fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+            let segment = SegmentId::new(self.segments.len() as u64);
+            self.segments.push(plaintext.to_vec());
+            Ok(Appended {
+                segment,
+                witness_sequence: self.segments.len() as u64,
+                segment_root: [0u8; 32],
+                bytes_written: plaintext.len() as u64,
+            })
+        }
+
+        fn append_segment_with_spine(
+            &mut self,
+            plaintext: &[u8],
+            before: &[Slab],
+            after: &[Slab],
+        ) -> Result<Appended, String> {
+            let appended = self.append_segment(plaintext)?;
+            let mut full = before.to_vec();
+            full.push(Slab::new(
+                appended.segment,
+                0,
+                u32::try_from(plaintext.len()).expect("fits"),
+            ));
+            full.extend_from_slice(after);
+            self.spines.push(full);
+            Ok(appended)
+        }
+
+        fn commit_spine(&mut self, slabs: &[Slab]) -> Result<(), String> {
+            if self.fail_commit {
+                return Err("injected manifest commit failure".to_string());
+            }
+            self.spines.push(slabs.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mid_segment_insert_and_sealed_deletion_commit_exact_slabs_without_rewriting_bytes() {
+        let mut typing = Typing::new(SpineRecorder::default(), 64);
+        typing.insert(b"hello world").expect("typed");
+        typing.flush().expect("flushed");
+        assert!(!typing.has_uncommitted_structure());
+        assert_eq!(typing.sink.segments.len(), 1);
+
+        // Insert "dear " in the middle of sealed segment 0 (`0..6` + `new` + `6..11`).
+        typing.insert_at(6, b"dear ").expect("inserted mid-segment");
+        typing.flush().expect("flushed mid-segment insert");
+        assert_eq!(typing.sink.segments.len(), 2);
+        assert_eq!(
+            typing.sink.spines.last().expect("recorded spine"),
+            &vec![
+                Slab::new(SegmentId::new(0), 0, 6),
+                Slab::new(SegmentId::new(1), 0, 5),
+                Slab::new(SegmentId::new(0), 6, 5),
+            ]
+        );
+
+        // Delete across sealed text ("dear "): appends ZERO new segments and commits the cut.
+        typing.delete(6, 11).expect("deleted sealed text");
+        assert!(typing.has_uncommitted_structure());
+
+        // A failed commit keeps `has_uncommitted_structure()` true so "saved" is never claimed.
+        typing.sink.fail_commit = true;
+        assert!(typing.flush().is_err());
+        assert!(typing.has_uncommitted_structure());
+
+        typing.sink.fail_commit = false;
+        typing.flush().expect("committed cut");
+        assert!(!typing.has_uncommitted_structure());
+        assert_eq!(
+            typing.sink.segments.len(),
+            2,
+            "deletion across sealed text must not append or rewrite segments"
+        );
+        assert_eq!(
+            typing.sink.spines.last().expect("recorded cut"),
+            &vec![
+                Slab::new(SegmentId::new(0), 0, 6),
+                Slab::new(SegmentId::new(0), 6, 5),
+            ]
+        );
+
+        // Emptying the entire document commits an explicit empty slab list.
+        typing.delete(0, typing.document_len()).expect("emptied");
+        assert!(typing.has_uncommitted_structure());
+        typing.flush().expect("committed empty document");
+        assert!(!typing.has_uncommitted_structure());
+        assert!(typing.sink.spines.last().expect("recorded empty").is_empty());
+    }
+
+    #[test]
+    fn undo_after_a_sealing_move_marks_structure_dirty_until_flushed() {
+        let mut typing = Typing::new(SpineRecorder::default(), 64);
+        typing.mark();
+        typing.insert(b"abc").expect("typed");
+        // Moving the caret seals segment 0 to the sink while keeping the burst undoable (D-43).
+        typing.insert_at(1, b"").expect("caret move sealed");
+        assert_eq!(typing.sink.segments.len(), 1);
+        assert!(!typing.has_uncommitted_structure());
+
+        assert!(typing.undo().expect("undid sealed burst"));
+        assert_eq!(typing.document_len(), 0);
+        assert!(
+            typing.has_uncommitted_structure(),
+            "disk holds segment 0 while the undone session is empty"
+        );
+        typing.flush().expect("flushed undone state");
+        assert!(!typing.has_uncommitted_structure());
+        assert!(typing.sink.spines.last().expect("recorded empty").is_empty());
     }
 }

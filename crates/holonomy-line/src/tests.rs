@@ -233,14 +233,26 @@ fn a_committed_document_order_survives_a_reopen() {
     line.append_segments(&[b"world", b"hello "]).unwrap();
 
     // The document reads `hello world` although the second leaf was appended last (OQ-29).
-    line.append_structure(&[1, 0]).unwrap();
-    assert_eq!(line.document_order(), vec![(1, 6), (0, 5)]);
+    let expected = vec![
+        LineSlab {
+            segment: 1,
+            start: 0,
+            len: 6,
+        },
+        LineSlab {
+            segment: 0,
+            start: 0,
+            len: 5,
+        },
+    ];
+    line.commit_manifest(&expected).unwrap();
+    assert_eq!(line.document_slabs(), expected);
     assert_eq!(line.recovery_info().trailing_bytes, 0);
     assert_eq!(line.witness_count(), 3);
     drop(line);
 
     let reopened = WorldLine::open(&path.0, dem).unwrap();
-    assert_eq!(reopened.document_order(), vec![(1, 6), (0, 5)]);
+    assert_eq!(reopened.document_slabs(), expected);
     assert_eq!(reopened.recovery_info().trailing_bytes, 0);
     assert_eq!(&reopened.open_segment(1).unwrap()[..], b"hello ");
 }
@@ -1316,6 +1328,316 @@ fn open_rejects_a_weak_or_unbounded_header_before_any_kdf_is_needed() {
         LineHeader::read(&path.0),
         Err(LineError::KdfParametersRejected)
     ));
+}
+
+#[test]
+fn manifest_persists_mid_segment_insert_cut_and_empty_document() {
+    let path = temp_path("manifest-geometry");
+    let salt = [0x51; 64];
+    let (_keys, capsule, dem) = test_material(b"manifest geometry", salt);
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
+    assert!(!line.has_manifest());
+    assert!(line.document_slabs().is_empty());
+
+    line.append_segments(&[&b"hello world"[..]]).unwrap();
+    assert!(!line.has_manifest());
+    assert_eq!(
+        line.document_slabs(),
+        vec![LineSlab {
+            segment: 0,
+            start: 0,
+            len: 11,
+        }]
+    );
+
+    let inserted = [
+        LineSlab {
+            segment: 0,
+            start: 0,
+            len: 6,
+        },
+        LineSlab {
+            segment: 1,
+            start: 0,
+            len: 5,
+        },
+        LineSlab {
+            segment: 0,
+            start: 6,
+            len: 5,
+        },
+    ];
+    line.append_segments_with_manifest(&[&b"dear "[..]], &inserted)
+        .unwrap();
+    assert!(line.has_manifest());
+    assert_eq!(line.witness_count(), 3);
+    drop(line);
+
+    let mut reopened = WorldLine::open(&path.0, dem.duplicate()).unwrap();
+    assert!(reopened.has_manifest());
+    assert_eq!(reopened.document_slabs(), inserted);
+    assert_eq!(reopened.verify().unwrap().segments_verified, 2);
+
+    // Extending an already-manifested world-line via plain `append_segments` preserves the
+    // active geometry and appends the new full segment to the manifest.
+    reopened.append_segments(&[&b"!"[..]]).unwrap();
+    let mut expected = inserted.to_vec();
+    expected.push(LineSlab {
+        segment: 2,
+        start: 0,
+        len: 1,
+    });
+    assert_eq!(reopened.document_slabs(), expected);
+    drop(reopened);
+
+    // Emptying the entire document (`Select All` + `Delete`) persists a zero-slab manifest
+    // rather than falling back to append order.
+    let mut emptied = WorldLine::open(&path.0, dem.duplicate()).unwrap();
+    assert_eq!(emptied.document_slabs(), expected);
+    emptied.commit_manifest(&[]).unwrap();
+    assert!(emptied.has_manifest());
+    assert!(emptied.document_slabs().is_empty());
+    drop(emptied);
+
+    let final_open = WorldLine::open(&path.0, dem.duplicate()).unwrap();
+    assert!(final_open.has_manifest());
+    assert!(final_open.document_slabs().is_empty());
+    assert_eq!(final_open.segment_count(), 3);
+    assert_eq!(final_open.verify().unwrap().segments_verified, 3);
+}
+
+#[test]
+fn open_seeks_over_historical_manifests_and_verify_authenticates_them() {
+    let path = temp_path("manifest-lazy-open");
+    let salt = [0x52; 64];
+    let (_keys, capsule, dem) = test_material(b"manifest lazy open", salt);
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
+    line.append_segments(&[&b"first"[..], &b"second"[..]])
+        .unwrap();
+    line.commit_manifest(&[
+        LineSlab {
+            segment: 1,
+            start: 0,
+            len: 6,
+        },
+        LineSlab {
+            segment: 0,
+            start: 0,
+            len: 5,
+        },
+    ])
+    .unwrap();
+    line.commit_manifest(&[LineSlab {
+        segment: 1,
+        start: 0,
+        len: 6,
+    }])
+    .unwrap();
+    assert_eq!(line.manifests.len(), 2);
+
+    let stale_manifest = line.manifests[0].clone();
+    let active_manifest = line.manifests[1].clone();
+    let mut forbidden: Vec<Range<u64>> = line
+        .segments
+        .iter()
+        .map(|descriptor| {
+            descriptor.ciphertext_offset
+                ..descriptor.ciphertext_offset + u64::from(descriptor.ciphertext_len)
+        })
+        .collect();
+    forbidden.push(
+        stale_manifest.ciphertext_offset
+            ..stale_manifest.ciphertext_offset + u64::from(stale_manifest.ciphertext_len),
+    );
+    drop(line);
+
+    let baseline = fs::read(&path.0).unwrap();
+    let mut guarded = GuardedReader {
+        cursor: Cursor::new(baseline.clone()),
+        forbidden,
+    };
+    let header = LineHeader::read_from(&mut guarded).unwrap();
+    let epoch = header.epoch_id();
+    let scanned = scan_records(&mut guarded, &header, &epoch, &dem).unwrap();
+    assert_eq!(
+        scanned.manifest,
+        Some(vec![LineSlab {
+            segment: 1,
+            start: 0,
+            len: 6,
+        }])
+    );
+
+    // Flipping a byte in a superseded historical manifest does not break lazy open, and full
+    // `verify()` catches the tampering.
+    let mut historical_damaged = baseline.clone();
+    historical_damaged[stale_manifest.ciphertext_offset as usize] ^= 0x40;
+    fs::write(&path.0, &historical_damaged).unwrap();
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).unwrap();
+    assert!(matches!(
+        reopened.verify(),
+        Err(LineError::AuthenticationRejected)
+    ));
+    drop(reopened);
+
+    // Flipping a byte in the active manifest is caught immediately on `open()`.
+    let mut active_damaged = baseline;
+    active_damaged[active_manifest.ciphertext_offset as usize] ^= 0x40;
+    fs::write(&path.0, &active_damaged).unwrap();
+    assert!(matches!(
+        WorldLine::open(&path.0, dem.duplicate()),
+        Err(LineError::AuthenticationRejected)
+    ));
+}
+
+#[test]
+fn short_writes_at_every_byte_of_manifest_commits_recover_cleanly() {
+    let base_path = temp_path("manifest-short-write-base");
+    let salt = [0x53; 64];
+    let (_keys, capsule, dem) = test_material(b"manifest short write", salt);
+    let mut base =
+        WorldLine::create(&base_path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
+    base.append_segments(&[&b"hello world"[..]]).unwrap();
+    let baseline = fs::read(&base_path.0).unwrap();
+
+    let target_slabs = [
+        LineSlab {
+            segment: 0,
+            start: 0,
+            len: 6,
+        },
+        LineSlab {
+            segment: 1,
+            start: 0,
+            len: 5,
+        },
+        LineSlab {
+            segment: 0,
+            start: 6,
+            len: 5,
+        },
+    ];
+    let probe = AppendIoProbeGuard::install(None, None, false);
+    base.append_segments_with_manifest(&[&b"dear "[..]], &target_slabs)
+        .unwrap();
+    let total_bytes = probe.snapshot().bytes_written;
+    drop(probe);
+    drop(base);
+
+    for cut in 0..total_bytes {
+        let trial_path = temp_path("manifest-short-write-trial");
+        fs::write(&trial_path.0, &baseline).unwrap();
+        let mut line = WorldLine::open(&trial_path.0, dem.duplicate()).unwrap();
+        let probe = AppendIoProbeGuard::install(Some(cut), None, false);
+        let result = line.append_segments_with_manifest(&[&b"dear "[..]], &target_slabs);
+        drop(probe);
+        assert!(result.is_err(), "cut at {cut} unexpectedly succeeded");
+        assert!(matches!(
+            line.commit_manifest(&[]),
+            Err(LineError::ReopenRequired)
+        ));
+        drop(line);
+
+        let mut recovered = WorldLine::open(&trial_path.0, dem.duplicate()).unwrap();
+        assert!(!recovered.has_manifest());
+        assert_eq!(recovered.segment_count(), 1);
+        assert_eq!(recovered.recovery_info().trailing_bytes, cut);
+        assert_eq!(recovered.verify().unwrap().segments_verified, 1);
+
+        // Next commit truncates the uncommitted tail and succeeds cleanly.
+        recovered.commit_manifest(&[]).unwrap();
+        assert_eq!(recovered.recovery_info().trailing_bytes, 0);
+        assert!(recovered.document_slabs().is_empty());
+        assert_eq!(recovered.verify().unwrap().segments_verified, 1);
+    }
+}
+
+#[test]
+fn invalid_manifests_are_refused_without_poisoning_or_writing() {
+    let path = temp_path("invalid-manifest");
+    let salt = [0x54; 64];
+    let (_keys, capsule, dem) = test_material(b"invalid manifest", salt);
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
+    line.append_segments(&[&b"five!"[..]]).unwrap();
+    let before = fs::read(&path.0).unwrap();
+
+    for bad in [
+        LineSlab {
+            segment: 0,
+            start: 0,
+            len: 0,
+        },
+        LineSlab {
+            segment: 0,
+            start: 2,
+            len: 4,
+        },
+        LineSlab {
+            segment: 1,
+            start: 0,
+            len: 1,
+        },
+        LineSlab {
+            segment: 0,
+            start: u32::MAX,
+            len: 2,
+        },
+    ] {
+        assert!(matches!(
+            line.commit_manifest(&[bad]),
+            Err(LineError::InvalidManifest(_))
+        ));
+    }
+    assert_eq!(fs::read(&path.0).unwrap(), before);
+    line.commit_manifest(&[LineSlab {
+        segment: 0,
+        start: 0,
+        len: 4,
+    }])
+    .unwrap();
+    assert_eq!(line.verify().unwrap().segments_verified, 1);
+}
+
+#[test]
+fn compact_active_to_erases_deleted_bytes_and_resets_manifest() {
+    let source = temp_path("compact-active-source");
+    let destination = temp_path("compact-active-destination");
+    let salt = [0x55; 64];
+    let params = test_params();
+    let keys = MasterKeys::derive(b"compact active", &salt, None, ParamsClass::Test).unwrap();
+    let (old_capsule, old_dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
+    let old_header = test_header(salt, old_capsule);
+    let old_file_id = *old_header.file_id();
+    let mut line = WorldLine::create(&source.0, old_header, old_dem.duplicate()).unwrap();
+    line.append_segments(&[&b"discarded draft -- kept prose"[..], &b"discardedseg"[..]])
+        .unwrap();
+    line.commit_manifest(&[LineSlab {
+        segment: 0,
+        start: 19,
+        len: 10,
+    }])
+    .unwrap();
+
+    let approval = holonomy_seal::confirm_compaction(
+        b"compact active",
+        &salt,
+        None,
+        &params,
+        keys.unwrap_key(),
+        &old_file_id,
+    )
+    .unwrap();
+    let (new_capsule, new_dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
+    let new_header = test_header(salt, new_capsule);
+    let compacted = line
+        .compact_active_to(&destination.0, new_header, &new_dem, approval)
+        .unwrap();
+
+    assert!(!compacted.has_manifest());
+    assert_eq!(compacted.segment_count(), 1);
+    assert_eq!(compacted.witness_count(), 2);
+    assert_eq!(&compacted.open_segment(0).unwrap()[..], b"kept prose");
+    assert_eq!(compacted.verify().unwrap().plaintext_bytes_verified, 10);
 }
 
 struct GuardedReader {

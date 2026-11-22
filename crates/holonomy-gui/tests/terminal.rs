@@ -241,3 +241,29 @@ fn a_page_is_the_screen_the_window_is_showing_now() {
         window.editor().viewport().sixtyfourths()
     );
 }
+
+#[test]
+fn wide_characters_and_combining_marks_agree_with_terminal_columns() {
+    // OQ-25: `中` occupies two terminal cells, `e\u{0301}` occupies one while retaining its mark,
+    // and `a` occupies one — total four cells, placing the ANSI cursor at 1-based column 5.
+    let mut window = window();
+    type_bytes(&mut window, "中e\u{0301}a".as_bytes());
+    window.draw().expect("drew");
+    let drawn = screen(window.surface(), COLUMNS, " 笔记.wavefunction ");
+    assert!(
+        drawn.contains("中e\u{0301}a\x1b[K\r\n"),
+        "wide glyph or combining mark was mangled or padded with a stray cell:\n{drawn:?}"
+    );
+    assert!(
+        drawn.contains("\x1b[1;5H"),
+        "caret must sit at column 5 after 2 + 1 + 1 cells:\n{drawn:?}"
+    );
+
+    // Truncating a wide status line to 5 columns keeps ` 笔记` (1 + 2 + 2 = 5 cells) rather than
+    // counting characters and overflowing the row.
+    let narrow = screen(window.surface(), 5, " 笔记.wavefunction");
+    assert!(
+        narrow.contains("\x1b[7m 笔记\x1b[0m"),
+        "wide status line was not truncated by display columns:\n{narrow:?}"
+    );
+}

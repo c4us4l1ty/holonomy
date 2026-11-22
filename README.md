@@ -56,16 +56,16 @@ is open — if that last save is refused, the window says so and exits non-zero 
 success (D-49).
 
 A **seal** is the unit of durability: when the 16 KiB buffer fills, its bytes are appended to the
-world-line and witnessed, so text is on disk once it has sealed. The open buffer is written by
-`Ctrl+S`, by an autosave 1.5 s after typing stops, and on quit.
+world-line and witnessed, so text is on disk once it has sealed. The open buffer and any structural
+edits (mid-segment insertions, cuts, or post-save undos) are committed by `Ctrl+S`, by an autosave
+1.5 s after typing stops, and on quit (`RECORD_MANIFEST` + Witness v2, OQ-29 / OQ-30).
 
-**A save appends; it does not record the shape of the document.** The file keeps every
-segment in the order it was written, and nothing in it says where those segments sit. Two
-consequences, both real today and both in the table below: text typed *before* existing text
-reads correctly in the session and reopens in the order it was saved (OQ-29), and text you
-delete is hidden for this session but is still in the file and comes back on the next open
-(OQ-30). If you delete something you need gone, deleting it in the app is not enough — see
-"What is real, and what is not".
+**Deleting text removes it from the document; only compaction removes its ciphertext from the
+log.** An append-only world-line keeps prior segments by design (OQ-14): saving after a deletion
+commits the updated sub-segment spine manifest with zero segment rewrites so deleted text never
+returns on reopen, while `holonomy compact <source.wavefunction> <destination.wavefunction>`
+re-confirms your passphrase and writes a fresh, re-keyed world-line containing only the surviving
+active text (`holonomy verify <document.wavefunction>` authenticates every segment and manifest).
 
 ## What is real, and what is not
 
@@ -74,24 +74,23 @@ detail lives.
 
 | Area | State | Where the truth is |
 | ---- | ----- | ------------------ |
-| Sealed world-line, append + witness | **Real, measured in CI** | `holonomy-line`; L-6 and L-10 are separate CI jobs |
+| Sealed world-line, append + witness + spine manifest + compaction | **Real, measured in CI** | `holonomy-line`; L-6 and L-10 are separate CI jobs |
 | Slab spine, history, resident set | **Real, measured in CI** | `holonomy-text`; zero-allocation keystroke claim counted by an allocator in CI |
-| Commit boundary (seal → world-line) | **Real, measured in CI** | `holonomy-text`; proven against the real container |
-| Eye geometry: clusters, run tree, zoom/DPI, height index | **Real, measured in CI** | `holonomy-eye` |
+| Commit boundary (seal + manifest → world-line) | **Real, measured in CI** | `holonomy-text`; proven against the real container |
+| Eye geometry: clusters, cell display width, run tree, zoom/DPI, height index | **Real, measured in CI** | `holonomy-eye` |
 | Editor loop: intents in, measured frames out | **Real, measured in CI** | `holonomy-shell` |
-| Terminal window: open, type, save, unlock, panel | **Real — this is the app you run** | `holonomy-gui` |
-| That binary, driven end to end by CI | **Real** — created, sealed, reopened, wrong and empty passphrases refused | `scripts/smoke-install.sh` (D-72) |
+| Terminal window & CLI: open, type, save, unlock, panel, `verify`, `compact` | **Real — this is the app you run** | `holonomy-gui` |
+| That binary, driven end to end by CI | **Real** — created, sealed, reopened, verified, compacted, wrong and empty passphrases refused | `scripts/smoke-install.sh` (D-72) |
 | A packaged release or installer | **None.** No artefact is published; you build from source | `docs/TO-APP.md` M8 |
-| GPU backend, font shaping, IME | **Not built** — the window is a grid of characters | `docs/TO-APP.md` M4b-ii |
-| Wide characters (`中`, most emoji) | **Wrong** — claims one cell, terminal draws two | OQ-25 |
+| GPU backend, font shaping, IME | **Not built** — the window is a grid of cells | `docs/TO-APP.md` M4b-ii |
+| Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
 | Right-to-left text (Hebrew, Arabic, …) | **Drawn left-to-right.** A caret never splits a letter's mark, but the visual order is wrong — there is no bidi reordering | OQ-11, D-66 |
 | Crash before a save | **Loses up to 16 KiB** of the most recent typing; nothing older | D-64 |
 | Documents open at once | **One**, one window, one caret. No panes, search, or settings | — |
-| DEM key of each opened document | **Leaked** for the process lifetime | OQ-27 |
-| Passphrase at the prompt | Zeroed, but never held in a `Zeroizing` buffer | OQ-28 |
+| DEM key & passphrase buffers | **Owned and zeroized on drop** — `WorldLine` owns `DEMKey` (`OQ-27`), and prompt input is pre-allocated + NFC-normalized in `PassphraseInput` (`OQ-28`) | `holonomy-seal`, `holonomy-line`, `holonomy-gui` |
 | Height index | Exact for measured leaves; a reveal measures the run to the caret | D-62 |
-| Text typed *before* existing text | **Reopens in the order it was saved**, not where you put it. The session is correct; the next open is not | OQ-29, D-75 |
-| Deleted text | **Comes back on the next open**, and was never erased from the file. A save seals the buffer and records no structural change | OQ-30, OQ-14 |
+| Mid-document edits & deletions | **Durable across reopen** via sealed sub-segment spine manifests (`RECORD_MANIFEST`), with zero segment rewrites on deletion | OQ-29, OQ-30 |
+| Deleted bytes on disk before compaction | **Retained as ciphertext** in the append-only log until explicit `holonomy compact <src> <dst>` writes a fresh re-keyed world-line | OQ-14 |
 | Power-loss safety | **Not qualified** — L-6 is an ENOSPC rehearsal and says so in its job name | Block 10 |
 
 Nothing in this table is aspirational. Every **real** row is exercised by a CI job on every push;

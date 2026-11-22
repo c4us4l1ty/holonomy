@@ -56,29 +56,34 @@ pub trait SegmentSink {
     /// in [`CommitError::Refused`] and leaves both the spine and the world-line as they were.
     fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String>;
 
-    /// Report the document order of sealed segments after a commit (OQ-29).
+    /// Seals `plaintext` as one new segment alongside the resolved spine slabs around it
+    /// (`before` precedes the new segment's full span; `after` follows it).
     ///
-    /// Called after the append and after the session has renamed its open leaf, so the ids are the
-    /// real ones the world-line assigned. A sink that can persist order (the file-backed one)
-    /// overrides this; every other sink keeps the default no-op.
+    /// Sinks backed by a world-line commit both the new segment and any non-implicit slab
+    /// manifest under a single witness; pure segment-log test doubles keep the default, which
+    /// delegates to [`Self::append_segment`].
     ///
     /// # Errors
     ///
-    /// A human-readable message when the sink cannot persist the order.
-    fn document_order(&mut self, _order: &[SegmentId]) -> Result<(), String> {
-        Ok(())
+    /// A human-readable message when the world-line refuses the append or its geometry manifest.
+    fn append_segment_with_spine(
+        &mut self,
+        plaintext: &[u8],
+        _before: &[Slab],
+        _after: &[Slab],
+    ) -> Result<Appended, String> {
+        self.append_segment(plaintext)
     }
 
-    /// Read one sealed segment, for a sink that can rewrite a cut as a new leaf (OQ-30).
-    ///
-    /// `Ok(None)` means this sink cannot read sealed bytes; the session then leaves the cut as a
-    /// pointer operation, which is the behaviour before OQ-30.
+    /// Commits `slabs` as the active document geometry when no new segment bytes are being
+    /// appended — for example after a deletion across sealed text, or an undo of one (OQ-29,
+    /// OQ-30).
     ///
     /// # Errors
     ///
-    /// A human-readable message when the sink has the segment but cannot read it.
-    fn load_segment(&mut self, _segment: SegmentId) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
+    /// A human-readable message when the sink cannot persist the spine geometry.
+    fn commit_spine(&mut self, _slabs: &[Slab]) -> Result<(), String> {
+        Ok(())
     }
 }
 

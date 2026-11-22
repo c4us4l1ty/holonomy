@@ -64,7 +64,7 @@ mod style;
 mod view;
 mod window;
 
-pub use crate::cluster::{ClusterContext, Clusters};
+pub use crate::cluster::{cluster_cells, ClusterContext, Clusters};
 pub use crate::face::{Face, FaceError};
 pub use crate::geom::{Fixed, Point};
 pub use crate::heights::{HeightModel, Window};

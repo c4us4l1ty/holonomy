@@ -195,6 +195,20 @@ if [[ -e "$uncreated" ]]; then
 fi
 echo "smoke: ok — an empty passphrase was refused and created no file"
 
+# --- 6. verify and compact subcommands work on the shipped binary -----------------------------
+verify_out="$(printf '%s\n' "$phrase" | "$binary" verify "$document")"
+if [[ "$verify_out" != *"verified ("* ]]; then
+  echo "smoke: FAIL — verify did not report authentication: $verify_out" >&2
+  exit 1
+fi
+compacted="$work_dir/compacted.wavefunction"
+compact_out="$(printf '%s\n%s\n' "$phrase" "$phrase" | "$binary" compact "$document" "$compacted")"
+if [[ ! -f "$compacted" || "$compact_out" != *"compacted from"* ]]; then
+  echo "smoke: FAIL — compact did not create a compacted world-line: $compact_out" >&2
+  exit 1
+fi
+echo "smoke: ok — verify and compact subcommands authenticated and re-keyed the world-line"
+
 # --- summary ----------------------------------------------------------------------------------
 # The marker is what CI greps, following the other measured jobs. The numbers are the ones this run
 # actually saw, so a failure is a diff and a pass is a record.
