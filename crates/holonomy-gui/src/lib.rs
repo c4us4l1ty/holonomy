@@ -221,6 +221,8 @@ pub trait Surface {
     fn caret(&mut self, x: Fixed, y: Fixed, height: Fixed);
 }
 
+type CellSpan = Option<(Box<str>, usize)>;
+
 /// A surface that draws into a grid of characters: the crudest window there is, and the only one
 /// that needs no GPU.
 ///
@@ -234,7 +236,7 @@ pub struct CellSurface {
     columns: usize,
     rows: usize,
     cells: Vec<Vec<char>>,
-    spans: Vec<Vec<Option<(Box<str>, usize)>>>,
+    spans: Vec<Vec<CellSpan>>,
     caret: Option<(usize, usize)>,
     selections: Vec<(usize, usize, usize, usize)>,
     clusters: u64,
