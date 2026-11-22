@@ -565,13 +565,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         [flag] if flag == "--help" || flag == "-h" => {
             println!("{}", usage_text());
-            return Ok(());
+            Ok(())
         }
         [subcommand, target] if subcommand == "verify" => {
-            return run_verify(Path::new(target));
+            let path = Path::new(target);
+            run_verify(path)
         }
         [subcommand, source, destination] if subcommand == "compact" => {
-            return run_compact(Path::new(source), Path::new(destination));
+            let src = Path::new(source);
+            let dst = Path::new(destination);
+            run_compact(src, dst)
         }
         [subcommand, ..] if subcommand == "verify" || subcommand == "compact" => {
             eprintln!("{}", usage_text());
