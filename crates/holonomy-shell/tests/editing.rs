@@ -1066,3 +1066,47 @@ fn trimming_a_single_sealed_leaf_recomputes_its_height_and_clamps_scroll() {
     assert_eq!(shell.heights().total(), Fixed::units(20));
     assert_eq!(shell.scroll(), Fixed::ZERO);
 }
+
+#[test]
+fn multi_leaf_bidi_paragraph_reflow_matches_continuous_layout_and_clicks_round_trip() {
+    let mut shell = session();
+    let chunk = "hello \u{5e9}\u{5dc}\u{5d5}\u{5dd} 42 (\u{645}\u{631}\u{62d}\u{628}\u{627}) \
+                 world \u{5e2}\u{5d5}\u{5dc}\u{5dd} end ";
+    let paragraph = chunk.repeat(3);
+    shell.type_text(&paragraph).expect("typed");
+    shell.flush().expect("sealed");
+    shell.resize(Fixed::units(12), VIEWPORT);
+    shell.reflow().expect("measured");
+    assert!(
+        shell.typing().spine().slab_count() >= 3,
+        "must span multiple leaves"
+    );
+
+    let continuous = layout_styled(StyledText::plain(&paragraph), 0, Fixed::units(12), &Fake);
+    assert_eq!(
+        shell.heights().total(),
+        continuous.height(),
+        "leaf-by-leaf bidi reflow must match continuous paragraph height"
+    );
+
+    // Frame write-back must preserve the exact total height and keep every caret clickable.
+    let boundaries: Vec<(Fixed, Fixed, u64)> = {
+        let frame = shell.frame().expect("frame");
+        let mut out = Vec::new();
+        for line in frame.layout().lines() {
+            for (x, byte) in line.boundaries() {
+                out.push((x, line.top() + Fixed::ONE, byte));
+            }
+        }
+        out
+    };
+    assert_eq!(shell.heights().total(), continuous.height());
+    assert!(!boundaries.is_empty());
+    for (x, y, byte) in boundaries {
+        let clicked = shell
+            .click(Point::new(x, y))
+            .expect("click ok")
+            .expect("caret hit");
+        assert_eq!(clicked.byte, byte, "click on bidi boundary drifted");
+    }
+}

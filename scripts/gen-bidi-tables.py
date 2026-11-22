@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Generate `crates/holonomy-eye/src/bidi/tables.rs` from the Unicode Character Database.
+
+The Eye reorders clusters within each wrapped line according to UAX #9 (the Unicode Bidirectional
+Algorithm). As with `scripts/gen-cluster-tables.py`, the rules live in Rust (`bidi.rs`) and are
+tested against Unicode's conformance vectors; the property data comes straight from the UCD so no
+right-to-left script or paired bracket is omitted by hand (AUDIT OQ-11).
+
+Input
+-----
+Two files from UCD 18.0.0 (`unicode-org/unicodetools` commit `5938615f4797cf345eeb3bf6768c2deb947e721e`,
+licensed under Unicode-3.0, recorded in `THIRD_PARTY.md`):
+- `extracted/DerivedBidiClass.txt` (including `@missing:` unassigned-block defaults for RTL and
+  currency blocks)
+- `BidiBrackets.txt` (paired opening/closing brackets for UAX #9 rule N0)
+
+    scripts/gen-bidi-tables.py /tmp/DerivedBidiClass.txt /tmp/BidiBrackets.txt \\
+        > crates/holonomy-eye/src/bidi/tables.rs
+"""
+
+import re
+import sys
+
+LONG_TO_SHORT = {
+    "Left_To_Right": "L",
+    "Right_To_Left": "R",
+    "Arabic_Letter": "AL",
+    "European_Number": "EN",
+    "European_Separator": "ES",
+    "European_Terminator": "ET",
+    "Arabic_Number": "AN",
+    "Common_Separator": "CS",
+    "Nonspacing_Mark": "NSM",
+    "Boundary_Neutral": "BN",
+    "Paragraph_Separator": "B",
+    "Segment_Separator": "S",
+    "White_Space": "WS",
+    "Other_Neutral": "ON",
+    "Left_To_Right_Embedding": "LRE",
+    "Left_To_Right_Override": "LRO",
+    "Right_To_Left_Embedding": "RLE",
+    "Right_To_Left_Override": "RLO",
+    "Pop_Directional_Format": "PDF",
+    "Left_To_Right_Isolate": "LRI",
+    "Right_To_Left_Isolate": "RLI",
+    "First_Strong_Isolate": "FSI",
+    "Pop_Directional_Isolate": "PDI",
+}
+
+RUST_VARIANT = {
+    "L": "L",
+    "R": "R",
+    "AL": "Al",
+    "EN": "En",
+    "ES": "Es",
+    "ET": "Et",
+    "AN": "An",
+    "CS": "Cs",
+    "NSM": "Nsm",
+    "BN": "Bn",
+    "B": "B",
+    "S": "S",
+    "WS": "Ws",
+    "ON": "On",
+    "LRE": "Lre",
+    "LRO": "Lro",
+    "RLE": "Rle",
+    "RLO": "Rlo",
+    "PDF": "Pdf",
+    "LRI": "Lri",
+    "RLI": "Rli",
+    "FSI": "Fsi",
+    "PDI": "Pdi",
+}
+
+
+def parse_bidi_classes(source: str):
+    ver = re.search(r"DerivedBidiClass-(\d+\.\d+\.\d+)\.txt", source)
+    assert ver, "missing DerivedBidiClass version header"
+    version = ver.group(1)
+
+    classes = ["L"] * 0x110000
+    missing_rows = re.findall(
+        r"# @missing:\s*([0-9A-Fa-f]+)\.\.([0-9A-Fa-f]+);\s*(\w+)", source
+    )
+    assert missing_rows, "no @missing directives found in DerivedBidiClass.txt"
+    for low_s, high_s, long_name in missing_rows:
+        short = LONG_TO_SHORT[long_name]
+        if short == "L":
+            continue
+        for cp in range(int(low_s, 16), int(high_s, 16) + 1):
+            classes[cp] = short
+
+    for raw in source.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        rng, short = [part.strip() for part in line.split(";")]
+        assert short in RUST_VARIANT, f"unknown Bidi_Class {short!r}"
+        if ".." in rng:
+            low, high = [int(part, 16) for part in rng.split("..")]
+        else:
+            low = high = int(rng, 16)
+        for cp in range(low, high + 1):
+            classes[cp] = short
+
+    ranges = []
+    cp = 0
+    while cp < 0x110000:
+        if 0xD800 <= cp <= 0xDFFF or classes[cp] == "L":
+            cp += 1
+            continue
+        cls = classes[cp]
+        end = cp + 1
+        while end < 0x110000 and not (0xD800 <= end <= 0xDFFF) and classes[end] == cls:
+            end += 1
+        ranges.append((cp, end - 1, RUST_VARIANT[cls]))
+        cp = end
+
+    return ranges, version
+
+
+def parse_brackets(source: str, expected_version: str):
+    ver = re.search(r"BidiBrackets-(\d+\.\d+\.\d+)\.txt", source)
+    assert ver, "missing BidiBrackets version header"
+    assert ver.group(1) == expected_version, (
+        f"version mismatch: {ver.group(1)} != {expected_version}"
+    )
+
+    rows = []
+    for raw in source.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        cp_s, pair_s, kind = [part.strip() for part in line.split(";")]
+        assert kind in ("o", "c"), f"unexpected bracket kind {kind!r}"
+        rows.append((int(cp_s, 16), int(pair_s, 16), kind == "o"))
+    rows.sort(key=lambda item: item[0])
+    assert rows, "no bracket rows parsed"
+    for prev, curr in zip(rows, rows[1:]):
+        assert prev[0] < curr[0], f"duplicate or unsorted bracket at {curr[0]:#x}"
+    return rows
+
+
+def render(ranges, brackets, version: str) -> str:
+    lines = [
+        "//! Unicode `Bidi_Class` and `Bidi_Paired_Bracket` property tables (AUDIT OQ-11).",
+        "//!",
+        f"//! Generated from the Unicode Character Database {version} (`DerivedBidiClass.txt` and",
+        "//! `BidiBrackets.txt`) by `scripts/gen-bidi-tables.py` — **do not edit this file by",
+        "//! hand**. Unassigned code points in right-to-left and currency blocks carry their",
+        "//! UAX #44 `@missing` defaults; every unlisted code point has `BidiClass::L`.",
+        "//!",
+        "//! Data is Unicode's under Unicode-3.0 (`THIRD_PARTY.md`, `LICENSES/unicode-data.txt`).",
+        "",
+        "use core::cmp::Ordering;",
+        "",
+        "use super::BidiClass;",
+        "",
+        "/// Every code point whose `Bidi_Class` is not `L`, in code point order,",
+        "/// as disjoint `(first, last, class)` triples.",
+        "pub(super) const BIDI_CLASS: &[(char, char, BidiClass)] = &[",
+    ]
+    for low, high, variant in ranges:
+        lines.append(f"    ('\\u{{{low:x}}}', '\\u{{{high:x}}}', BidiClass::{variant}),")
+    lines += [
+        "];",
+        "",
+        "/// Every paired bracket in `BidiBrackets.txt`, sorted by code point,",
+        "/// as `(bracket, paired_bracket, is_open)`.",
+        "pub(super) const BIDI_BRACKETS: &[(char, char, bool)] = &[",
+    ]
+    for cp, paired, is_open in brackets:
+        flag = "true" if is_open else "false"
+        lines.append(f"    ('\\u{{{cp:x}}}', '\\u{{{paired:x}}}', {flag}),")
+    lines += [
+        "];",
+        "",
+        "/// The UAX #9 `Bidi_Class` of `character`.",
+        "pub(super) fn bidi_class(character: char) -> BidiClass {",
+        "    BIDI_CLASS",
+        "        .binary_search_by(|&(first, last, _)| {",
+        "            if last < character {",
+        "                Ordering::Less",
+        "            } else if first > character {",
+        "                Ordering::Greater",
+        "            } else {",
+        "                Ordering::Equal",
+        "            }",
+        "        })",
+        "        .map_or(BidiClass::L, |index| BIDI_CLASS[index].2)",
+        "}",
+        "",
+        "/// The paired bracket and opening flag `(paired, is_open)` of `character`, if any.",
+        "pub(super) fn bracket(character: char) -> Option<(char, bool)> {",
+        "    BIDI_BRACKETS",
+        "        .binary_search_by(|&(entry, _, _)| entry.cmp(&character))",
+        "        .ok()",
+        "        .map(|index| (BIDI_BRACKETS[index].1, BIDI_BRACKETS[index].2))",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        sys.exit(f"usage: {sys.argv[0]} DerivedBidiClass.txt BidiBrackets.txt")
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        bidi_src = handle.read()
+    with open(sys.argv[2], encoding="utf-8") as handle:
+        bracket_src = handle.read()
+    ranges, version = parse_bidi_classes(bidi_src)
+    brackets = parse_brackets(bracket_src, version)
+    sys.stdout.write(render(ranges, brackets, version))
+
+
+if __name__ == "__main__":
+    main()

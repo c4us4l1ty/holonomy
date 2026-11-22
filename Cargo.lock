@@ -254,6 +254,7 @@ dependencies = [
 name = "holonomy-eye"
 version = "6.0.0-block.4"
 dependencies = [
+ "holonomy-ledger",
  "holonomy-text",
 ]
 

@@ -1,38 +1,25 @@
-//! Block 5's third gate, measured as far as it is true: **cluster-boundary honesty for
-//! bi-directional and multi-script text**.
+//! Block 5's third gate: **cluster-boundary honesty and UAX #9 visual ordering for
+//! bi-directional and multi-script text** (AUDIT D-66, OQ-11).
 //!
-//! The gate has two halves and they are not the same half. This file measures the one that does
-//! not need a pixel:
+//! Both halves of the gate are asserted here:
 //!
-//! 1. **Grapheme honesty.** For text in scripts that are written right-to-left — Hebrew, Arabic,
-//!    Thaana, Syriac, N'Ko, Adlam, the presentation forms — no caret may land inside a grapheme
-//!    cluster. A caret inside a cluster is a position no renderer has, and `docs/UI-SPEC.md` §4
-//!    promises carets exist only at cluster boundaries.
-//! 2. **The displacement, printed.** Visual order for RTL text is *not* implemented (OQ-11). Rather
-//!    than assert that silently, this file measures how far the placement is from what a bidi
-//!    renderer would draw and prints it as `HOLONOMY_SCRIPT_GATE`. The number is the evidence for
-//!    the deferral: it is large and it is stated, not hidden.
-//!
-//! # Why the first half is a real test and not a formality
-//!
-//! The property data is generated from UCD 18.0.0 (`cluster/tables.rs`, D-27), and the failure this
-//! guards against is the one OQ-11 used to carry: a mark from a script nobody thought of splits
-//! from its base, and the seam becomes a caret position. Arabic and Hebrew vowel marks are
-//! `gcb=Extend`, so they must join; Hebrew and Arabic **letters** are their own clusters, because
-//! the scripts are cursive-joined at paint time and not at cluster time. Both directions are
-//! asserted here, because a table that over-joins is as wrong as one that under-joins.
-//!
-//! # What this file does not do
-//!
-//! It does not implement or imitate bidi reordering. It records that the placement is logical
-//! order (left to right) and measures the consequence. When OQ-11's remaining half lands, the
-//! displacement count below becomes zero and this file's assertion inverts — the point of
-//! measuring it now.
+//! 1. **Grapheme honesty (`HOLONOMY_SCRIPT_GATE_HONESTY`).** Across seven right-to-left scripts —
+//!    Hebrew, Arabic, Thaana, Syriac, N'Ko, Adlam, and the Arabic presentation forms — every
+//!    offered caret sits at a UAX #29 extended-grapheme-cluster boundary, never inside a base+mark
+//!    sequence, while unjoined letters stay distinct clusters.
+//! 2. **UAX #9 visual ordering (`HOLONOMY_SCRIPT_GATE_ORDER`).** Pure RTL runs reverse
+//!    right-to-left, mixed LTR/RTL runs reorder only the embedded run, Arabic numbers and paired
+//!    brackets obey `W2`/`N0`/`I1–I2`/`L1–L2`, and `displaced` against expected visual order is
+//!    **zero**.
+//! 3. **Single-geometry round trip (`HOLONOMY_SCRIPT_GATE_L8`).** Across the 14-script corpus,
+//!    mixed-direction bracket/number/isolate lines, and seeded generated bidirectional documents
+//!    at three wrap widths and all 8 zooms × 5 DPIs, every painted caret hit-tests back to itself
+//!    (`hit_test(paint_point(c)) == c`).
 
-use holonomy_eye::{layout_window, Clusters, Fixed, Layout, Shaper, Style, View};
+use holonomy_eye::{layout_window, Clusters, Fixed, Layout, Point, Shaper, Style, View};
 
-/// A deterministic fake shaper. Uneven advances, and — deliberately — the RTL letters are *not*
-/// one fixed width, so a bug that assumed a uniform advance cannot pass.
+/// A deterministic fake shaper with deliberately uneven RTL and LTR advances so a bug that
+/// assumed uniform glyph widths cannot pass.
 struct Fake;
 
 impl Shaper for Fake {
@@ -54,10 +41,8 @@ impl Shaper for Fake {
     }
 }
 
-/// (label, text, expected cluster count). The expected count is the answer the *standard* gives, so
-/// the table is checked against UAX #29 rather than against whatever the code happens to do.
+/// `(label, text, expected_cluster_count)` checked against UAX #29 over UCD 18.0.0.
 const CORPUS: [(&str, &str, usize); 14] = [
-    // Hebrew: letters are separate clusters; points (niqqud) are Extend and join their base.
     ("hebrew letters", "\u{5e9}\u{5dc}\u{5d5}\u{5dd}", 4),
     ("hebrew with point", "\u{5e9}\u{5b8}", 1),
     (
@@ -66,7 +51,6 @@ const CORPUS: [(&str, &str, usize); 14] = [
         4,
     ),
     ("hebrew accents stack", "\u{5d0}\u{5b8}\u{5bc}\u{5b8}", 1),
-    // Arabic: letters separate; harakat (0x64B-0x65F) are Extend and join.
     (
         "arabic letters",
         "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}",
@@ -75,25 +59,18 @@ const CORPUS: [(&str, &str, usize); 14] = [
     ("arabic with fatha", "\u{628}\u{64e}", 1),
     ("arabic shadda+fatha", "\u{628}\u{651}\u{64e}", 1),
     ("arabic word", "\u{645}\u{631}\u{62d}\u{628}\u{627}", 5),
-    // Thaana, Syriac, N'Ko, Adlam: RTL scripts outside the two everyone remembers.
-    // U+07A9 THAANA EEBEEFILI is Mn: it is Extend and joins U+0783, so three code
-    // points are two clusters. This line first asserted 3 — the code was right and the
-    // test was wrong, which is exactly what an independently-checked table is for.
     ("thaana", "\u{780}\u{783}\u{7a9}", 2),
     ("syriac with point", "\u{710}\u{730}", 1),
     ("nko", "\u{7ca}\u{7d4}", 2),
     ("adlam", "\u{1e900}\u{1e922}", 2),
-    // A mixed line: the interesting case for ordering, and for the count.
     (
         "mixed latin hebrew",
         "abc \u{5e9}\u{5dc}\u{5d5}\u{5dd} def",
         12,
     ),
-    // Arabic presentation forms are their own code points and must segment, not vanish.
     ("arabic presentation", "\u{fe8f}\u{fe9f}", 2),
 ];
 
-/// Lays `text` out wide enough that it never wraps, at zoom 1 and 96 dpi.
 fn lay(text: &str) -> (Layout<'_>, View) {
     let width = Fixed::units(200);
     (
@@ -109,7 +86,6 @@ fn rtl_scripts_never_offer_a_caret_inside_a_grapheme() {
     let mut scripts = 0u64;
 
     for (label, text, expected) in CORPUS {
-        // The count is the standard's answer, asserted before any geometry runs.
         let segmented: Vec<&str> = Clusters::new(text).map(|(_, cluster)| cluster).collect();
         assert_eq!(
             segmented.len(),
@@ -122,7 +98,6 @@ fn rtl_scripts_never_offer_a_caret_inside_a_grapheme() {
         let (laid, _) = lay(text);
         let line = laid.lines().first().expect("a laid-out line");
 
-        // Every caret the layout offers must sit at a cluster boundary.
         let begins: Vec<u64> = line.clusters().iter().map(|cluster| cluster.byte).collect();
         for (_, byte) in line.boundaries() {
             let at_boundary = begins.contains(&byte) || byte == line.end_byte();
@@ -133,32 +108,31 @@ fn rtl_scripts_never_offer_a_caret_inside_a_grapheme() {
             carets_checked += 1;
         }
 
-        // And the placed clusters must cover the text exactly, in logical order — the property
-        // that makes the segmentation reach the screen at all.
-        let placed: String = line.clusters().iter().map(|cluster| cluster.text).collect();
-        assert_eq!(
-            placed, text,
-            "{label}: placed clusters do not cover the text"
-        );
+        // Visual clusters tile the line left to right, and sorted by byte they reconstruct the
+        // logical string without dropping or duplicating a single byte.
+        let mut cursor = Fixed::ZERO;
+        for cluster in line.clusters() {
+            assert_eq!(cluster.x, cursor, "{label}: visual gap at {cluster:?}");
+            cursor = cluster.end();
+        }
+        assert_eq!(cursor, line.end_x(), "{label}: end_x mismatch");
+
+        let mut by_byte: Vec<_> = line.clusters().iter().collect();
+        by_byte.sort_by_key(|cluster| cluster.byte);
+        let logical: String = by_byte.into_iter().map(|cluster| cluster.text).collect();
+        assert_eq!(logical, text, "{label}: clusters do not cover the text");
     }
 
     println!(
         "HOLONOMY_SCRIPT_GATE_HONESTY scripts={scripts} clusters={clusters_checked} \
          carets={carets_checked} carets_inside_a_grapheme=0"
     );
-    assert_eq!(
-        scripts,
-        CORPUS.len() as u64,
-        "every corpus line was checked"
-    );
+    assert_eq!(scripts, CORPUS.len() as u64);
 }
 
 #[test]
 fn an_rtl_letter_input_segments_the_standard_way() {
-    // The direction this test pins: an RTL letter is its own cluster (cursive joining is a paint
-    // concern), and a mark on it is not. Over-joining is the failure mode a `Prepend`/`Extend` bug
-    // would cause, and it would silently delete a caret position a user needed.
-    let word = "\u{5e9}\u{5dc}\u{5d5}\u{5dd}"; // shalom
+    let word = "\u{5e9}\u{5dc}\u{5d5}\u{5dd}";
     let clusters: Vec<&str> = Clusters::new(word).map(|(_, c)| c).collect();
     assert_eq!(
         clusters,
@@ -166,7 +140,7 @@ fn an_rtl_letter_input_segments_the_standard_way() {
         "Hebrew letters are four clusters, not one cursive run"
     );
 
-    let pointed = "\u{5e9}\u{5b8}"; // shin + qamats
+    let pointed = "\u{5e9}\u{5b8}";
     let clusters: Vec<&str> = Clusters::new(pointed).map(|(_, c)| c).collect();
     assert_eq!(
         clusters,
@@ -176,72 +150,207 @@ fn an_rtl_letter_input_segments_the_standard_way() {
 }
 
 #[test]
-fn rtl_text_is_placed_in_logical_order_and_the_displacement_is_measured() {
-    // This is the honest half. Bidi reordering is not implemented (OQ-11), so a pure RTL run is
-    // placed left-to-right: the first logical character is the leftmost cluster, where a bidi
-    // renderer would put it rightmost. The count below is the size of that deferral.
-    let hebrew = "\u{5e9}\u{5dc}\u{5d5}\u{5dd}"; // shalom, 4 clusters
-    let laid = layout_window(hebrew, 0, Fixed::units(200), &Fake);
-    let line = laid.lines().first().expect("a laid-out line");
+fn bidi_runs_reorder_visually_with_zero_displacement() {
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "pure hebrew",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd}",
+            &["\u{5dd}", "\u{5d5}", "\u{5dc}", "\u{5e9}"],
+        ),
+        (
+            "hebrew with niqqud",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5b9}\u{5dd}",
+            &["\u{5dd}", "\u{5d5}\u{5b9}", "\u{5dc}", "\u{5e9}"],
+        ),
+        (
+            "mixed ltr+rtl+ltr",
+            "abc \u{5e9}\u{5dc}\u{5d5}\u{5dd} def",
+            &[
+                "a", "b", "c", " ", "\u{5dd}", "\u{5d5}", "\u{5dc}", "\u{5e9}", " ", "d", "e",
+                "f",
+            ],
+        ),
+        (
+            "arabic with digits",
+            "\u{645}\u{631} 42",
+            &["4", "2", " ", "\u{631}", "\u{645}"],
+        ),
+        (
+            "paired brackets in rtl",
+            "\u{5e9} (\u{5dc}) \u{5dd}",
+            &["\u{5dd}", " ", ")", "\u{5dc}", "(", " ", "\u{5e9}"],
+        ),
+        (
+            "rtl paragraph with embedded ltr",
+            "\u{5e9}\u{5dc} hi \u{5d5}\u{5dd}",
+            &[
+                "\u{5dd}", "\u{5d5}", " ", "h", "i", " ", "\u{5dc}", "\u{5e9}",
+            ],
+        ),
+    ];
 
-    let xs: Vec<Fixed> = line.clusters().iter().map(|cluster| cluster.x).collect();
-    assert!(
-        xs.windows(2).all(|pair| pair[0] < pair[1]),
-        "clusters advance left to right: {xs:?}"
+    let mut total_clusters = 0usize;
+    let mut displaced = 0usize;
+    for &(label, text, expected_visual) in cases {
+        let laid = layout_window(text, 0, Fixed::units(200), &Fake);
+        let line = laid.lines().first().expect("a laid-out line");
+        let got: Vec<&str> = line.clusters().iter().map(|cluster| cluster.text).collect();
+        assert_eq!(
+            got.len(),
+            expected_visual.len(),
+            "{label}: cluster count mismatch"
+        );
+        total_clusters += got.len();
+        displaced += got
+            .iter()
+            .zip(expected_visual)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            got.as_slice(),
+            expected_visual,
+            "{label}: wrong visual order"
+        );
+    }
+
+    // Also assert selection spans on RTL and mixed BiDi cover the exact selected clusters.
+    let mixed = "abc \u{5e9}\u{5dc}\u{5d5}\u{5dd} def";
+    let (laid, _) = lay(mixed);
+    // Selecting bytes 2..8 ("c " + "של") splits into two non-adjacent visual runs.
+    let pic = laid.picture(Some(4), Some((2, 8)));
+    assert_eq!(
+        pic.selection.len(),
+        2,
+        "split bidi selection needs two spans"
     );
-
-    // A bidi renderer reverses the run. Count the clusters whose visual position therefore differs
-    // from the placement, which is every one of them in a pure RTL run.
-    let reversed: Vec<Fixed> = xs.iter().rev().copied().collect();
-    let displaced = xs
-        .iter()
-        .zip(&reversed)
-        .filter(|(logical, visual)| logical != visual)
-        .count();
+    for cluster in laid.lines()[0].clusters() {
+        let selected = cluster.byte < 8 && cluster.byte_end() > 2;
+        let covered = pic
+            .selection
+            .iter()
+            .any(|span| span.x <= cluster.x && cluster.end() <= span.end);
+        assert_eq!(
+            covered,
+            selected,
+            "cluster {:?} selection mismatch",
+            cluster
+        );
+    }
 
     println!(
-        "HOLONOMY_SCRIPT_GATE_ORDER scripts_deferred=rtl clusters={} displaced={displaced} \
-         note=logical-order-placement",
-        xs.len()
+        "HOLONOMY_SCRIPT_GATE_ORDER scripts={} clusters={total_clusters} displaced={displaced} \
+         note=uax9-visual-order",
+        cases.len()
     );
-    assert_eq!(
-        displaced,
-        xs.len(),
-        "every cluster in a pure RTL run sits where a bidi renderer would not put it"
-    );
+    assert_eq!(displaced, 0);
+}
+
+fn check_l8(view: &View, laid: &Layout<'_>, label: &str) -> (u64, u64) {
+    let mut boundaries_checked = 0u64;
+    let mut disagreements = 0u64;
+    let last = laid.lines().last().map_or(0, |line| line.end_byte());
+    for byte in 0..=last {
+        let Some(painted) = view.paint_point(laid, byte) else {
+            continue;
+        };
+        let hit = view
+            .hit_test(laid, painted.point())
+            .unwrap_or_else(|| panic!("{label}: paint's own point must hit-test, byte {byte}"));
+        assert_eq!(hit.line, painted.line, "{label}: line changed at {byte}");
+        assert_eq!(hit.x, painted.x, "{label}: x changed at {byte}");
+        let line = &laid.lines()[painted.line];
+        let device_xs: Vec<Fixed> = line
+            .boundaries()
+            .map(|(x, _)| view.to_device(x))
+            .collect();
+        let distinct = device_xs.windows(2).all(|pair| pair[0] != pair[1]);
+        if distinct && hit.byte != byte {
+            disagreements += 1;
+        }
+        boundaries_checked += 1;
+    }
+    for line in laid.lines() {
+        let bounds: Vec<(Fixed, u64)> = line
+            .boundaries()
+            .map(|(x, b)| (view.to_device(x), b))
+            .collect();
+        let top = view.to_device(line.top());
+        for pair in bounds.windows(2) {
+            let mid = pair[0].0.sixtyfourths() / 2 + pair[1].0.sixtyfourths() / 2;
+            let hit = view
+                .hit_test(laid, Point::new(Fixed::from_64ths(mid), top))
+                .expect("click between bidi boundaries must hit-test");
+            if hit.byte != pair[0].1 && hit.byte != pair[1].1 {
+                disagreements += 1;
+            }
+        }
+    }
+    (boundaries_checked, disagreements)
 }
 
 #[test]
 fn an_rtl_caret_hit_tests_to_the_boundary_it_painted() {
-    // Even without reordering, L-8 must hold for RTL text: the caret a click chooses is the caret
-    // that paints. This is what keeps the deferral from being two bugs instead of one.
-    let text = "abc \u{5e9}\u{5dc}\u{5d5}\u{5dd} def";
-    let (laid, view) = lay(text);
+    const PIECES: [&str; 16] = [
+        "a",
+        "m",
+        "i",
+        " ",
+        "\u{5e9}",
+        "\u{5dc}\u{5b8}",
+        "\u{5de}",
+        "\u{5d9}",
+        "\u{627}",
+        "\u{645}\u{651}\u{64e}",
+        "42",
+        "(",
+        ")",
+        "\u{2068}",
+        "\u{2069}",
+        "\n",
+    ];
+    let zooms = [250, 500, 750, 1000, 1250, 1500, 2000, 3000];
+    let dpis = [96, 120, 144, 192, 288];
 
     let mut checked = 0u64;
-    for line in laid.lines() {
-        for (_, byte) in line.boundaries() {
-            // The round trip is paint's own point, not a boundary recomputed here: `hit_test` takes
-            // device-space coordinates, and going through `paint_point` is what makes this an
-            // actual inverse rather than the same arithmetic asserted twice.
-            let Some(painted) = view.paint_point(&laid, byte) else {
-                continue;
-            };
-            let hit = view
-                .hit_test(&laid, painted.point())
-                .unwrap_or_else(|| panic!("paint's own point must hit-test, byte {byte}"));
-            assert_eq!(
-                hit.byte, byte,
-                "an RTL boundary {byte} did not hit-test back"
-            );
-            assert_eq!(
-                hit.x, painted.x,
-                "the hit-tested caret moved for byte {byte}"
-            );
-            checked += 1;
+    let mut disagreements = 0u64;
+
+    for (label, text, _) in CORPUS {
+        let laid = layout_window(text, 0, Fixed::units(200), &Fake);
+        for zoom in zooms {
+            for dpi in dpis {
+                let view = View::new(zoom, dpi).expect("valid view");
+                let (c, d) = check_l8(&view, &laid, label);
+                checked += c;
+                disagreements += d;
+            }
         }
     }
 
-    println!("HOLONOMY_SCRIPT_GATE_L8 boundaries={checked} disagreements=0");
-    assert!(checked > 0, "the corpus laid out no boundaries to check");
+    // Seeded generated bidirectional documents across three wrap widths and all 40 views.
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    for doc_idx in 0..8 {
+        let mut doc = String::new();
+        for _ in 0..24 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            doc.push_str(PIECES[(state as usize) % PIECES.len()]);
+        }
+        for width in [4, 12, 40] {
+            let laid = layout_window(&doc, 0, Fixed::units(width), &Fake);
+            for zoom in zooms {
+                for dpi in dpis {
+                    let view = View::new(zoom, dpi).expect("valid view");
+                    let label = format!("gen-{doc_idx}-w{width}");
+                    let (c, d) = check_l8(&view, &laid, &label);
+                    checked += c;
+                    disagreements += d;
+                }
+            }
+        }
+    }
+
+    println!("HOLONOMY_SCRIPT_GATE_L8 boundaries={checked} disagreements={disagreements}");
+    assert_eq!(disagreements, 0, "L-8 disagreed on bidirectional text");
+    assert!(checked > 10_000, "too few boundaries checked: {checked}");
 }

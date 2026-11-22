@@ -33,6 +33,7 @@ mod calibrate;
 mod error;
 mod lock;
 mod passphrase;
+mod reaper;
 mod secret;
 
 #[cfg(test)]
@@ -67,6 +68,10 @@ pub use kdf::{MasterKeys, ParamsClass, DERIVE_SALT_BYTES};
 pub use lock::{describe_how, probe_capability, LockCapability, LockReport};
 pub use passphrase::{
     PassphraseError, PassphraseInput, MAX_PASSPHRASE_BYTES, MAX_PASSPHRASE_INPUT_BYTES,
+};
+pub use reaper::{
+    ArenaSlot, CanaryReport, CanarySet, ReaperGuard, ReaperOutcome, SchedClass, SecretArenas,
+    TripReason, Tripwire, WipeStats, MAX_ARENAS,
 };
 
 /// The boundary law, carried in code so it is compiled, not just quoted.

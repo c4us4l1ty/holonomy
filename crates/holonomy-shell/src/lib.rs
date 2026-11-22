@@ -1769,15 +1769,24 @@ fn measure_window(
             heights[index] += line.height();
         }
     }
-    // The x where each leaf's geometry begins: the first cluster at or after the byte the leaf
-    // starts its own layout at. That is not always a cluster inside the span — a leaf whose bytes
-    // were all placed by its predecessor begins at the cluster after them (AUDIT D-25).
-    let clusters: Vec<(u64, Fixed)> = layout
-        .lines()
-        .iter()
-        .flat_map(|line| line.clusters())
-        .map(|cluster| (cluster.byte, cluster.x))
-        .collect();
+    // The logical line fill (`start_x`) where each leaf's geometry begins: the accumulated
+    // advance on that line before the first cluster at or after the byte the leaf starts its own
+    // layout at. Accumulating in logical byte order keeps multi-leaf wrapping invariant even when
+    // UAX #9 reorders a line's visual cluster `x` coordinates (AUDIT D-25, OQ-11).
+    let mut clusters: Vec<(u64, Fixed)> = Vec::new();
+    for line in layout.lines() {
+        let base_x = line
+            .clusters()
+            .first()
+            .map_or(line.end_x(), |cluster| cluster.x);
+        let mut by_byte: Vec<_> = line.clusters().iter().collect();
+        by_byte.sort_unstable_by_key(|cluster| cluster.byte);
+        let mut cursor = base_x;
+        for cluster in by_byte {
+            clusters.push((cluster.byte, cursor));
+            cursor += cluster.advance;
+        }
+    }
     let end_x = layout
         .lines()
         .last()

@@ -306,6 +306,11 @@ impl MasterKeys {
     pub fn unwrap_key(&self) -> &UnwrapKey {
         &self.unwrap
     }
+
+    /// Mutable access to the unwrap-key capability (for arming the emergency reaper).
+    pub fn unwrap_key_mut(&mut self) -> &mut UnwrapKey {
+        &mut self.unwrap
+    }
 }
 
 impl core::fmt::Debug for MasterKeys {

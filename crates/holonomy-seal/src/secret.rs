@@ -9,9 +9,12 @@
 //! For Windows/macOS or low-`RLIMIT` environments the report records the degraded rung rather
 //! than pretending.
 
+use std::sync::Arc;
+
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::lock::{LockReport, LockedRegion};
+use crate::reaper::{ArenaSlot, SecretArenas};
 
 // Linux/macOS/Windows page sizes are 4, 16, or 64 KiB on the supported targets. Give each
 // secret its own 64 KiB-aligned allocation so two small cells cannot share an OS lock page:
@@ -25,8 +28,9 @@ struct PageAlignedCell<const N: usize>([u8; N]);
 /// Not `Clone`, no byte-level public API: the boundary reads bytes `pub(crate)`, everyone else
 /// presents the token that owns one of these.
 pub struct LockedSecret<const N: usize> {
-    // Struct fields drop in declaration order. Keep the guard first so it unlocks the still-live
-    // allocation after this type's Drop body has zeroized it, and only then free the box.
+    // Struct fields drop in declaration order. `Drop` unregisters `arena` and zeroizes `buf`
+    // before `guard` drops to unlock the page, and only then `buf` frees its storage.
+    arena: Option<(Arc<SecretArenas>, ArenaSlot)>,
     guard: LockedRegion,
     buf: Box<PageAlignedCell<N>>,
 }
@@ -50,7 +54,39 @@ impl<const N: usize> LockedSecret<N> {
         drop(input);
         #[cfg(test)]
         crate::allocation_audit::watch(buf.0.as_ptr(), N);
-        Self { guard, buf }
+        Self {
+            arena: None,
+            guard,
+            buf,
+        }
+    }
+
+    /// Arms this cell in `arenas` so an emergency reaper tripwire volatile-zeroes the live key
+    /// page in place without exposing key bytes outside `holonomy-seal`.
+    pub(crate) fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
+        if self.arena.is_some() || N == 0 {
+            return false;
+        }
+        let ptr = self.buf.0.as_mut_ptr();
+        // SAFETY: `self.buf` is a heap-pinned `Box<PageAlignedCell<N>>` whose address never moves,
+        // and `Drop` calls `arenas.unregister(slot)` before zeroizing, unlocking, and freeing.
+        if let Some(slot) = unsafe { arenas.register(ptr, N) } {
+            self.arena = Some((Arc::clone(arenas), slot));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Volatile-reads every byte of the cell to check whether an emergency wipe zeroed it.
+    pub(crate) fn is_zeroized(&self) -> bool {
+        let ptr = self.buf.0.as_ptr();
+        let mut acc = 0u8;
+        for offset in 0..N {
+            // SAFETY: `self.buf.0` owns `N` initialized bytes.
+            acc |= unsafe { core::ptr::read_volatile(ptr.add(offset)) };
+        }
+        core::hint::black_box(acc) == 0
     }
 
     /// The obtained protection ladder state for this cell.
@@ -66,6 +102,9 @@ impl<const N: usize> LockedSecret<N> {
 
 impl<const N: usize> Drop for LockedSecret<N> {
     fn drop(&mut self) {
+        if let Some((arenas, slot)) = self.arena.take() {
+            arenas.unregister(slot);
+        }
         // Order is the invariant: contents destroyed *while still locked*, then unlock via the
         // guard's own Drop (fields drop after this body), then the box frees.
         self.buf.0.zeroize();

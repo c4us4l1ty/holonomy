@@ -220,6 +220,24 @@ impl<S: SegmentSource> ResidentSet<S> {
         count
     }
 
+    /// Emergency-wipes every resident slab's full capacity with volatile zero stores, then clears
+    /// the resident table and returns the total number of bytes scrubbed.
+    pub fn wipe_all_in_place(&mut self) -> usize {
+        let mut wiped = 0usize;
+        for entry in &mut self.entries {
+            wiped = wiped.saturating_add(entry.text.wipe_in_place());
+        }
+        self.entries.clear();
+        wiped
+    }
+
+    /// Mutable iterator over currently resident `(SegmentId, &mut SlabText)` entries.
+    pub fn resident_slabs_mut(&mut self) -> impl Iterator<Item = (SegmentId, &mut SlabText)> {
+        self.entries
+            .iter_mut()
+            .map(|entry| (entry.segment, &mut entry.text))
+    }
+
     /// Keeps only the listed segments resident, returning how many were evicted.
     ///
     /// This is what a viewport move calls: pages that left the neighborhood are wiped before the

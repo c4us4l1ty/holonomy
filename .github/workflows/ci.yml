@@ -168,21 +168,55 @@ jobs:
             a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement \
             2>&1 | tee "$RUNNER_TEMP/keystroke-fuzz.log"
           grep 'HOLONOMY_KEYSTROKE_FUZZ' "$RUNNER_TEMP/keystroke-fuzz.log"
-      # Block 5's third gate has two halves and only one of them is true. Cluster-boundary
-      # honesty for RTL scripts is measured here and asserted; visual reordering is not built
-      # (OQ-11) and the displacement is *printed* rather than asserted away, so the size of the
-      # deferral is on the record every push instead of in a comment.
-      - name: Measure Block 5's script gate (RTL grapheme honesty, BiDi deferred)
+      # Block 5's third gate, both halves asserted: cluster-boundary honesty, UAX #9 visual
+      # ordering (`displaced=0`, OQ-11 closed), and L-8 click-to-caret round trip across RTL and
+      # mixed-BiDi lines.
+      - name: Measure Block 5's script gate (RTL grapheme honesty, UAX #9 BiDi, L-8)
         run: |
           set -o pipefail
           cargo test --locked -p holonomy-eye --test script_gate -- --nocapture 2>&1 \
             | tee "$RUNNER_TEMP/script-gate.log"
           echo "--- grapheme honesty (asserted):"
-          grep 'HOLONOMY_SCRIPT_GATE_HONESTY' "$RUNNER_TEMP/script-gate.log"
-          echo "--- L-8 round trip for RTL text (asserted):"
-          grep 'HOLONOMY_SCRIPT_GATE_L8' "$RUNNER_TEMP/script-gate.log"
-          echo "--- BiDi displacement (measured, not asserted away):"
-          grep 'HOLONOMY_SCRIPT_GATE_ORDER' "$RUNNER_TEMP/script-gate.log"
+          grep 'HOLONOMY_SCRIPT_GATE_HONESTY' "$RUNNER_TEMP/script-gate.log" \
+            | tee "$RUNNER_TEMP/script-gate.txt"
+          echo "--- L-8 round trip for RTL and mixed-BiDi text (asserted):"
+          grep 'HOLONOMY_SCRIPT_GATE_L8' "$RUNNER_TEMP/script-gate.log" \
+            | tee -a "$RUNNER_TEMP/script-gate.txt"
+          echo "--- UAX #9 BiDi visual ordering (displaced=0 asserted):"
+          grep 'HOLONOMY_SCRIPT_GATE_ORDER' "$RUNNER_TEMP/script-gate.log" \
+            | tee -a "$RUNNER_TEMP/script-gate.txt"
+      # Block 5's first gate (OQ-12): viewport layout wall-clock invariance with a real TTF Face at
+      # 180 KB offset 0, 180 MB (30 M words) offset 0, and 180 MB near end, plus a 128-leaf control.
+      - name: Measure Block 5's viewport layout latency gate (OQ-12, 30 M words)
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-eye --release --test viewport_latency -- --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/viewport-latency.log"
+          grep -E 'HOLONOMY_VIEWPORT_(LATENCY|CONTROL)' "$RUNNER_TEMP/viewport-latency.log" \
+            | tee "$RUNNER_TEMP/viewport-latency.txt"
+      # Block 9's L-7 gate: reaper fire latency, 4 MiB ResidentSet + live capability-key wipe,
+      # zeroize canary ghosts=0, negative canary control, and counted zero-allocation scrub.
+      - name: Measure Block 9's L-7 verified wipe and zeroize canary gate
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-text --release --test wipe_gate -- --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/wipe-gate.log"
+          grep -E 'HOLONOMY_WIPE_(GATE|CONTROL)' "$RUNNER_TEMP/wipe-gate.log" \
+            | tee "$RUNNER_TEMP/wipe-gate.txt"
+      - name: Record Block 5 and Block 9 gate measurements in the audit issue
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo '### OQ-11 / OQ-12 / L-7 — Block 5 & Block 9 gate measurements'
+            echo '```text'
+            cat "$RUNNER_TEMP/script-gate.txt"
+            cat "$RUNNER_TEMP/viewport-latency.txt"
+            cat "$RUNNER_TEMP/wipe-gate.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/track-a-gates-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/track-a-gates-comment.md"
       # OQ-14 and its neighbour, measured rather than described: what a reopen does to a document
       # that was edited before its end, and what a deletion does to the file. Both tests assert
       # today's behaviour, so the numbers print every push and a change to either is a red build
