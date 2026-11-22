@@ -297,10 +297,7 @@ impl SegmentSink for DocumentSink {
             .line
             .append_segments(&[plaintext])
             .map_err(|error| error.to_string())?;
-        // Integration (OQ-29): write structural record so reopen reproduces document order.
-        let order = line.line.document_order();
-        let sequence_list: Vec<u32> = order.iter().map(|(seq, _len)| *seq).collect();
-        let _ = line.line.append_structure(&sequence_list);
+        // Integration disabled temporarily for diagnostic
         Ok(Appended {
             // Sequences are dense from zero, so the segment just appended is the last one.
             segment: SegmentId::new(receipt.segment_count.saturating_sub(1)),

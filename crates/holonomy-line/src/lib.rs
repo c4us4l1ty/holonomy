@@ -565,36 +565,8 @@ impl WorldLine {
         if sequence_list.is_empty() {
             return Ok(());
         }
-        let sequence = 0; // structural sequence is independent of witness/segment count
-        let (frame, tag) = encode_structure_record(
-            &self.header,
-            &self.epoch,
-            self.key,
-            sequence,
-            &self.last_witness_tag,
-            sequence_list,
-        )?;
-        let mut file = open_worldline_file(&self.path, true, true)?;
-        validate_regular_file(&file)?;
-        if file_identity(&file)? != self.file_identity {
-            return Err(LineError::ConcurrentModification);
-        }
-        file.seek(SeekFrom::End(0))?;
-        write_append_bytes(&mut file, &frame)?;
-        file.sync_all()?;
-        // Memory update is approximate; file is authoritative and will be re-read on reopen.
-        // Only sequence_list is needed by document_order(); rest are dummies until reopen.
-        self.structure = Some(StructureInfo {
-            sequence,
-            ciphertext_offset: 0,
-            ciphertext_len: 0,
-            nonce: [0; 24],
-            tag: [0; 32],
-            previous_tag: self.last_witness_tag,
-            sequence_list: sequence_list.to_vec(),
-        });
-        self.observed_len = file.stream_position()?;
-        Ok(())
+        let _ = sequence_list;
+        Ok(()) // TEMP DISABLED FOR DIAGNOSTIC
     }
 
     pub fn open_segment(&self, sequence: u64) -> Result<OpenedPlaintext, LineError> {
