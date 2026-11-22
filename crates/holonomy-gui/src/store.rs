@@ -114,9 +114,6 @@ pub struct Document {
 struct Line {
     path: PathBuf,
     line: WorldLine,
-    /// The key the world-line borrows; see the module note on why it is leaked.
-    #[allow(dead_code)]
-    key: &'static DEMKey,
 }
 
 impl Document {
@@ -152,13 +149,11 @@ impl Document {
             create_capsule_for(keys.unwrap_key(), None).map_err(|_| StoreError::Params)?;
         let header = LineHeader::new(params, salt, capsule)
             .map_err(|error| StoreError::Line(error.to_string()))?;
-        let key: &'static DEMKey = Box::leak(Box::new(dem));
-        let line = WorldLine::create(path, header, key).map_err(map_open)?;
+        let line = WorldLine::create(path, header, dem).map_err(map_open)?;
         Ok(Self {
             line: Rc::new(RefCell::new(Line {
                 path: path.to_path_buf(),
                 line,
-                key,
             })),
         })
     }
@@ -178,13 +173,11 @@ impl Document {
             .map_err(|_| StoreError::Refused)?;
         let dem = open_capsule_for(keys.unwrap_key(), &header.capsule, None)
             .map_err(|_| StoreError::Refused)?;
-        let key: &'static DEMKey = Box::leak(Box::new(dem));
-        let line = WorldLine::open(path, key).map_err(map_open)?;
+        let line = WorldLine::open(path, dem).map_err(map_open)?;
         Ok(Self {
             line: Rc::new(RefCell::new(Line {
                 path: path.to_path_buf(),
                 line,
-                key,
             })),
         })
     }

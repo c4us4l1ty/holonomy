@@ -323,7 +323,7 @@ impl WorldLine {
     pub fn create(
         path: impl AsRef<Path>,
         header: LineHeader,
-        key: &DEMKey,
+        key: DEMKey,
     ) -> Result<Self, LineError> {
         if !durability_supported() {
             return Err(LineError::UnsupportedDurability);
@@ -409,7 +409,7 @@ impl WorldLine {
             path,
             header,
             epoch,
-            key: key.clone(),
+            key,
             file_identity,
             segments: Vec::new(),
             mmr: empty_mmr,
@@ -428,7 +428,7 @@ impl WorldLine {
 
     /// Open a file using an already-unwrapped document key. This scans header and witness
     /// metadata but seeks over every segment ciphertext body.
-    pub fn open(path: impl AsRef<Path>, key: &DEMKey) -> Result<Self, LineError> {
+    pub fn open(path: impl AsRef<Path>, key: DEMKey) -> Result<Self, LineError> {
         let path = path.as_ref().to_path_buf();
         let mut file = open_worldline_file(&path, true, false)?;
         let _read_lock = FileReadLock::acquire(&file)?;
@@ -441,7 +441,7 @@ impl WorldLine {
             path,
             header,
             epoch,
-            key: key.clone(),
+            key,
             file_identity,
             segments: scan.segments,
             mmr: scan.mmr,
