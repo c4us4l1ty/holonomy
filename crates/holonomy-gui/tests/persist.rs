@@ -326,8 +326,8 @@ fn a_document_typed_before_its_end_reads_in_document_order_and_reopens_in_append
     // silently; until it lands this asserts the broken behaviour so CI records it.
     let shown = text(&mut window);
     assert_eq!(
-        shown, "worldhello ",
-        "the file records append order; a reopen reproduces the file, not the document (OQ-29)"
+        shown, "hello world",
+        "reopen must reproduce document order, not append log (OQ-29)"
     );
     println!(
         "HOLONOMY_PERSIST order live=\"hello world\" reopened={shown:?} segments={segments} \
@@ -376,13 +376,13 @@ fn a_deleted_tail_is_hidden_and_returns_on_reopen() {
     assert!(save(&mut window), "a save after a cut must still succeed");
     assert_eq!(
         document.segment_count(),
-        segments,
-        "a cut must write no segment of its own"
+        segments + 1,
+        "a cut seals a new shortened segment (OQ-30)"
     );
     let witnesses_after_cut = document.witness_count();
     assert_eq!(
-        witnesses_after_cut, witnesses_before,
-        "a cut must not even warrant: nothing about it reached the file"
+        witnesses_after_cut, witnesses_before + 1,
+        "a cut warrants a new witness (OQ-30)"
     );
     drop(window);
     drop(document);
@@ -400,8 +400,8 @@ fn a_deleted_tail_is_hidden_and_returns_on_reopen() {
     // cut writes a new segment (or structural removal); reopen must show "delet".
     // Currently asserts broken behaviour so CI records it.
     assert_eq!(
-        shown, "deletable",
-        "a deleted tail returns on reopen: the cut wrote nothing to the file (OQ-30)"
+        shown, "delet",
+        "deleted tail must persist (OQ-30)"
     );
     println!(
         "HOLONOMY_PERSIST erase live=\"delet\" reopened={shown:?} segments={segments} \
