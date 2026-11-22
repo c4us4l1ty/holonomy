@@ -1110,3 +1110,31 @@ fn multi_leaf_bidi_paragraph_reflow_matches_continuous_layout_and_clicks_round_t
         assert_eq!(clicked.byte, byte, "click on bidi boundary drifted");
     }
 }
+
+#[test]
+fn frame_write_back_preserves_tail_leaf_height_across_straddling_cluster() {
+    // Leaf 0 (0..64) ends on `e` at byte 63 and Leaf 1 (64..128) begins with U+0301 followed by
+    // multi-line prose at narrow width. `frame()` extends `end` by 2 bytes into Leaf 1 to finish
+    // the straddling grapheme; `Draft::spans_in` clips Leaf 1 to `64..66`, and `measure_window`
+    // must not overwrite Leaf 1's full measured height with that 2-byte prefix's zero height.
+    let mut text = "a".repeat(63);
+    text.push('e');
+    text.push('\u{0301}');
+    text.push_str(&"b".repeat(80));
+
+    let mut shell = session();
+    shell.type_text(&text).expect("typed");
+    shell.flush().expect("sealed");
+    shell.resize(Fixed::units(12), VIEWPORT);
+    shell.reflow().expect("measured");
+
+    let continuous = layout_styled(StyledText::plain(&text), 0, Fixed::units(12), &Fake);
+    assert_eq!(shell.heights().total(), continuous.height());
+
+    shell.frame().expect("frame");
+    assert_eq!(
+        shell.heights().total(),
+        continuous.height(),
+        "clipped tail span must not zero out the next leaf's measured height"
+    );
+}

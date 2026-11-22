@@ -1140,8 +1140,21 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             .draft()
             .locate(self.typing.spine(), start)
             .is_some_and(|hit| hit.within() == 0);
+        let tail_whole = end >= document_end
+            || self
+                .typing
+                .draft()
+                .locate(self.typing.spine(), end)
+                .is_some_and(|hit| hit.within() == 0);
         let first = leaves.first();
-        let measured = measure_window(&layout, text, &spans, start, end, document_end, head_whole);
+        let bounds = WindowBounds {
+            start,
+            end,
+            document_end,
+            head_whole,
+            tail_whole,
+        };
+        let measured = measure_window(&layout, text, &spans, bounds);
         for (index, height, carry) in measured {
             // The index is sized to the **spine** — `sync_measured` re-sizes it whenever
             // `slab_count` moves — so the open tail's leaf has an entry, and what it lacks is a
@@ -1684,9 +1697,22 @@ fn tail_bytes(text: &str, at: usize, context: ClusterContext) -> usize {
     if at == 0 || at >= text.len() {
         return 0;
     }
-    Clusters::continuing(text, context)
-        .find(|&(start, cluster)| start + cluster.len() > at)
-        .map_or(0, |(start, cluster)| start + cluster.len() - at)
+    for (start, cluster) in Clusters::continuing(text, context) {
+        let end = start + cluster.len();
+        if end > at {
+            return if start < at { end - at } else { 0 };
+        }
+    }
+    0
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowBounds {
+    start: u64,
+    end: u64,
+    document_end: u64,
+    head_whole: bool,
+    tail_whole: bool,
 }
 
 /// What one window measured, for the leaves it measured **in full**: their heights and the carry
@@ -1701,14 +1727,14 @@ fn measure_window(
     layout: &Layout<'_>,
     text: &str,
     spans: &[LiveSpan],
-    start: u64,
-    end: u64,
-    document_end: u64,
-    head_whole: bool,
+    bounds: WindowBounds,
 ) -> Vec<(usize, Fixed, Carry)> {
     if spans.is_empty() {
         return Vec::new();
     }
+    let start = bounds.start;
+    let end = bounds.end;
+    let document_end = bounds.document_end;
     let mut heights = vec![Fixed::ZERO; spans.len()];
     let mut offsets: Vec<Option<Fixed>> = vec![None; spans.len()];
     // The segmentation state each leaf hands the next. The window is already text, so this is one
@@ -1799,14 +1825,17 @@ fn measure_window(
             .map(|(_, x)| *x)
             .or_else(|| (at >= end).then_some(end_x));
     }
+    let last = spans.len() - 1;
     spans
         .iter()
         .enumerate()
-        // A span at the window's end is clipped to it and left alone; so is the head span, unless
-        // it begins on the leaf's own first byte (`head_whole`). See `frame` for why the head's
-        // carries are not the leaf's (AUDIT D-39).
+        // A span at either edge of the window is clipped by `Draft::spans_in` to `[start, end)`,
+        // so `span.offset() >= start` and `span.offset() + span.len() <= end` alone cannot tell a
+        // whole sealed leaf from a clipped one: `head_whole` and `tail_whole` ask `Draft::locate`
+        // whether `start` and `end` landed on leaf boundaries (AUDIT D-39).
         .filter(|(index, span)| {
-            (*index > 0 || head_whole)
+            (*index > 0 || bounds.head_whole)
+                && (*index < last || bounds.tail_whole)
                 && span.offset() >= start
                 && span.offset() + span.len() <= end
         })

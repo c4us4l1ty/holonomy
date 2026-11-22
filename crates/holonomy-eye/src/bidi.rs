@@ -927,59 +927,67 @@ mod tests {
         assert!(WindowBidi::resolve("שלום").is_some());
     }
 
+    struct ConformanceCase<'a> {
+        cps: &'a [char],
+        dir: ParagraphDir,
+        para: u8,
+        levels: &'a [Option<u8>],
+        order: &'a [usize],
+    }
+
     #[test]
     fn uax9_conformance_vectors_match_unicode_18() {
         // Sampled directly from UCD 18.0.0 `BidiCharacterTest.txt` across pure RTL, mixed
         // numbers (W2/W4/W5/W7), paired brackets (N0 + canonical angle brackets), and nested
         // directional isolates/overrides (X1–X10, I1–I2, L1–L2).
-        let cases: &[(&[char], ParagraphDir, u8, &[Option<u8>], &[usize])] = &[
+        let cases: &[ConformanceCase<'_>] = &[
             // Pure Hebrew -> RTL paragraph (level 1), reversed visual order.
-            (
-                &['\u{05e9}', '\u{05dc}', '\u{05d5}', '\u{05dd}'],
-                ParagraphDir::Auto,
-                1,
-                &[Some(1), Some(1), Some(1), Some(1)],
-                &[3, 2, 1, 0],
-            ),
+            ConformanceCase {
+                cps: &['\u{05e9}', '\u{05dc}', '\u{05d5}', '\u{05dd}'],
+                dir: ParagraphDir::Auto,
+                para: 1,
+                levels: &[Some(1), Some(1), Some(1), Some(1)],
+                order: &[3, 2, 1, 0],
+            },
             // LTR paragraph with embedded Hebrew word.
-            (
-                &['a', ' ', '\u{05e9}', '\u{05dc}', ' ', 'b'],
-                ParagraphDir::Auto,
-                0,
-                &[Some(0), Some(0), Some(1), Some(1), Some(0), Some(0)],
-                &[0, 1, 3, 2, 4, 5],
-            ),
+            ConformanceCase {
+                cps: &['a', ' ', '\u{05e9}', '\u{05dc}', ' ', 'b'],
+                dir: ParagraphDir::Auto,
+                para: 0,
+                levels: &[Some(0), Some(0), Some(1), Some(1), Some(0), Some(0)],
+                order: &[0, 1, 3, 2, 4, 5],
+            },
             // Arabic letters + European digits -> W2 turns EN into AN (level 2 inside RTL).
-            (
-                &['\u{0627}', ' ', '4', '2'],
-                ParagraphDir::Auto,
-                1,
-                &[Some(1), Some(1), Some(2), Some(2)],
-                &[2, 3, 1, 0],
-            ),
+            ConformanceCase {
+                cps: &['\u{0627}', ' ', '4', '2'],
+                dir: ParagraphDir::Auto,
+                para: 1,
+                levels: &[Some(1), Some(1), Some(2), Some(2)],
+                order: &[2, 3, 1, 0],
+            },
             // N0 paired brackets: RTL word inside parentheses in an LTR paragraph stays level 0
             // when preceded by L, and flips to R when preceded by R with opposite content inside.
-            (
-                &['\u{05e9}', ' ', '(', '\u{05dc}', ')'],
-                ParagraphDir::Ltr,
-                0,
-                &[Some(1), Some(1), Some(1), Some(1), Some(1)],
-                &[4, 3, 2, 1, 0],
-            ),
+            ConformanceCase {
+                cps: &['\u{05e9}', ' ', '(', '\u{05dc}', ')'],
+                dir: ParagraphDir::Ltr,
+                para: 0,
+                levels: &[Some(1), Some(1), Some(1), Some(1), Some(1)],
+                order: &[4, 3, 2, 1, 0],
+            },
             // Canonical bracket equivalence in N0: U+2329 matches U+3009.
-            (
-                &['\u{05e9}', '\u{2329}', '\u{05dc}', '\u{3009}'],
-                ParagraphDir::Ltr,
-                0,
-                &[Some(1), Some(1), Some(1), Some(1)],
-                &[3, 2, 1, 0],
-            ),
+            ConformanceCase {
+                cps: &['\u{05e9}', '\u{2329}', '\u{05dc}', '\u{3009}'],
+                dir: ParagraphDir::Ltr,
+                para: 0,
+                levels: &[Some(1), Some(1), Some(1), Some(1)],
+                order: &[3, 2, 1, 0],
+            },
             // FSI + PDI isolate inside LTR: Hebrew inside FSI..PDI does not infect outer neutrals.
-            (
-                &['a', ' ', '\u{2068}', '\u{05e9}', '!', '\u{2069}', ' ', 'b'],
-                ParagraphDir::Auto,
-                0,
-                &[
+            ConformanceCase {
+                cps: &['a', ' ', '\u{2068}', '\u{05e9}', '!', '\u{2069}', ' ', 'b'],
+                dir: ParagraphDir::Auto,
+                para: 0,
+                levels: &[
                     Some(0),
                     Some(0),
                     Some(0),
@@ -989,31 +997,31 @@ mod tests {
                     Some(0),
                     Some(0),
                 ],
-                &[0, 1, 2, 4, 3, 5, 6, 7],
-            ),
+                order: &[0, 1, 2, 4, 3, 5, 6, 7],
+            },
             // RLO override with PDF removed by X9 (`None` level).
-            (
-                &['\u{202e}', 'a', 'b', '\u{202c}'],
-                ParagraphDir::Ltr,
-                0,
-                &[None, Some(1), Some(1), None],
-                &[2, 1],
-            ),
+            ConformanceCase {
+                cps: &['\u{202e}', 'a', 'b', '\u{202c}'],
+                dir: ParagraphDir::Ltr,
+                para: 0,
+                levels: &[None, Some(1), Some(1), None],
+                order: &[2, 1],
+            },
             // Forced RTL base direction (`ParagraphDir::Rtl`) with LTR letter + trailing neutral.
-            (
-                &['a', '!'],
-                ParagraphDir::Rtl,
-                1,
-                &[Some(2), Some(1)],
-                &[1, 0],
-            ),
+            ConformanceCase {
+                cps: &['a', '!'],
+                dir: ParagraphDir::Rtl,
+                para: 1,
+                levels: &[Some(2), Some(1)],
+                order: &[1, 0],
+            },
         ];
 
-        for (index, &(cps, dir, exp_para, exp_levels, exp_order)) in cases.iter().enumerate() {
-            let (para, levels, order) = resolve_conformance(cps, dir);
-            assert_eq!(para, exp_para, "case {index}: paragraph level");
-            assert_eq!(levels.as_slice(), exp_levels, "case {index}: levels");
-            assert_eq!(order.as_slice(), exp_order, "case {index}: visual order");
+        for (index, case) in cases.iter().enumerate() {
+            let (para, levels, order) = resolve_conformance(case.cps, case.dir);
+            assert_eq!(para, case.para, "case {index}: paragraph level");
+            assert_eq!(levels.as_slice(), case.levels, "case {index}: levels");
+            assert_eq!(order.as_slice(), case.order, "case {index}: visual order");
         }
     }
 }
