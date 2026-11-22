@@ -1033,3 +1033,36 @@ fn a_pushed_tail_leaf_is_laid_out_from_its_predecessors_carry() {
         "the reveal reported no scroll, so it was clamped to a total that is short a leaf"
     );
 }
+
+#[test]
+fn trimming_a_single_sealed_leaf_recomputes_its_height_and_clamps_scroll() {
+    let mut shell = session();
+    shell.type_text("0\n1\n2\n3\n4\n5").expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+    assert_eq!(shell.typing().spine().slab_count(), 1);
+    assert_eq!(shell.heights().total(), Fixed::units(120));
+
+    shell.scroll_to(Fixed::units(80));
+    assert_eq!(shell.scroll(), Fixed::units(80));
+
+    // Delete lines 1..=5 from the single sealed leaf: `slab_count` stays 1, while height drops
+    // from six lines (120) to one line (20) inside the two-line viewport (40).
+    for _ in 0..10 {
+        shell.backspace().expect("backspaced");
+    }
+    assert_eq!(shell.typing().spine().slab_count(), 1);
+
+    let first_text = {
+        let frame = shell.frame().expect("first frame");
+        frame.text().to_owned()
+    };
+    let second_text = {
+        let frame = shell.frame().expect("second frame");
+        frame.text().to_owned()
+    };
+    assert_eq!(first_text, "0");
+    assert_eq!(second_text, "0");
+    assert_eq!(shell.heights().total(), Fixed::units(20));
+    assert_eq!(shell.scroll(), Fixed::ZERO);
+}

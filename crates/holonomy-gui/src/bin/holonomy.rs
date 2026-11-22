@@ -32,7 +32,7 @@ use holonomy_gui::panel::Facts;
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
-use holonomy_seal::{PassphraseInput, MAX_PASSPHRASE_INPUT_BYTES};
+use holonomy_seal::{probe_capability, LockCapability, PassphraseInput, MAX_PASSPHRASE_INPUT_BYTES};
 use holonomy_shell::Editor;
 use holonomy_shell::Effect;
 use holonomy_text::{ResidentSet, Typing};
@@ -369,7 +369,7 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
     let mut decoder = Decoder::new();
     let mut bytes = [0u8; 256];
     let mut message = String::new();
-    let mut panel: Option<Vec<String>> = None;
+    let mut panel: Option<(LockCapability, Option<u64>)> = None;
     print!("\x1b[?25l\x1b[2J");
     // What the screen currently shows, so an unchanged view is not written again (D-68).
     // `None` means "nothing has been written yet", which is what makes the first pass paint.
@@ -378,8 +378,12 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
         let (now_columns, now_rows) = size();
         // The panel gives way, never the surface: `1 + panel + 1` lines that do not fit make the
         // terminal scroll, and then the caret the renderer places is a row off (D-48).
-        let panel_lines = term::panel_fits(&panel.clone().unwrap_or_default(), now_rows);
-        let surface_rows = now_rows.saturating_sub(1 + panel_lines.len()).max(1);
+        let panel_room = if panel.is_some() {
+            now_rows.saturating_sub(2).min(4)
+        } else {
+            0
+        };
+        let surface_rows = now_rows.saturating_sub(1 + panel_room).max(1);
         app.surface_mut().resize(now_columns, surface_rows);
         app.resize(
             Fixed::units(now_columns as i64),
@@ -393,6 +397,13 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
         // clears `has_pending`, a keystroke can move the caret over unchanged text, and Ctrl+G
         // swaps the panel.
         let repainted = app.draw()?;
+        let panel_lines = match panel {
+            Some((capability, verified)) => {
+                let facts = Facts::gather_with(app.residency(), document, capability, verified);
+                term::panel_fits(&facts.lines(), now_rows)
+            }
+            None => Vec::new(),
+        };
         let line = status(
             path,
             document,
@@ -400,7 +411,10 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
             app.has_pending(),
             message.as_str(),
         );
-        let caret = app.surface().caret_cell();
+        let caret = app
+            .surface()
+            .caret_cell()
+            .filter(|&(_, row)| row < surface_rows);
         // The terminal's own size is part of what is on screen: a taller window with the same
         // width repaints no cell and would otherwise never be filled at its new height.
         let size_now = (now_columns, surface_rows);
@@ -419,6 +433,8 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
             )?;
             if let Some((column, row)) = caret {
                 write!(stdout, "\x1b[?25h\x1b[{};{}H", row + 1, column + 1)?;
+            } else {
+                write!(stdout, "\x1b[?25l")?;
             }
             stdout.flush()?;
             shown = Some((size_now, line, caret, panel_lines.clone()));
@@ -475,7 +491,7 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
                                 .verify()
                                 .ok()
                                 .map(|report| report.segments_verified);
-                            Some(Facts::gather(app.residency(), document, verified).lines())
+                            Some((probe_capability(), verified))
                         };
                         continue;
                     }

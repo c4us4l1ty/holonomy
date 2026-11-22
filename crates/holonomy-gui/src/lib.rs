@@ -495,7 +495,12 @@ where
         // Decided before `intent` is moved into `apply`, which is where it is consumed.
         let moves_the_caret = matches!(
             intent,
-            Intent::Type(_) | Intent::Backspace | Intent::DeleteForward
+            Intent::Type(_)
+                | Intent::Backspace
+                | Intent::DeleteForward
+                | Intent::Move { .. }
+                | Intent::Undo
+                | Intent::Redo
         );
         let mut effects = self.editor.apply(intent)?;
         // D-53/D-57: the caret a keystroke leaves behind is the window's to keep on screen, and
@@ -510,7 +515,7 @@ where
         // performed. Best effort on the error: the edit has already landed, and a leaf the reader
         // could not lay out is the *frame's* problem — propagating it would report a keystroke that
         // reached the document as a refused edit, the same lie D-47 was about, one layer down.
-        if moves_the_caret {
+        if moves_the_caret && !effects.is_empty() {
             if let Ok(revealed) = self.editor.apply(Intent::RevealCaret) {
                 if !revealed.is_empty() && !effects.contains(&Effect::Redraw) {
                     effects.push(Effect::Redraw);

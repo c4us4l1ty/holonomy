@@ -36,7 +36,11 @@ pub struct CellShaper;
 
 impl Shaper for CellShaper {
     fn advance(&self, cluster: &str, _style: Style) -> Fixed {
-        Fixed::units(i64::from(cluster_cells(cluster)))
+        if matches!(cluster, "" | "\n" | "\r" | "\r\n") {
+            Fixed::ZERO
+        } else {
+            Fixed::units(i64::from(cluster_cells(cluster).max(1)))
+        }
     }
 
     fn line_height(&self, _style: Style) -> Fixed {
@@ -208,6 +212,7 @@ fn control(byte: u8) -> Input {
     match byte {
         0x01 => Input::Key(Key::Character('a'), Modifiers::control()),
         0x03 => Input::Key(Key::Character('c'), Modifiers::control()),
+        0x07 => Input::Key(Key::Character('g'), Modifiers::control()),
         0x08 => Input::Key(Key::Backspace, Modifiers::none()),
         0x09 => Input::Key(Key::Character('\t'), Modifiers::none()),
         0x0a | 0x0d => Input::Key(Key::Enter, Modifiers::none()),
@@ -290,16 +295,30 @@ pub fn panel_fits(panel: &[String], rows: usize) -> Vec<String> {
     panel.iter().take(room).cloned().collect()
 }
 
+/// What a terminal row may safely print for `cluster`, and how many columns it advances.
+///
+/// Control, tab, and zero-width format clusters (`cluster_cells == 0`) are rendered as a single
+/// ASCII space so they claim the one cell [`CellShaper`] reserved for them and can never inject
+/// ANSI/OSC escape sequences or raw tab stops into the user's terminal.
+fn display_cluster(cluster: &str) -> (&str, usize) {
+    let width = usize::from(cluster_cells(cluster));
+    if width == 0 {
+        (" ", 1)
+    } else {
+        (cluster, width)
+    }
+}
+
 /// Truncates `text` to at most `columns` terminal display cells, never splitting a cluster.
 fn truncate_to_columns(text: &str, columns: usize) -> String {
     let mut out = String::with_capacity(text.len().min(columns.saturating_mul(4)));
     let mut used = 0usize;
     for (_, cluster) in Clusters::new(text) {
-        let width = usize::from(cluster_cells(cluster));
+        let (shown, width) = display_cluster(cluster);
         if used + width > columns {
             break;
         }
-        out.push_str(cluster);
+        out.push_str(shown);
         used += width;
     }
     out
@@ -324,16 +343,18 @@ pub fn screen_with(
         let mut column = 0;
         while column < columns {
             if let Some((cluster, span)) = surface.cluster_at(column, row) {
+                let (shown, _) = display_cluster(cluster);
                 let width = span.max(1);
                 if column + width <= columns {
-                    line.push_str(cluster);
+                    line.push_str(shown);
                     column += width;
                 } else {
                     line.push(' ');
                     column += 1;
                 }
             } else {
-                line.push(surface.at(column, row));
+                let cell = surface.at(column, row);
+                line.push(if cell.is_control() { ' ' } else { cell });
                 column += 1;
             }
         }
@@ -348,7 +369,9 @@ pub fn screen_with(
     out.push_str(&truncate_to_columns(status, columns));
     out.push_str("\x1b[0m\x1b[K");
     if let Some((column, row)) = surface.caret_cell() {
-        out.push_str(&format!("\x1b[{};{}H", row + 1, column + 1));
+        if row < surface.rows() {
+            out.push_str(&format!("\x1b[{};{}H", row + 1, column + 1));
+        }
     }
     out
 }
@@ -389,6 +412,10 @@ mod tests {
         assert_eq!(
             keys(b"\x13"),
             vec![Input::Key(Key::Character('s'), Modifiers::control())]
+        );
+        assert_eq!(
+            keys(b"\x07"),
+            vec![Input::Key(Key::Character('g'), Modifiers::control())]
         );
     }
 

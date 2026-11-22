@@ -434,6 +434,7 @@ pub fn cluster_cells(cluster: &str) -> u8 {
     let mut ri_count = u8::from(first_prop == Property::RegionalIndicator);
     let mut has_vs15 = false;
     let mut has_vs16 = false;
+    let mut has_keycap = false;
     let mut wide = tables::wide(first);
     for character in chars {
         match character {
@@ -444,6 +445,9 @@ pub fn cluster_cells(cluster: &str) -> u8 {
             '\u{FE0F}' => {
                 has_vs16 = true;
                 has_vs15 = false;
+            }
+            '\u{20E3}' => {
+                has_keycap = true;
             }
             _ => {
                 if property(character) == Property::RegionalIndicator {
@@ -458,7 +462,8 @@ pub fn cluster_cells(cluster: &str) -> u8 {
     if ri_count >= 2 {
         return 2;
     }
-    if has_vs16 && first_prop == Property::Pictographic {
+    let keycap_base = matches!(first, '0'..='9' | '#' | '*');
+    if has_vs16 && (first_prop == Property::Pictographic || (has_keycap && keycap_base)) {
         return 2;
     }
     if has_vs15 && first_prop == Property::Pictographic {
@@ -743,6 +748,12 @@ mod tests {
         assert_eq!(cluster_cells("\u{2764}"), 1);
         assert_eq!(cluster_cells("\u{2764}\u{FE0F}"), 2);
         assert_eq!(cluster_cells("\u{231A}\u{FE0E}"), 1);
+        assert_eq!(cluster_cells("1\u{FE0F}\u{20E3}"), 2);
+        assert_eq!(cluster_cells("#\u{FE0F}\u{20E3}"), 2);
+        assert_eq!(cluster_cells("1\u{20E3}"), 1);
+        assert_eq!(cluster_cells("\t"), 0);
+        assert_eq!(cluster_cells("\x1b"), 0);
+        assert_eq!(cluster_cells("\u{200B}"), 0);
     }
 
     #[test]

@@ -125,6 +125,12 @@ impl Spine {
         }
     }
 
+    /// Whether `self` and `other` share the exact same root node in O(1).
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.root, &other.root)
+    }
+
     /// The document length in bytes.
     #[must_use]
     pub fn len(&self) -> u64 {
