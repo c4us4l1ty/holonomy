@@ -14,7 +14,7 @@ use holonomy_seal::{
 };
 use holonomy_text::{
     Appended, ReplacementBuilder, ResidentSet, SegmentId, SegmentSink, SegmentSource, Slab, Spine,
-    Typing,
+    StyleMap, Typing,
 };
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -50,20 +50,53 @@ impl Drop for Temp {
 struct Shared {
     line: Rc<RefCell<WorldLine>>,
     loads: u64,
+    words: u64,
+    in_word: bool,
 }
 impl SegmentSource for Shared {
     fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
         self.loads += 1;
-        self.line
+        let bytes = self
+            .line
             .borrow()
             .open_segment(segment.get())
-            .map(|bytes| bytes.to_vec())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?
+            .to_vec();
+        for &byte in &bytes {
+            let word = !byte.is_ascii_whitespace();
+            if word && !self.in_word {
+                self.words += 1;
+            }
+            self.in_word = word;
+        }
+        Ok(bytes)
     }
 }
 impl SegmentSink for Shared {
     fn append_segment(&mut self, _plaintext: &[u8]) -> Result<Appended, String> {
         Err("individual append is not used by this test".to_owned())
+    }
+    fn commit_manifest(&mut self, slabs: &[Slab], styles: &StyleMap) -> Result<(), String> {
+        if !styles.is_empty() {
+            return Err("fixture unexpectedly styled".to_owned());
+        }
+        let manifest = LineManifest {
+            slabs: slabs
+                .iter()
+                .map(|s| LineSlab {
+                    segment: s.segment().get(),
+                    start: s.start(),
+                    len: s.len(),
+                })
+                .collect(),
+            styles: Vec::new(),
+            links: Vec::new(),
+        };
+        self.line
+            .borrow_mut()
+            .commit_full_manifest(&manifest)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
     fn atomic_replace(
         &mut self,
@@ -108,13 +141,15 @@ fn encrypted_30m_word_search_and_replace_heap_measurement() {
     let path =
         Temp(std::env::temp_dir().join(format!("holonomy-search-memory-{name}.wavefunction")));
     let salt = [0x71; 64];
-    let params = KdfParamsRecord {
-        m_kib: 8192,
-        t: 1,
-        p: 1,
-    };
-    let keys =
-        MasterKeys::derive(b"encrypted-search-fixture", &salt, None, ParamsClass::Test).unwrap();
+    let (m_kib, t, p) = ParamsClass::Legacy.costs();
+    let params = KdfParamsRecord { m_kib, t, p };
+    let keys = MasterKeys::derive(
+        b"encrypted-search-fixture",
+        &salt,
+        None,
+        ParamsClass::Legacy,
+    )
+    .unwrap();
     let (capsule, dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
     let header = LineHeader::new(params, salt, capsule).unwrap();
     let mut line = WorldLine::create(&path.0, header, dem.duplicate()).unwrap();
@@ -141,8 +176,8 @@ fn encrypted_30m_word_search_and_replace_heap_measurement() {
         line.append_segments(&parts).unwrap();
     }
     drop((plain, middle, end, start));
-    assert!(SEGMENTS * LENGTH / 6 > 30_000_000);
     drop(line);
+    let baseline = LIVE.load(Ordering::SeqCst);
     let line = Rc::new(RefCell::new(WorldLine::open(&path.0, dem).unwrap()));
     let slabs: Vec<_> = line
         .borrow()
@@ -154,40 +189,46 @@ fn encrypted_30m_word_search_and_replace_heap_measurement() {
     let sink = Shared {
         line: Rc::clone(&line),
         loads: 0,
+        words: 0,
+        in_word: false,
     };
     let source = Shared {
         line: Rc::clone(&line),
         loads: 0,
+        words: 0,
+        in_word: false,
     };
     let mut resident = ResidentSet::new(source, LIMIT, 1024).unwrap();
     for segment in 0..3 {
         resident.fault_in(SegmentId::new(segment)).unwrap();
     }
     resident.source_mut().loads = 0;
+    resident.source_mut().words = 0;
+    resident.source_mut().in_word = false;
     let resident_allocated = resident.allocated_bytes();
     const TYPING_CAPACITY: usize = 4096;
     let mut typing = Typing::resume(sink, original.clone(), TYPING_CAPACITY);
 
-    let baseline = LIVE.load(Ordering::SeqCst);
-    PEAK.store(baseline, Ordering::SeqCst);
+    PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
     let hits = typing.find_all(b"holonomy", resident.source_mut()).unwrap();
-    let find_peak =
-        PEAK.load(Ordering::SeqCst).saturating_sub(baseline) + resident_allocated + TYPING_CAPACITY;
+    let find_peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
     assert_eq!(hits.len(), 5);
     assert_eq!(resident.source_mut().loads, SEGMENTS as u64);
+    let words = resident.source_mut().words;
+    println!("HOLONOMY_ENCRYPTED_FIND words={words} peak_heap_delta={find_peak} resident={resident_allocated} bound={LIMIT}");
+    assert!(words >= 30_000_000);
     assert!(find_peak <= LIMIT, "find peak {find_peak} exceeds {LIMIT}");
     drop(hits);
 
-    let baseline = LIVE.load(Ordering::SeqCst);
-    PEAK.store(baseline, Ordering::SeqCst);
+    PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
     assert_eq!(
         typing
             .replace_all(b"holonomy", b"HOLONOMY_V6", resident.source_mut())
             .unwrap(),
         5
     );
-    let replace_peak =
-        PEAK.load(Ordering::SeqCst).saturating_sub(baseline) + resident_allocated + TYPING_CAPACITY;
+    let replace_peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
+    println!("HOLONOMY_ENCRYPTED_REPLACE peak_heap_delta={replace_peak} bound={LIMIT}");
     assert!(
         replace_peak <= LIMIT,
         "replace peak {replace_peak} exceeds {LIMIT}"
@@ -195,5 +236,5 @@ fn encrypted_30m_word_search_and_replace_heap_measurement() {
     assert_eq!(resident.allocated_bytes(), resident_allocated);
     assert!(typing.undo().unwrap());
     assert!(typing.spine().ptr_eq(&original));
-    println!("HOLONOMY_ENCRYPTED_SEARCH segments={SEGMENTS} bytes={} matches=5 resident={resident_allocated} find_peak={find_peak} replace_peak={replace_peak} bound={LIMIT}", SEGMENTS * LENGTH);
+    println!("HOLONOMY_ENCRYPTED_SEARCH segments={SEGMENTS} bytes={} words={words} matches=5 resident={resident_allocated} find_peak={find_peak} replace_peak={replace_peak} bound={LIMIT}", SEGMENTS * LENGTH);
 }
