@@ -276,11 +276,14 @@ what can be said, and the panel says only that.
 
 ### M7 — The gates that remain
 
-Block 5 gate 3 (BiDi): **decided 2026-11-21 (D-66).** The caret half is met — no caret lands
-inside a grapheme in any RTL script, asserted over 14 corpus lines in `tests/script_gate.rs` — and
-visual reordering is **deferred to Block 6** with its displacement printed on every push as
-`HOLONOMY_SCRIPT_GATE_ORDER`. OQ-11 carries the decision and the reason: it is a paint-order change
-and there is no pixel surface yet to paint it on.
+Block 5 gates 2 & 3 (`OQ-12` viewport latency & `OQ-11` BiDi): **closed 2026-11-22 (D-77, D-78).**
+`holonomy-eye` implements full UAX #9 bidirectional resolution and line reordering over generated
+UCD 18.0.0 tables with bijective primary-caret boundaries (`displaced = 0` and `L-8` `27,680`
+boundaries / `0` disagreements in `tests/script_gate.rs`, plus split `SelectionSpan`s and
+multi-leaf logical `Carry.x` in `holonomy-shell`), and `tests/viewport_latency.rs` measures the
+real OpenType `Face` (`Inter-Regular.ttf`) at ~697 µs p50 identically across 180 KB offset 0,
+180 MB (30 M words) offset 0, and 180 MB near the end (`76×` faster than a 128-leaf control).
+OpenType `GSUB`/`GPOS` contextual glyph shaping remains `OQ-24`.
 
 Zero-CPU-repaint-while-idle: **the defect is fixed and the harness enforces it (D-68, D-69).** An
 idle window used to rewrite its entire screen on every loop iteration; it now compares what
@@ -300,9 +303,12 @@ law.
 The full VISION budget table: **now generated, not written.** `BUDGETS` in
 `crates/holonomy-ledger/src/laws.rs` maps VISION §4 onto the law table and onto the harness that
 measures each row, `xtask gates` renders it into `GATES.md`, and `gates --check` fails the build if
-the two disagree. Two rows say **"nothing yet"** out loud — L-7's wipe and L-9's portability have no
-harness at all. No remaining M7 item is unaddressed: each one either prints its numbers green or
-moved to `AUDIT.md` with an owner and a reason.
+the two disagree. Block 9's `L-7` wipe row is now measured on every push by
+`holonomy-text/tests/wipe_gate.rs` (`< 1 ms` trip-to-verified across a 4 MiB `ResidentSet`, live
+`DEMKey`, and 32 zeroize canaries with `ghosts = 0` and `0` allocations; `D-79`), leaving only one
+row — `L-9`'s cross-machine portability — reading **"nothing yet"**. No remaining M7 item is
+unaddressed: each one either prints its numbers green or moved to `AUDIT.md` with an owner and a
+reason.
 
 ### M8 — Packaging
 
@@ -363,7 +369,8 @@ The distance left, plainly: the remaining gates (M7), packaging (M8), plus the G
 `crates/holonomy-ledger/src/laws.rs` ever disagree.
 
 What is still not here, in the order it would meet a user: no GPU or font rendering (the window is
-a terminal cell grid whose wide characters use UCD 18.0.0 two-cell advances — `OQ-25` closed; RTL
-text still has no visual bidi reordering — `OQ-11`), one document at a time, deleted bytes remain
-encrypted in the append-only `.wavefunction` until explicit `holonomy compact` (`OQ-14`), and no
-power-loss qualification (the L-6 rehearsal is an ENOSPC test and says so in its own job name).
+a terminal cell grid whose wide characters use UCD 18.0.0 two-cell advances — `OQ-25` closed — and
+whose RTL/mixed lines reorder per UAX #9 — `OQ-11` closed — while OpenType `GSUB`/`GPOS` glyph
+joining remains `OQ-24`), one document at a time, deleted bytes remain encrypted in the append-only
+`.wavefunction` until explicit `holonomy compact` (`OQ-14`), and no physical power-loss
+qualification (the L-6 rehearsal is an ENOSPC test and says so in its own job name).

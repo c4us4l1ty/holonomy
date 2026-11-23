@@ -77,14 +77,15 @@ detail lives.
 | Sealed world-line, append + witness + spine manifest + compaction | **Real, measured in CI** | `holonomy-line`; L-6 and L-10 are separate CI jobs |
 | Slab spine, history, resident set | **Real, measured in CI** | `holonomy-text`; zero-allocation keystroke claim counted by an allocator in CI |
 | Commit boundary (seal + manifest → world-line) | **Real, measured in CI** | `holonomy-text`; proven against the real container |
-| Eye geometry: clusters, cell display width, run tree, zoom/DPI, height index | **Real, measured in CI** | `holonomy-eye` |
+| Eye geometry: clusters, UAX #9 BiDi, cell display width, run tree, zoom/DPI, height index | **Real, measured in CI** | `holonomy-eye`; 30 M-word real-`Face` viewport latency (`OQ-12`) + UAX #9 `script_gate` (`OQ-11`) |
 | Editor loop: intents in, measured frames out | **Real, measured in CI** | `holonomy-shell` |
 | Terminal window & CLI: open, type, save, unlock, panel, `verify`, `compact` | **Real — this is the app you run** | `holonomy-gui` |
 | That binary, driven end to end by CI | **Real** — created, sealed, reopened, verified, compacted, wrong and empty passphrases refused | `scripts/smoke-install.sh` (D-72) |
 | A packaged release or installer | **None.** No artefact is published; you build from source | `docs/TO-APP.md` M8 |
-| GPU backend, font shaping, IME | **Not built** — the window is a grid of cells | `docs/TO-APP.md` M4b-ii |
+| GPU backend, font shaping, IME | **Not built** — the window is a grid of cells (`GSUB`/`GPOS` glyph shaping is OQ-24) | `docs/TO-APP.md` M4b-ii |
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
-| Right-to-left text (Hebrew, Arabic, …) | **Drawn left-to-right.** A caret never splits a letter's mark, but the visual order is wrong — there is no bidi reordering | OQ-11, D-66 |
+| Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection** (`displaced = 0`, split selection spans); contextual glyph joining (`GSUB`/`GPOS`) is not built | OQ-11 (D-77), OQ-24 |
+| Emergency wipe & zeroize canaries (`L-7`) | **Real, measured in CI** — 4 MiB `ResidentSet` + live `DEMKey` + 32 canaries volatile-wiped in `< 1 ms` with `ghosts = 0` and `0` allocations | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs` (D-79) |
 | Crash before a save | **Loses up to 16 KiB** of the most recent typing; nothing older | D-64 |
 | Documents open at once | **One**, one window, one caret. No panes, search, or settings | — |
 | DEM key & passphrase buffers | **Owned and zeroized on drop** — `WorldLine` owns `DEMKey` (`OQ-27`), and prompt input is pre-allocated + NFC-normalized in `PassphraseInput` (`OQ-28`) | `holonomy-seal`, `holonomy-line`, `holonomy-gui` |
