@@ -383,9 +383,44 @@ fn a_selection_covers_exactly_the_clusters_between_its_ends() {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct Memory(std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+impl SegmentSink for Memory {
+    fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+        let mut segments = self.0.lock().map_err(|_| "poisoned")?;
+        let id = segments.len() as u64;
+        segments.push(plaintext.to_vec());
+        Ok(Appended {
+            segment: SegmentId::new(id),
+            witness_sequence: id + 1,
+            segment_root: [0u8; 32],
+            bytes_written: plaintext.len() as u64,
+        })
+    }
+}
+
+impl SegmentSource for Memory {
+    fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+        let segments = self.0.lock().map_err(|_| "poisoned")?;
+        segments
+            .get(usize::try_from(segment.get()).unwrap_or(usize::MAX))
+            .cloned()
+            .ok_or_else(|| format!("no {segment}"))
+    }
+}
+
 #[test]
 fn mixed_bidi_selection_emits_and_covers_disjoint_visual_spans() {
-    let mut shell = editor();
+    let memory_store = Memory::default();
+    let residency = ResidentSet::new(memory_store.clone(), BUDGET, 0).expect("budget");
+    let mut shell = Editor::new(
+        Typing::new(memory_store, 64),
+        residency,
+        Fake,
+        WIDTH,
+        VIEWPORT,
+    );
     shell.type_text("ab של cd").expect("typed mixed BiDi");
     // Logical bytes `1..5` select `'b'`, `' '`, and `'ש'` (`'ל'` sits visually between `' '` and
     // `'ש'`), splitting the highlight on line 0 into two disjoint visual boxes.
