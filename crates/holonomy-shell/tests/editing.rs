@@ -6,7 +6,7 @@
 //! proof about every caret a frame offers instead of a sample of them.
 
 use holonomy_eye::{layout_styled, Clusters, Fixed, Point, Shaper, Style, StyledText, View};
-use holonomy_shell::Editor;
+use holonomy_shell::{Editor, Move};
 use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -1136,5 +1136,37 @@ fn frame_write_back_preserves_tail_leaf_height_across_straddling_cluster() {
         shell.heights().total(),
         continuous.height(),
         "clipped tail span must not zero out the next leaf's measured height"
+    );
+}
+
+#[test]
+fn delete_and_right_arrow_at_leaf_boundary_step_one_cluster() {
+    // Leaf 0 (`0..64`) ends on `x` at byte 63 and Leaf 1 (`64..128`) begins on `y` at byte 64.
+    // Neither `Move::Right` nor `delete_forward` at byte 63 may absorb `y` across the leaf seam.
+    let mut text = "a".repeat(63);
+    text.push('x');
+    text.push('y');
+    text.push_str(&"b".repeat(63));
+
+    let mut shell = session();
+    shell.type_text(&text).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+
+    shell
+        .click(Point::new(Fixed::units(63), Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(shell.caret(), 63);
+
+    assert!(shell.move_caret_to(Move::Right, false).expect("right"));
+    assert_eq!(shell.caret(), 64, "right arrow must stop at leaf seam");
+
+    assert!(shell.move_caret_to(Move::Left, false).expect("left"));
+    assert_eq!(shell.caret(), 63);
+    assert!(shell.delete_forward().expect("delete"));
+    assert_eq!(
+        shell.document_len(),
+        127,
+        "delete must remove only one byte"
     );
 }

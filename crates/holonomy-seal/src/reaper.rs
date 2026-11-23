@@ -149,11 +149,9 @@ impl SecretArenas {
                 let ptr = slot.address.load(Ordering::Relaxed) as *mut u8;
                 let len = slot.length.load(Ordering::Relaxed);
                 if !ptr.is_null() && len > 0 {
-                    for offset in 0..len {
-                        // SAFETY: `SLOT_WIPING` prevents `unregister` from returning until we
-                        // restore `SLOT_ARMED`, so `[ptr, ptr + len)` stays live and exclusive.
-                        unsafe { write_volatile(ptr.add(offset), 0u8) };
-                    }
+                    // SAFETY: `SLOT_WIPING` prevents `unregister` from returning until we
+                    // restore `SLOT_ARMED`, so `[ptr, ptr + len)` stays live and exclusive.
+                    unsafe { volatile_zero_range(ptr, len) };
                     arenas_wiped += 1;
                     bytes_wiped = bytes_wiped.saturating_add(len);
                 }
@@ -165,6 +163,34 @@ impl SecretArenas {
             arenas_wiped,
             bytes_wiped,
         }
+    }
+}
+
+/// Volatile-zeroes `[ptr, ptr + len)` using aligned `usize` stores for the interior and byte
+/// stores for unaligned head/tail edges.
+///
+/// # Safety
+///
+/// `[ptr, ptr + len)` must be valid for writes and exclusively owned for the duration of this call.
+unsafe fn volatile_zero_range(ptr: *mut u8, len: usize) {
+    let word = core::mem::size_of::<usize>();
+    let align_off = ptr.align_offset(word).min(len);
+    for idx in 0..align_off {
+        // SAFETY: `idx < align_off <= len`.
+        unsafe { write_volatile(ptr.add(idx), 0u8) };
+    }
+    let rem = len - align_off;
+    let words = rem / word;
+    // SAFETY: `ptr.add(align_off)` is in `[ptr, ptr + len]` and `usize`-aligned if `words > 0`.
+    let word_ptr = unsafe { ptr.add(align_off).cast::<usize>() };
+    for idx in 0..words {
+        // SAFETY: `idx < words`, within `[ptr, ptr + len)`.
+        unsafe { write_volatile(word_ptr.add(idx), 0usize) };
+    }
+    let tail_start = align_off + words * word;
+    for idx in tail_start..len {
+        // SAFETY: `idx < len`, within `[ptr, ptr + len)`.
+        unsafe { write_volatile(ptr.add(idx), 0u8) };
     }
 }
 

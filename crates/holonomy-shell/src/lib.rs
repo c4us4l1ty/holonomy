@@ -1473,39 +1473,47 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let Some(mut leaf) = self.leaf_of(at) else {
             return Ok(None);
         };
-        // The mirror of `cluster_before`: the cluster that starts at the caret can end in the leaf
-        // after it, so the window is widened leaf by leaf until the cluster it opens with ends
-        // inside it. A cluster that reaches the document's end is complete there. A leaf's extent
-        // includes the bytes the leaf after it skipped — its predecessor placed them (AUDIT D-25).
-        let mut hops = 0;
-        loop {
-            let Some((leaf_start, leaf_end)) = self.leaf_bounds(leaf) else {
-                return Ok(None);
+        // Walk forward from `at` across at most `CLUSTER_LEAF_LIMIT` leaf boundaries, continuing
+        // only while the next leaf's leading code point actually joins the open UAX #29 state
+        // (`ctx.joins(first)`). Without that `joins` check, any cluster ending cleanly on a leaf
+        // boundary would absorb the first cluster of the following leaf as well.
+        let mut cursor = at;
+        let mut ctx = ClusterContext::START;
+        let mut started = false;
+        for _ in 0..=CLUSTER_LEAF_LIMIT {
+            let Some((_, leaf_end)) = self.leaf_bounds(leaf) else {
+                break;
             };
-            let carried = self.carry_of(leaf)?;
-            let from = leaf_start + carried.skip as u64;
-            let placed = (leaf_end + self.carry_of(leaf + 1)?.skip as u64).min(document);
-            let start = at.max(from);
-            if start >= placed {
-                if placed >= document || hops >= CLUSTER_LEAF_LIMIT {
-                    return Ok(Some(placed));
+            let end = leaf_end.min(document);
+            if cursor < end {
+                let read = self.read(cursor, end)?;
+                let slice = read.text();
+                if started {
+                    let Some(first) = slice.chars().next() else {
+                        break;
+                    };
+                    if !ctx.joins(first) {
+                        return Ok(Some(cursor));
+                    }
                 }
-                leaf += 1;
-                hops += 1;
-                continue;
+                let mut clusters = Clusters::continuing(slice, ctx);
+                let Some((_, cluster)) = clusters.next() else {
+                    return Ok((cursor > at).then_some(cursor));
+                };
+                let next_end = cursor + cluster.len() as u64;
+                if next_end < end || end >= document {
+                    return Ok(Some(next_end));
+                }
+                ctx = clusters.carry();
+                cursor = next_end;
+                started = true;
             }
-            let read = self.read(start, placed)?;
-            let mut clusters = Clusters::continuing(read.text(), carried.cluster);
-            let Some((_, cluster)) = clusters.next() else {
-                return Ok(None);
-            };
-            let cluster_end = start + cluster.len() as u64;
-            if cluster_end < placed || placed >= document || hops >= CLUSTER_LEAF_LIMIT {
-                return Ok(Some(cluster_end));
+            if end >= document {
+                return Ok((cursor > at).then_some(cursor));
             }
             leaf += 1;
-            hops += 1;
         }
+        Ok((cursor > at).then_some(cursor))
     }
 
     /// Moves the caret, sealing whatever was open — the session does that itself.
