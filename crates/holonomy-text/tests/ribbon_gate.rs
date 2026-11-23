@@ -167,6 +167,23 @@ impl SegmentSink for LineStore {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+
+    fn atomic_replace(
+        &mut self,
+        chunks: &[&[u8]],
+        build: &mut holonomy_text::ReplacementBuilder<'_>,
+    ) -> Result<(), String> {
+        let first = self.0.segment_count();
+        let ids: Vec<_> = (0..chunks.len())
+            .map(|i| SegmentId::new(first + i as u64))
+            .collect();
+        let (slabs, styles) = build(&ids)?;
+        let manifest = to_line_manifest(to_line_slabs(&slabs), &styles);
+        self.0
+            .append_segments_with_full_manifest(chunks, &manifest)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl SegmentSource for LineStore {
@@ -459,12 +476,12 @@ fn gate_1_every_toolbar_action_round_trips_across_save_reopen_and_compaction() {
 
     let mut res = ResidentSet::new(LineStore(reopened), 4 * 1024 * 1024, 64).unwrap();
     let roundtrip_bytes = copy(
+        &mut res,
         &reopened_spine,
         &Draft::new(),
         &OpenSources::new(),
-        &[],
-        &mut res,
         Selection::new(0, prose.len() as u64),
+        &[],
     )
     .unwrap();
     assert_eq!(roundtrip_bytes.as_slice(), prose.as_bytes());
@@ -559,6 +576,23 @@ struct CorpusSink {
 }
 
 impl SegmentSink for CorpusSink {
+    fn atomic_replace(
+        &mut self,
+        chunks: &[&[u8]],
+        build: &mut holonomy_text::ReplacementBuilder<'_>,
+    ) -> Result<(), String> {
+        let ids: Vec<_> = (0..chunks.len())
+            .map(|i| SegmentId::new(self.next_id + i as u64))
+            .collect();
+        let _ = build(&ids)?;
+        self.appended
+            .lock()
+            .unwrap()
+            .extend(chunks.iter().map(|chunk| chunk.to_vec()));
+        self.next_id += chunks.len() as u64;
+        Ok(())
+    }
+
     fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
         let seg = self.next_id;
         self.next_id += 1;
@@ -807,8 +841,9 @@ fn wipe_registry_arms_and_zeroizes_resident_set_and_typing_buffers_in_place() {
     };
     let _ = source.load(SegmentId::new(0)).unwrap();
     let mut residency = ResidentSet::new(source, 4 * 1024 * 1024, 256).unwrap();
-    residency.set_wipe_registry(Arc::clone(&bridge));
     let _ = residency.fault_in(SegmentId::new(0)).unwrap();
+    // SAFETY: registration happens after the last edit and this test wipes synchronously.
+    unsafe { residency.set_wipe_registry(Arc::clone(&bridge)) };
 
     let sink = CorpusSink {
         next_id: 2,
@@ -819,8 +854,9 @@ fn wipe_registry_arms_and_zeroizes_resident_set_and_typing_buffers_in_place() {
         Spine::from_slabs(vec![Slab::new(SegmentId::new(0), 0, 65_536)]),
         256,
     );
-    typing.set_wipe_registry(Arc::clone(&bridge));
     typing.insert(b"top-secret live typing buffer").unwrap();
+    // SAFETY: no edits overlap or follow this registration before the synchronous wipe.
+    unsafe { typing.set_wipe_registry(Arc::clone(&bridge)) };
 
     // 4 canaries + 1 resident slab + 1 open typing buffer = at least 6 armed arenas.
     assert!(arenas.armed_count() >= 6);

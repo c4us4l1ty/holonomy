@@ -386,6 +386,30 @@ fn unchanged(
     })
 }
 
+// Only the UI thread owns the editor and document. Register fresh pointers after it has stopped
+// editing, then let the worker wipe; do not touch registered allocations until it has joined.
+fn wipe_quiescent(
+    app: &mut Window,
+    document: &Document,
+    arenas: &Arc<SecretArenas>,
+    reaper: ReaperGuard,
+) -> Ended {
+    // SAFETY: the UI thread has stopped using the document until the worker has joined.
+    let _ = unsafe { document.arm_reaper(arenas) };
+    // SAFETY: the UI thread has stopped editing and will not touch any registered allocation
+    // again until the reaper has completed.
+    unsafe {
+        app.editor()
+            .set_wipe_registry(Arc::new(SealWipeBridge(Arc::clone(arenas))));
+    }
+    // SAFETY: this thread holds the only app/document handles used by the editor, and it does not
+    // access the registered buffers or canaries again until the worker has joined.
+    unsafe { reaper.acknowledge_quiescence() };
+    let _ = reaper.wait_outcome();
+    app.editor().wipe_all_in_place();
+    Ended::Wiped
+}
+
 fn run(
     path: &Path,
     document: &Document,
@@ -395,10 +419,9 @@ fn run(
     let mut canary_set = CanarySet::new(8, 256);
     let _ = canary_set.arm_all(&arenas);
     let canaries = Arc::new(canary_set);
-    let _ = document.arm_reaper(&arenas);
     let tripwire = Tripwire::new(deadman_timeout);
     tripwire.beat();
-    let reaper = ReaperGuard::spawn(
+    let reaper = ReaperGuard::spawn_cooperative(
         Arc::clone(&arenas),
         Arc::clone(&canaries),
         Arc::clone(&tripwire),
@@ -408,8 +431,6 @@ fn run(
     let (columns, rows) = size();
     let text_rows = rows.saturating_sub(1).max(1);
     let mut app = window(document, columns, text_rows)?;
-    app.editor()
-        .set_wipe_registry(Arc::new(SealWipeBridge(Arc::clone(&arenas))));
 
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -423,10 +444,8 @@ fn run(
     // `None` means "nothing has been written yet", which is what makes the first pass paint.
     let mut shown: Option<Shown> = None;
     loop {
-        if reaper.has_completed() || tripwire.evaluate().is_some() {
-            let _ = reaper.wait_outcome();
-            app.editor().wipe_all_in_place();
-            return Ok(Ended::Wiped);
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
         }
         let (now_columns, now_rows) = size();
         // The panel gives way, never the surface: `1 + panel + 1` lines that do not fit make the
@@ -453,7 +472,7 @@ fn run(
         let panel_lines = match panel {
             Some((capability, verified)) => {
                 let facts = Facts::gather_with(app.residency(), document, capability, verified)
-                    .with_reaper(&arenas, &canaries, tripwire.evaluate().is_some());
+                    .with_cooperative_reaper(&arenas, &canaries, reaper.has_tripped());
                 term::panel_fits(&facts.lines(), now_rows)
             }
             None => Vec::new(),
@@ -514,10 +533,8 @@ fn run(
                 .clamp(10, PAUSE_MILLIS)
         });
         if !readable(poll_ms) {
-            if reaper.has_completed() || tripwire.evaluate().is_some() {
-                let _ = reaper.wait_outcome();
-                app.editor().wipe_all_in_place();
-                return Ok(Ended::Wiped);
+            if reaper.has_tripped() || tripwire.evaluate().is_some() {
+                return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
             }
             if app.has_pending() && save(&mut app) {
                 message.clear();
@@ -527,6 +544,9 @@ fn run(
         let read = stdin.read(&mut bytes)?;
         if read == 0 {
             break;
+        }
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
         }
         tripwire.beat();
         let mut inputs = decoder.feed_all(&bytes[..read]);
@@ -543,9 +563,7 @@ fn run(
             };
             if modifiers.control && matches!(key, Key::Character('l' | 'L')) {
                 tripwire.fire(TripReason::Manual);
-                let _ = reaper.wait_outcome();
-                app.editor().wipe_all_in_place();
-                return Ok(Ended::Wiped);
+                return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
             }
             if let Some(prompt_state) = search.as_mut() {
                 if modifiers.control && matches!(key, Key::Character('q') | Key::Character('c')) {
@@ -809,7 +827,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             let summary = match outcome {
-                Ok(Ended::Wiped) => "emergency wipe completed — resident memory zeroized",
+                Ok(Ended::Wiped) => "emergency wipe attempted — full memory coverage not verified",
                 Ok(Ended::SaveFailed) => outcome_words(false, Some(false)),
                 Ok(Ended::Saved) => outcome_words(false, Some(true)),
                 Ok(Ended::NothingToWrite) => outcome_words(false, None),

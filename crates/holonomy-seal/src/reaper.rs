@@ -28,6 +28,7 @@ const SLOT_INIT: usize = 1;
 const SLOT_ARMED: usize = 2;
 const SLOT_WIPING: usize = 3;
 const SLOT_UNREGISTERING: usize = 4;
+const SLOT_READING: usize = 5;
 
 /// Opaque handle to one armed slot inside [`SecretArenas`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +93,8 @@ impl SecretArenas {
     ///
     /// `[ptr, ptr + len)` must point to a live, initialized, mutable allocation that stays at
     /// that address until [`Self::unregister`] returns for the yielded [`ArenaSlot`] (or the
-    /// process terminates).
+    /// process terminates). No other access may overlap a wipe, and subsequent accesses must not
+    /// invalidate the pointer's provenance. Slot coordination alone does not provide exclusivity.
     pub unsafe fn register(&self, ptr: *mut u8, len: usize) -> Option<ArenaSlot> {
         if ptr.is_null() || len == 0 {
             return None;
@@ -131,7 +133,7 @@ impl SecretArenas {
                     slot.state.store(SLOT_EMPTY, Ordering::Release);
                     return;
                 }
-                Err(SLOT_WIPING) => spin_loop(),
+                Err(SLOT_WIPING | SLOT_READING) => spin_loop(),
                 Err(_) => return,
             }
         }
@@ -144,7 +146,7 @@ impl SecretArenas {
             .iter()
             .filter(|s| {
                 let st = s.state.load(Ordering::Acquire);
-                st == SLOT_ARMED || st == SLOT_WIPING
+                st == SLOT_ARMED || st == SLOT_WIPING || st == SLOT_READING
             })
             .count()
     }
@@ -157,11 +159,19 @@ impl SecretArenas {
         let mut arenas_wiped = 0usize;
         let mut bytes_wiped = 0usize;
         for slot in &self.slots {
-            if slot
-                .state
-                .compare_exchange(SLOT_ARMED, SLOT_WIPING, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            let acquired = loop {
+                match slot.state.compare_exchange(
+                    SLOT_ARMED,
+                    SLOT_WIPING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break true,
+                    Err(SLOT_READING) => spin_loop(),
+                    Err(_) => break false,
+                }
+            };
+            if acquired {
                 let ptr = slot.address.load(Ordering::Relaxed) as *mut u8;
                 let len = slot.length.load(Ordering::Relaxed);
                 if !ptr.is_null() && len > 0 {
@@ -273,6 +283,24 @@ impl CanarySlab {
     }
 
     fn ghost_bytes(&self) -> usize {
+        let slot = self
+            .armed
+            .as_ref()
+            .map(|(arenas, handle)| &arenas.slots[handle.0]);
+        if let Some(slot) = slot {
+            loop {
+                match slot.state.compare_exchange(
+                    SLOT_ARMED,
+                    SLOT_READING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(SLOT_WIPING | SLOT_READING) => spin_loop(),
+                    Err(_) => unreachable!("a live canary remains registered"),
+                }
+            }
+        }
         let ptr = self.ptr.as_ptr().cast_const();
         let len = self.len;
         let mut ghosts = 0usize;
@@ -282,6 +310,9 @@ impl CanarySlab {
             if b != 0 {
                 ghosts += 1;
             }
+        }
+        if let Some(slot) = slot {
+            slot.state.store(SLOT_ARMED, Ordering::Release);
         }
         ghosts
     }
@@ -529,6 +560,8 @@ fn promote_realtime() -> SchedClass {
 pub struct ReaperGuard {
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    pending: Arc<AtomicBool>,
+    permission: Option<Arc<AtomicBool>>,
     sched: Arc<AtomicU8>,
     handle: Option<JoinHandle<Option<ReaperOutcome>>>,
 }
@@ -542,11 +575,39 @@ impl ReaperGuard {
         tripwire: Arc<Tripwire>,
         poll_interval: Duration,
     ) -> Self {
+        Self::spawn_inner(arenas, canaries, tripwire, poll_interval, false)
+    }
+
+    /// Starts a reaper which waits for the editor to acknowledge quiescence before wiping.
+    ///
+    /// This trades immediate wiping for memory safety: a stuck editor cannot acknowledge a trip,
+    /// so this mode does not by itself satisfy the L-7 deadline.
+    #[must_use]
+    pub fn spawn_cooperative(
+        arenas: Arc<SecretArenas>,
+        canaries: Arc<CanarySet>,
+        tripwire: Arc<Tripwire>,
+        poll_interval: Duration,
+    ) -> Self {
+        Self::spawn_inner(arenas, canaries, tripwire, poll_interval, true)
+    }
+
+    fn spawn_inner(
+        arenas: Arc<SecretArenas>,
+        canaries: Arc<CanarySet>,
+        tripwire: Arc<Tripwire>,
+        poll_interval: Duration,
+        cooperative: bool,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(AtomicBool::new(false));
+        let permission = cooperative.then(|| Arc::new(AtomicBool::new(false)));
         let sched = Arc::new(AtomicU8::new(0));
         let stop_bg = Arc::clone(&stop);
         let done_bg = Arc::clone(&done);
+        let pending_bg = Arc::clone(&pending);
+        let permission_bg = permission.clone();
         let sched_bg = Arc::clone(&sched);
 
         let handle = thread::Builder::new()
@@ -558,6 +619,15 @@ impl ReaperGuard {
 
                 while !stop_bg.load(Ordering::Acquire) {
                     if let Some((reason, tripped_at_ns)) = tripwire.evaluate() {
+                        pending_bg.store(true, Ordering::Release);
+                        if let Some(permission) = &permission_bg {
+                            while !permission.load(Ordering::Acquire) {
+                                if stop_bg.load(Ordering::Acquire) {
+                                    return None;
+                                }
+                                thread::park();
+                            }
+                        }
                         let wipe = arenas.wipe();
                         let wiped_ns = tripwire.now_ns();
                         let canary_report = canaries.sample_ghosts();
@@ -586,8 +656,31 @@ impl ReaperGuard {
         Self {
             stop,
             done,
+            pending,
+            permission,
             sched,
             handle: Some(handle),
+        }
+    }
+
+    /// Whether the watcher has latched a trip, even if a later heartbeat arrives.
+    #[must_use]
+    pub fn has_tripped(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+    }
+
+    /// Allows a cooperative reaper to proceed after all registered allocations are quiescent.
+    ///
+    /// # Safety
+    ///
+    /// All registered allocations and canaries must remain exclusively available to the reaper
+    /// until `wait_outcome` returns. No thread may read, write, register, or free them meanwhile.
+    pub unsafe fn acknowledge_quiescence(&self) {
+        if let Some(permission) = &self.permission {
+            permission.store(true, Ordering::Release);
+            if let Some(handle) = &self.handle {
+                handle.thread().unpark();
+            }
         }
     }
 
@@ -667,6 +760,69 @@ mod tests {
         assert_eq!(outcome.wipe.bytes_wiped, 8 * 512);
         assert_eq!(outcome.canaries.ghost_canaries, 0);
         assert_eq!(outcome.canaries.ghost_bytes, 0);
+    }
+
+    #[test]
+    fn canary_sampling_can_overlap_a_reaper_wipe() {
+        let arenas = SecretArenas::new();
+        let mut canaries = CanarySet::new(16, 1024);
+        assert_eq!(canaries.arm_all(&arenas), 16);
+        let canaries = Arc::new(canaries);
+        let sampled = Arc::clone(&canaries);
+        let reader = thread::spawn(move || {
+            for _ in 0..200 {
+                assert_eq!(sampled.sample_ghosts().canaries_sampled, 16);
+            }
+        });
+        let tripwire = Tripwire::new(None);
+        let guard = ReaperGuard::spawn(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_millis(1),
+        );
+        tripwire.fire(TripReason::Manual);
+        let outcome = guard.wait_outcome().unwrap();
+        reader.join().unwrap();
+        assert_eq!(outcome.wipe.arenas_wiped, 16);
+        assert_eq!(outcome.canaries.ghost_bytes, 0);
+        assert_eq!(canaries.sample_ghosts().ghost_bytes, 0);
+    }
+
+    #[test]
+    fn cooperative_reaper_waits_for_editor_quiescence() {
+        let arenas = SecretArenas::new();
+        let mut canaries = CanarySet::new(2, 128);
+        assert_eq!(canaries.arm_all(&arenas), 2);
+        let canaries = Arc::new(canaries);
+        let mut editor_bytes = vec![42u8; 256];
+        let tripwire = Tripwire::new(None);
+        let guard = ReaperGuard::spawn_cooperative(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_millis(1),
+        );
+        tripwire.fire(TripReason::Manual);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !guard.has_tripped() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(guard.has_tripped());
+        assert!(!guard.has_completed());
+        // Editing remains safe until the single owner explicitly yields the allocations.
+        editor_bytes[0] = 17;
+        assert_eq!(canaries.sample_ghosts().ghost_canaries, 2);
+        // SAFETY: register a fresh pointer only after editing; the allocation remains live and
+        // untouched until the reaper has joined and the slot is unregistered.
+        let slot =
+            unsafe { arenas.register(editor_bytes.as_mut_ptr(), editor_bytes.len()) }.unwrap();
+        // SAFETY: this thread stops touching registered buffers and canaries until join returns.
+        unsafe { guard.acknowledge_quiescence() };
+        let result = guard.wait_outcome().unwrap();
+        assert_eq!(result.canaries.ghost_bytes, 0);
+        arenas.unregister(slot);
+        assert!(editor_bytes.iter().all(|byte| *byte == 0));
     }
 
     #[test]

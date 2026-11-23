@@ -562,8 +562,13 @@ impl WorldLine {
     }
 
     /// Arms this world-line's live [`DEMKey`] capability cell in `arenas` for emergency zeroing.
-    pub fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
-        self.key.arm_reaper(arenas)
+    ///
+    /// # Safety
+    ///
+    /// No key access may overlap an arena wipe, and registered pointers must remain valid.
+    pub unsafe fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
+        // SAFETY: the caller guarantees that key use and wiping are mutually exclusive.
+        unsafe { self.key.arm_reaper(arenas) }
     }
 
     /// Whether the emergency reaper has zeroized this world-line's [`DEMKey`] in place.

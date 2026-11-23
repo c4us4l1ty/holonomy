@@ -1557,6 +1557,85 @@ fn short_writes_at_every_byte_of_manifest_commits_recover_cleanly() {
 }
 
 #[test]
+fn multi_segment_styled_transaction_recovers_old_manifest_after_every_short_write() {
+    let base_path = temp_path("atomic-replace-base");
+    let salt = [0x5a; 64];
+    let (_keys, capsule, dem) = test_material(b"atomic replace", salt);
+    let mut base =
+        WorldLine::create(&base_path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
+    base.append_segments(&[&b"hello world"[..]]).unwrap();
+    let baseline = fs::read(&base_path.0).unwrap();
+    let manifest = LineManifest {
+        slabs: vec![
+            LineSlab {
+                segment: 0,
+                start: 0,
+                len: 6,
+            },
+            LineSlab {
+                segment: 1,
+                start: 0,
+                len: 5,
+            },
+            LineSlab {
+                segment: 2,
+                start: 0,
+                len: 5,
+            },
+            LineSlab {
+                segment: 0,
+                start: 6,
+                len: 5,
+            },
+        ],
+        styles: vec![LineStyleRun {
+            start: 0,
+            end: 21,
+            flags: 1,
+            family: 0,
+            heading: 0,
+            alignment: 0,
+            list_kind: 0,
+            list_depth: 0,
+            blockquote: 0,
+            size_milli: 1000,
+            list_start: 0,
+            link_id: 0,
+        }],
+        links: Vec::new(),
+    };
+    let chunks: &[&[u8]] = &[b"dear ", b"kind "];
+    let probe = AppendIoProbeGuard::install(None, None, false);
+    let before_witnesses = base.witness_count();
+    base.append_segments_with_full_manifest(chunks, &manifest)
+        .unwrap();
+    let total_bytes = probe.snapshot().bytes_written;
+    drop(probe);
+    assert_eq!(base.witness_count(), before_witnesses + 1);
+    drop(base);
+    let reopened = WorldLine::open(&base_path.0, dem.duplicate()).unwrap();
+    assert_eq!(reopened.document_manifest(), manifest);
+    assert_eq!(reopened.segment_count(), 3);
+    drop(reopened);
+
+    for cut in 0..total_bytes {
+        let trial_path = temp_path("atomic-replace-trial");
+        fs::write(&trial_path.0, &baseline).unwrap();
+        let mut line = WorldLine::open(&trial_path.0, dem.duplicate()).unwrap();
+        let probe = AppendIoProbeGuard::install(Some(cut), None, false);
+        let result = line.append_segments_with_full_manifest(chunks, &manifest);
+        drop(probe);
+        assert!(result.is_err(), "cut at {cut} unexpectedly succeeded");
+        drop(line);
+        let recovered = WorldLine::open(&trial_path.0, dem.duplicate()).unwrap();
+        assert_eq!(recovered.segment_count(), 1, "cut at {cut}");
+        assert!(!recovered.has_manifest(), "cut at {cut}");
+        assert_eq!(&recovered.open_segment(0).unwrap()[..], b"hello world");
+        assert_eq!(recovered.verify().unwrap().segments_verified, 1);
+    }
+}
+
+#[test]
 fn invalid_manifests_are_refused_without_poisoning_or_writing() {
     let path = temp_path("invalid-manifest");
     let salt = [0x54; 64];

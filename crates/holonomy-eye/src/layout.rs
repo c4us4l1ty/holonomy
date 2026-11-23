@@ -1159,8 +1159,8 @@ mod tests {
             &Fake::new(),
         );
         assert_eq!(laid.lines().len(), 3);
-        // "title" (5 units) centered in 40 units starts at 17.5 units = 1120/64ths.
-        assert_eq!(laid.lines()[0].clusters()[0].x, Fixed::from_64ths(1_120));
+        // Fake gives the i and l half-unit advances, so "title" is four units wide.
+        assert_eq!(laid.lines()[0].clusters()[0].x, Fixed::units(18));
         // Bullet depth 2 + blockquote 1 = 2*(2+1) = 6 units indent.
         assert_eq!(laid.lines()[1].clusters()[0].x, Fixed::units(6));
         // End-aligned line ends flush at 40 units.

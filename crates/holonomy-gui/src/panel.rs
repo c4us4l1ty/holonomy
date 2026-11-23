@@ -56,6 +56,8 @@ pub struct Facts {
     pub ghost_canaries: usize,
     /// Whether the emergency reaper tripwire has fired.
     pub reaper_tripped: bool,
+    /// Whether the watcher waits for the editor to stop before registering plaintext and wiping.
+    pub reaper_cooperative: bool,
 }
 
 impl Facts {
@@ -94,6 +96,7 @@ impl Facts {
             canaries_sampled: 0,
             ghost_canaries: 0,
             reaper_tripped: false,
+            reaper_cooperative: false,
         }
     }
 
@@ -113,6 +116,19 @@ impl Facts {
         self.ghost_canaries = report.ghost_canaries;
         self.reaper_tripped = tripped;
         self
+    }
+
+    /// Reports a cooperative watcher that cannot wipe until the editor yields control.
+    #[must_use]
+    pub fn with_cooperative_reaper(
+        self,
+        arenas: &SecretArenas,
+        canaries: &CanarySet,
+        tripped: bool,
+    ) -> Self {
+        let mut facts = self.with_reaper(arenas, canaries, tripped);
+        facts.reaper_cooperative = true;
+        facts
     }
 
     /// `resident: 4 KiB in 3 leaves, 6.5 KiB allocated of 4 MiB budget`.
@@ -175,6 +191,12 @@ impl Facts {
     pub fn reaper_line(&self) -> String {
         if !self.reaper_armed {
             return "reaper: unarmed".to_owned();
+        }
+        if self.reaper_cooperative && !self.reaper_tripped {
+            return format!(
+                "reaper: cooperative ({} canaries; editor must yield before wipe)",
+                self.canaries_sampled
+            );
         }
         if self.reaper_tripped {
             let zeroized = self.canaries_sampled.saturating_sub(self.ghost_canaries);
@@ -248,6 +270,7 @@ mod tests {
             canaries_sampled: 4,
             ghost_canaries: 4,
             reaper_tripped: false,
+            reaper_cooperative: false,
         }
     }
 

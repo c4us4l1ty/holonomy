@@ -68,6 +68,21 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-82 — Draft fixes for D-81; release gates still open.**
+  Replace-all now asks the sink to reserve IDs and publish all replacement chunks and the final
+  styled manifest in one world-line transaction; unsupported sinks fail closed. The editor root
+  and undo history change only after the sink returns success. An injected sink failure test and
+  a multi-segment styled-manifest short-write/reopen test cover the new boundary, subject to CI.
+  The terminal now uses a cooperative reaper that waits for the UI thread to stop before registering
+  live allocations and allowing the wipe; existing undo buffers are included, and canary sampling
+  serializes with wipe. This avoids the identified editor/reaper concurrent-access path, but a
+  blocked UI thread cannot acknowledge the trip, so the L-7 50 ms deadline is not established.
+  Terminal surface, temporary search strings and other transient plaintext still need a complete
+  wipe-coverage and pointer-provenance audit. The panel labels cooperative operation honestly.
+  `StyleMap` also coalesces adjacent runs after link-ID remapping. Local tests used Rust 1.99 with
+  zeroize 1.9.1 for text/eye and a minimal libc binding for reaper tests; they are not a substitute
+  for the pinned Rust 1.100 `--locked` workspace CI or a 30 M-word encrypted memory measurement.
+
 - **2026-11-22 — D-81 — Ribbon and live-reaper work is a draft, not a closed gate.**
   Cross-crate review found two release blockers in the current working tree:
   (1) `SecretArenas` prevents a registered allocation from being freed during `wipe`, but its

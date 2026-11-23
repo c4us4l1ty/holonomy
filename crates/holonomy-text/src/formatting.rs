@@ -855,14 +855,25 @@ impl StyleMap {
                 }
             }
         }
-        merged.retain(|r| !r.style.is_default());
-        if merged.is_empty() {
+        // Different input link IDs can resolve to the same target. Coalesce once more after
+        // remapping so split/concat and save/reopen preserve canonical, byte-identical runs.
+        let mut normalized: Vec<DocStyleSpan> = Vec::with_capacity(merged.len());
+        for run in merged.into_iter().filter(|r| !r.style.is_default()) {
+            if let Some(prev) = normalized.last_mut() {
+                if prev.end == run.start && prev.style == run.style {
+                    prev.end = run.end;
+                    continue;
+                }
+            }
+            normalized.push(run);
+        }
+        if normalized.is_empty() {
             return Self::empty();
         }
 
         Self {
             inner: Some(Arc::new(StyleInner {
-                runs: merged,
+                runs: normalized,
                 links: new_links,
             })),
         }

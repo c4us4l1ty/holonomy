@@ -377,13 +377,19 @@ impl Document {
 
     /// Arms this document's unlocked [`MasterKeys`] (`UnwrapKey`) and [`WorldLine`] (`DEMKey`) in
     /// `arenas` so an emergency reaper trip volatile-zeroes both keys in place (`L-7`).
-    pub fn arm_reaper(&self, arenas: &Arc<SecretArenas>) -> usize {
+    ///
+    /// # Safety
+    ///
+    /// No document or key access may overlap a wipe, and registered pointers must remain valid.
+    pub unsafe fn arm_reaper(&self, arenas: &Arc<SecretArenas>) -> usize {
         let mut inner = self.line.borrow_mut();
         let mut count = 0usize;
-        if inner.keys.unwrap_key_mut().arm_reaper(arenas) {
+        // SAFETY: the caller guarantees exclusive access throughout the wipe.
+        if unsafe { inner.keys.unwrap_key_mut().arm_reaper(arenas) } {
             count += 1;
         }
-        if inner.line.arm_reaper(arenas) {
+        // SAFETY: the same guarantee covers the world-line key.
+        if unsafe { inner.line.arm_reaper(arenas) } {
             count += 1;
         }
         count
@@ -557,6 +563,29 @@ impl SegmentSink for DocumentSink {
             segment_root: receipt.segment_root,
             bytes_written: receipt.bytes_appended,
         })
+    }
+
+    fn atomic_replace(
+        &mut self,
+        chunks: &[&[u8]],
+        build: &mut holonomy_text::ReplacementBuilder<'_>,
+    ) -> Result<(), String> {
+        let mut line = self.0.line.borrow_mut();
+        let first = line.line.segment_count();
+        let ids = (0..chunks.len())
+            .map(|index| {
+                first
+                    .checked_add(index as u64)
+                    .map(SegmentId::new)
+                    .ok_or_else(|| "segment ID overflow".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (slabs, styles) = build(&ids)?;
+        let manifest = to_line_manifest(to_line_slabs(&slabs), &styles);
+        line.line
+            .append_segments_with_full_manifest(chunks, &manifest)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn commit_spine(&mut self, slabs: &[Slab]) -> Result<(), String> {

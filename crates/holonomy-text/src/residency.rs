@@ -34,7 +34,8 @@ pub trait WipeRegistry: Send + Sync {
     /// # Safety
     ///
     /// `[ptr, ptr + len)` must remain valid for volatile zero writes at that exact address until
-    /// [`Self::unregister`] returns for the returned slot index.
+    /// [`Self::unregister`] returns. No other access may overlap a wipe, and subsequent accesses
+    /// must not invalidate the pointer's provenance.
     unsafe fn register(&self, ptr: *mut u8, len: usize) -> Option<usize>;
 
     /// Unregisters a previously armed `slot` before the backing allocation is freed.
@@ -169,7 +170,12 @@ impl<S: SegmentSource> ResidentSet<S> {
 
     /// Attaches a [`WipeRegistry`] so every currently resident and subsequently faulted-in slab is
     /// armed for emergency volatile zeroing and automatically unarmed on LRU eviction or drop.
-    pub fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
+    ///
+    /// # Safety
+    ///
+    /// The caller must quiesce all accesses before a wipe and must not invalidate registered
+    /// pointers while they can still be used. Prefer registering immediately before a wipe.
+    pub unsafe fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
         for entry in &mut self.entries {
             entry.arm(&registry);
         }

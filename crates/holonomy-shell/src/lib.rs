@@ -289,10 +289,17 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     }
 
     /// Attaches a [`WipeRegistry`] to the resident set, typing session, and live viewport window.
-    pub fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
+    ///
+    /// # Safety
+    ///
+    /// The editor and its registered allocations must be quiescent during wiping, and later
+    /// accesses must not invalidate the registered pointers. Register immediately before wiping.
+    pub unsafe fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
         self.unarm_window();
-        self.residency.set_wipe_registry(Arc::clone(&registry));
-        self.typing.set_wipe_registry(Arc::clone(&registry));
+        // SAFETY: the caller guarantees quiescence and pointer validity for both owned components.
+        unsafe { self.residency.set_wipe_registry(Arc::clone(&registry)) };
+        // SAFETY: the same guarantee applies to the typing buffers and their undo copies.
+        unsafe { self.typing.set_wipe_registry(Arc::clone(&registry)) };
         self.wipe_registry = Some(registry);
         self.arm_window();
     }

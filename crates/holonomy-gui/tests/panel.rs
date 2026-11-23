@@ -182,12 +182,14 @@ fn live_reaper_arms_document_keys_and_residency_and_reports_honestly_in_panel() 
     assert_eq!(canary_set.arm_all(&arenas), 4);
     let canaries = Arc::new(canary_set);
 
-    assert_eq!(document.arm_reaper(&arenas), 2);
+    // SAFETY: the test does not use the keys while the reaper is wiping them.
+    assert_eq!(unsafe { document.arm_reaper(&arenas) }, 2);
     assert!(!document.are_keys_zeroized());
 
     let mut residency = ResidentSet::new(Pages(64), 64 * 1024, 64).expect("budget");
-    residency.set_wipe_registry(Arc::new(SealWipeBridge(Arc::clone(&arenas))));
     let _ = residency.fault_in(SegmentId::new(0)).expect("faults");
+    // SAFETY: the resident allocation is quiescent until the reaper has joined.
+    unsafe { residency.set_wipe_registry(Arc::new(SealWipeBridge(Arc::clone(&arenas)))) };
 
     let tripwire = Tripwire::new(None);
     let guard = ReaperGuard::spawn(

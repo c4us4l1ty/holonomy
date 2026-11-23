@@ -159,7 +159,11 @@ fn reaper_wipes_full_viewport_keys_and_canaries_under_fifty_ms_with_zero_ghosts(
             "live DEMKey must open sealed probe before wipe"
         );
         assert!(!dem.is_zeroized(), "live DEMKey must not start zeroized");
-        assert!(dem.arm_reaper(&arenas), "DEMKey must arm in SecretArenas");
+        // SAFETY: the test makes no key access while the reaper is running.
+        assert!(
+            unsafe { dem.arm_reaper(&arenas) },
+            "DEMKey must arm in SecretArenas"
+        );
 
         let mut canaries = CanarySet::new(CANARY_COUNT, CANARY_BYTES);
         assert_eq!(canaries.arm_all(&arenas), CANARY_COUNT);

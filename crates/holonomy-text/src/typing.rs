@@ -226,6 +226,18 @@ impl HeldBytes {
         Self { bytes, wipe_slot }
     }
 
+    fn arm(&mut self, registry: &Arc<dyn WipeRegistry>) {
+        if self.wipe_slot.is_some() || self.bytes.capacity() == 0 {
+            return;
+        }
+        // SAFETY: this allocation is not grown and Drop unregisters it before freeing it.
+        if let Some(slot) =
+            unsafe { registry.register(self.bytes.as_mut_ptr(), self.bytes.capacity()) }
+        {
+            self.wipe_slot = Some((Arc::clone(registry), slot));
+        }
+    }
+
     fn len(&self) -> usize {
         self.bytes.len()
     }
@@ -1236,65 +1248,97 @@ impl<S: SegmentSink> Typing<S> {
             return Ok(matches.len());
         }
 
-        let mut rep_slabs: Vec<Slab> = Vec::new();
-        if !replacement.is_empty() {
-            let mut rest = replacement;
-            while !rest.is_empty() {
-                let mut take = rest.len().min(MAX_REPLACE_CHUNK_BYTES);
-                while take > 0 && !starts_a_character(rest, take) {
-                    take -= 1;
-                }
-                let appended = self
-                    .sink
-                    .append_segment(&rest[..take])
-                    .map_err(|reason| TypingError::Append { reason })?;
-                let prov = self.sources.open();
-                self.sources
-                    .seal(prov, appended.segment)
-                    .expect("newly opened provisional id seals cleanly");
-                rep_slabs.push(Slab::new(
-                    prov,
-                    0,
-                    u32::try_from(take).expect("chunk <= 64 KiB"),
-                ));
-                self.sealed_bytes += take as u64;
-                rest = &rest[take..];
+        let mut chunks = Vec::new();
+        let mut rest = replacement;
+        while !rest.is_empty() {
+            let mut take = rest.len().min(MAX_REPLACE_CHUNK_BYTES);
+            while take > 0 && !starts_a_character(rest, take) {
+                take -= 1;
             }
+            chunks.push(&rest[..take]);
+            rest = &rest[take..];
         }
 
-        let mut next_spine = self.spine.clone();
-        let needle_len = needle.len() as u64;
-        let rep_len = replacement.len() as u64;
-        let step_delta = i128::from(rep_len) - i128::from(needle_len);
-        let mut cumulative_delta: i128 = 0;
-        let mut final_caret = matches[0].start;
-
-        for hit in &matches {
-            let adj_start =
-                u64::try_from(i128::from(hit.start) + cumulative_delta).expect("valid offset");
-            let adj_end = adj_start + needle_len;
-            if rep_slabs.is_empty() {
-                next_spine = next_spine.remove_range(adj_start, adj_end)?;
-            } else if rep_slabs.len() == 1 {
-                next_spine = next_spine.replace_range(adj_start, adj_end, rep_slabs[0])?;
-            } else {
-                next_spine = next_spine.remove_range(adj_start, adj_end)?;
-                let mut cur = adj_start;
-                for slab in &rep_slabs {
-                    next_spine = next_spine.insert_slab(cur, *slab)?;
-                    cur += u64::from(slab.len());
-                }
+        // Build the new root privately against the IDs reserved by the sink. Neither the active
+        // root nor undo history is modified until the sink publishes segments and manifest together.
+        let mut built = None;
+        let sources = &self.sources;
+        let original = &self.spine;
+        let mut build = |ids: &[SegmentId]| -> Result<_, String> {
+            if ids.len() != chunks.len() {
+                return Err("sink returned the wrong number of segment IDs".to_owned());
             }
-            final_caret = adj_start + rep_len;
-            cumulative_delta += step_delta;
-        }
+            let rep_slabs: Vec<Slab> = ids
+                .iter()
+                .zip(&chunks)
+                .map(|(&id, chunk)| Slab::new(id, 0, chunk.len() as u32))
+                .collect();
+            let mut next_spine = original.clone();
+            let needle_len = needle.len() as u64;
+            let rep_len = replacement.len() as u64;
+            let step_delta = i128::from(rep_len) - i128::from(needle_len);
+            let mut cumulative_delta: i128 = 0;
+            let mut final_caret = matches[0].start;
 
+            for hit in &matches {
+                let adj_start = u64::try_from(i128::from(hit.start) + cumulative_delta)
+                    .map_err(|_| "replacement offset overflow".to_owned())?;
+                let adj_end = adj_start
+                    .checked_add(needle_len)
+                    .ok_or_else(|| "replacement offset overflow".to_owned())?;
+                if rep_slabs.is_empty() {
+                    next_spine = next_spine
+                        .remove_range(adj_start, adj_end)
+                        .map_err(|error| error.to_string())?;
+                } else if rep_slabs.len() == 1 {
+                    next_spine = next_spine
+                        .replace_range(adj_start, adj_end, rep_slabs[0])
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    next_spine = next_spine
+                        .remove_range(adj_start, adj_end)
+                        .map_err(|error| error.to_string())?;
+                    let mut cur = adj_start;
+                    for slab in &rep_slabs {
+                        next_spine = next_spine
+                            .insert_slab(cur, *slab)
+                            .map_err(|error| error.to_string())?;
+                        cur = cur
+                            .checked_add(u64::from(slab.len()))
+                            .ok_or_else(|| "replacement offset overflow".to_owned())?;
+                    }
+                }
+                final_caret = adj_start
+                    .checked_add(rep_len)
+                    .ok_or_else(|| "replacement offset overflow".to_owned())?;
+                cumulative_delta += step_delta;
+            }
+
+            let mut slabs = Vec::new();
+            for span in next_spine.spans_in(0, next_spine.len()) {
+                let slab = span.slab();
+                let segment = sources
+                    .locate(slab.segment())
+                    .segment()
+                    .ok_or_else(|| format!("sealed leaf {} has no segment id", slab.segment()))?;
+                slabs.push(Slab::new(segment, slab.start(), slab.len()));
+            }
+            let styles = next_spine.styles().clone();
+            built = Some((next_spine, final_caret));
+            Ok((slabs, styles))
+        };
+        self.sink
+            .atomic_replace(&chunks, &mut build)
+            .map_err(|reason| TypingError::Append { reason })?;
+        let (next_spine, final_caret) = built.ok_or_else(|| TypingError::Append {
+            reason: "sink did not build the replacement manifest".to_owned(),
+        })?;
         self.undone.clear();
         self.push_root(matches[0].start);
         self.spine = next_spine;
         self.next_at = Some(final_caret.min(self.spine.len()));
-        self.structure_dirty = true;
-        self.commit_current_spine()?;
+        self.sealed_bytes = self.sealed_bytes.saturating_add(replacement.len() as u64);
+        self.structure_dirty = false;
         Ok(matches.len())
     }
 
@@ -1411,8 +1455,21 @@ impl<S> Typing<S> {
 
     /// Attaches a [`WipeRegistry`] so the open typing buffer and every held undo buffer are armed
     /// for emergency volatile zeroing and automatically unarmed before deallocation (`L-7`).
-    pub fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
+    ///
+    /// # Safety
+    ///
+    /// The caller must quiesce all accesses before a wipe and must not invalidate registered
+    /// pointers while they can still be used. Prefer registering immediately before a wipe.
+    pub unsafe fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
         self.unarm_buffer();
+        for step in self.steps.iter_mut().chain(self.undone.iter_mut()) {
+            if let Step::Root {
+                held: Some(bytes), ..
+            } = step
+            {
+                bytes.arm(&registry);
+            }
+        }
         self.wipe_registry = Some(registry);
         self.arm_buffer();
     }
@@ -2415,6 +2472,58 @@ mod tests {
             self.spines.push(slabs.to_vec());
             Ok(())
         }
+
+        fn atomic_replace(
+            &mut self,
+            chunks: &[&[u8]],
+            build: &mut crate::ReplacementBuilder<'_>,
+        ) -> Result<(), String> {
+            let ids: Vec<_> = (0..chunks.len())
+                .map(|i| SegmentId::new((self.segments.len() + i) as u64))
+                .collect();
+            let (slabs, _) = build(&ids)?;
+            if self.fail_commit {
+                return Err("injected atomic commit failure".to_owned());
+            }
+            self.segments
+                .extend(chunks.iter().map(|chunk| chunk.to_vec()));
+            self.spines.push(slabs);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn replacement_does_not_publish_a_root_or_segments_on_commit_failure() {
+        struct Source;
+        impl SegmentSource for Source {
+            fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+                if segment == SegmentId::new(0) {
+                    Ok(b"one one".to_vec())
+                } else {
+                    Err("unexpected segment".to_owned())
+                }
+            }
+        }
+
+        let initial = Spine::from_slabs(vec![Slab::new(SegmentId::new(0), 0, 7)]);
+        let sink = SpineRecorder {
+            segments: vec![b"one one".to_vec()],
+            fail_commit: true,
+            ..SpineRecorder::default()
+        };
+        let mut typing = Typing::resume(sink, initial.clone(), 64);
+        assert!(typing.replace_all(b"one", b"two", &mut Source).is_err());
+        assert!(typing.spine().ptr_eq(&initial));
+        assert_eq!(typing.sink.segments.len(), 1);
+        assert!(typing.sink.spines.is_empty());
+        assert!(!typing.undo().unwrap());
+
+        typing.sink.fail_commit = false;
+        assert_eq!(typing.replace_all(b"one", b"two", &mut Source).unwrap(), 2);
+        assert_eq!(typing.sink.segments.len(), 2);
+        assert_eq!(typing.sink.spines.len(), 1);
+        assert!(typing.undo().unwrap());
+        assert!(typing.spine().ptr_eq(&initial));
     }
 
     #[test]

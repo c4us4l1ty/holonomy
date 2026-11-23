@@ -42,6 +42,10 @@ pub struct Appended {
     pub bytes_written: u64,
 }
 
+/// Builds the resolved final manifest for a set of freshly reserved replacement segment IDs.
+pub type ReplacementBuilder<'a> =
+    dyn FnMut(&[SegmentId]) -> Result<(Vec<Slab>, StyleMap), String> + 'a;
+
 /// The world-line, as the commit boundary needs it: append one sealed segment and commit it.
 ///
 /// A trait rather than a concrete type for the same reason [`crate::SegmentSource`] is one: the
@@ -116,6 +120,25 @@ pub trait SegmentSink {
     /// A human-readable message when the sink cannot persist the manifest.
     fn commit_manifest(&mut self, slabs: &[Slab], _styles: &StyleMap) -> Result<(), String> {
         self.commit_spine(slabs)
+    }
+
+    /// Atomically publishes replacement chunks and their final manifest under one commit point.
+    ///
+    /// The sink chooses fresh segment IDs, calls `build` once with those IDs before writing, and
+    /// publishes the returned manifest with all chunks in a single durable transaction. On error,
+    /// callers must reopen the sink if the result of an interrupted commit is uncertain. The
+    /// default refuses the operation rather than falling back to non-atomic individual appends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if atomic replacement is unsupported, validation fails, or the commit
+    /// cannot be completed.
+    fn atomic_replace(
+        &mut self,
+        _chunks: &[&[u8]],
+        _build: &mut ReplacementBuilder<'_>,
+    ) -> Result<(), String> {
+        Err("atomic replacement is not supported by this sink".to_owned())
     }
 }
 

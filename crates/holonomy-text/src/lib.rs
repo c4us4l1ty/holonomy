@@ -66,7 +66,9 @@ pub mod text;
 mod tree;
 pub mod typing;
 
-pub use commit::{commit_slab, Appended, CommitError, Committed, SegmentSink, Witness};
+pub use commit::{
+    commit_slab, Appended, CommitError, Committed, ReplacementBuilder, SegmentSink, Witness,
+};
 pub use draft::{Draft, DraftError, LiveHit, LiveSpan};
 pub use formatting::{
     Alignment, DocStyle, DocStyleSpan, FontFamily, Heading, ListKind, StyleMap, StylePatch,

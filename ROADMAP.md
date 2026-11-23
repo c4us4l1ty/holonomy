@@ -385,9 +385,9 @@ v3 died bolting a Wordcraft-shaped ribbon onto split geometry. v6 puts the toolb
 sits above the quiet-md page Block 6 installs, in the same window, in the same run tree.
 
 **Draft status (2026-11-22):** implementation is in progress; none of the gates below is claimed.
-The current replace-all commit path is not crash-atomic and the live reaper wiring has unresolved
-concurrent-access safety issues. The 30 M-word search test does not yet measure total working memory
-or use an encrypted world-line. See AUDIT D-81 before using or shipping this draft.
+A single-commit replace-all path and a cooperative reaper are under test (AUDIT D-82). The latter
+waits for the editor and does not guarantee L-7 latency or complete wipe coverage. The 30 M-word
+search test does not yet measure total working memory or use an encrypted world-line.
 
 **Deliverables**
 - Toolbar per spec: font family/size, bold/italic/underline/strike, headings 1–3, alignment,
