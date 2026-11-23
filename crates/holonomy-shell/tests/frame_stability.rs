@@ -354,16 +354,17 @@ fn scrolled_rtl_paragraph_across_leaves_preserves_base_direction() {
 #[test]
 fn newline_and_wide_cluster_at_leaf_start_preserve_carries_across_frames() {
     // 1. Leaf 1 starts with '\n' after non-broken Leaf 0: frame write-back must keep `Carry.x > 0`
-    //    so scrolling to line 1 starts at "hello" rather than rendering a phantom blank line.
-    let mut nl = editor_over_leaves(&["abcd", "\nhello"], Fixed::units(10), Fixed::units(40));
+    //    so scrolling to line 1 starts at "hello\nend" rather than rendering a phantom blank line.
+    let nl_pieces = ["abcd", "\nhello\nend"];
+    let mut nl = editor_over_leaves(&nl_pieces, Fixed::units(10), Fixed::units(40));
     nl.reflow().expect("measured");
-    assert_eq!(nl.heights().total(), Fixed::units(40));
+    assert_eq!(nl.heights().total(), Fixed::units(60));
     let _ = nl.frame().expect("top frame");
-    assert_eq!(nl.heights().total(), Fixed::units(40));
+    assert_eq!(nl.heights().total(), Fixed::units(60));
     nl.scroll_to(Fixed::units(20));
     let scrolled = nl.frame().expect("scrolled to line 1");
-    assert_eq!(scrolled.text(), "hello");
-    assert_eq!(nl.heights().total(), Fixed::units(40));
+    assert_eq!(scrolled.text(), "hello\nend");
+    assert_eq!(nl.heights().total(), Fixed::units(60));
 
     // 2. Final 1-byte "\n" leaf completing a split "\r\n" owns the trailing empty line.
     let mut crlf_shell = editor_over_leaves(&["ab\r", "\n"], Fixed::units(10), Fixed::units(40));
@@ -374,13 +375,14 @@ fn newline_and_wide_cluster_at_leaf_start_preserve_carries_across_frames() {
     assert_eq!(crlf_shell.heights().total(), Fixed::units(40));
 
     // 3. Leaf 1 starts with wide '中' (`adv = 2`) wrapping after Leaf 0's `"b"` (`adv = 1`).
-    let mut wide_shell = editor_over_leaves(&["b", "中"], Fixed::units(2), Fixed::units(40));
+    let wide_pieces = ["b", "中\nx"];
+    let mut wide_shell = editor_over_leaves(&wide_pieces, Fixed::units(2), Fixed::units(40));
     wide_shell.reflow().expect("measured");
     let _ = wide_shell.frame().expect("top frame");
-    assert_eq!(wide_shell.heights().total(), Fixed::units(40));
+    assert_eq!(wide_shell.heights().total(), Fixed::units(60));
     wide_shell.scroll_to(Fixed::units(20));
     let wide_scrolled = wide_shell.frame().expect("scrolled");
-    assert_eq!(wide_scrolled.text(), "中");
+    assert_eq!(wide_scrolled.text(), "中\nx");
 }
 
 #[test]
@@ -388,13 +390,13 @@ fn straddling_mark_followed_by_tiny_next_leaf_keeps_single_advance() {
     // Leaf 1 ("\u{0301}b", 3 bytes) is wider than the 2-byte combining mark, while Leaf 2 ("z",
     // 1 byte) is shorter than the mark: `measure_window` must check Leaf 1's own length rather
     // than Leaf 2's when recording `skip`.
-    let pieces = ["a", "\u{0301}b", "z"];
+    let pieces = ["a", "\u{0301}b", "z", "\nw"];
     let mut shell = editor_over_leaves(&pieces, Fixed::units(2), Fixed::units(40));
     shell.reflow().expect("measured");
-    assert_eq!(shell.heights().total(), Fixed::units(40));
+    assert_eq!(shell.heights().total(), Fixed::units(60));
     let _ = shell.frame().expect("top frame");
-    assert_eq!(shell.heights().total(), Fixed::units(40));
+    assert_eq!(shell.heights().total(), Fixed::units(60));
     shell.scroll_to(Fixed::units(20));
     let second_line = shell.frame().expect("second line");
-    assert_eq!(second_line.text(), "z");
+    assert_eq!(second_line.text(), "z\nw");
 }
