@@ -1461,11 +1461,15 @@ fn open_seeks_over_historical_manifests_and_verify_authenticates_them() {
     let scanned = scan_records(&mut guarded, &header, &epoch, &dem).unwrap();
     assert_eq!(
         scanned.manifest,
-        Some(vec![LineSlab {
-            segment: 1,
-            start: 0,
-            len: 6,
-        }])
+        Some(LineManifest {
+            slabs: vec![LineSlab {
+                segment: 1,
+                start: 0,
+                len: 6,
+            }],
+            styles: Vec::new(),
+            links: Vec::new(),
+        })
     );
 
     // Flipping a byte in a superseded historical manifest does not break lazy open, and full

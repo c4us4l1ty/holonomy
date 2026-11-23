@@ -189,7 +189,12 @@ impl Spine {
     }
 
     /// Applies `patch` over `[start, end)` without cutting any underlying [`Slab`] leaf (`OQ-9`).
-    pub fn apply_style(&self, start: u64, end: u64, patch: &StylePatch) -> Result<Self, SpineError> {
+    pub fn apply_style(
+        &self,
+        start: u64,
+        end: u64,
+        patch: &StylePatch,
+    ) -> Result<Self, SpineError> {
         let styles = self.styles.apply_patch(self.len(), start, end, patch)?;
         Ok(Self {
             root: Arc::clone(&self.root),

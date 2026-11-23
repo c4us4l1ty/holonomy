@@ -426,7 +426,10 @@ fn gate_1_every_toolbar_action_round_trips_across_save_reopen_and_compaction() {
     assert_eq!(mixed_marks.bold, TriState::Mixed);
     assert_eq!(mixed_marks.italic, TriState::Mixed);
     assert_eq!(mixed_marks.family, TriState::Uniform(FontFamily::Sans));
-    assert_eq!(mixed_marks.bold.display_or_dash(|v| v.to_string()), "\u{2014}");
+    assert_eq!(
+        mixed_marks.bold.display_or_dash(|v| v.to_string()),
+        "\u{2014}"
+    );
 
     let mixed_family: ToolbarState = typing.toolbar_state(h1_s, h2_e);
     assert_eq!(mixed_family.family, TriState::Mixed);
@@ -461,7 +464,7 @@ fn gate_1_every_toolbar_action_round_trips_across_save_reopen_and_compaction() {
         &OpenSources::new(),
         &[],
         &mut res,
-        Selection::between(0, prose.len() as u64),
+        Selection::new(0, prose.len() as u64),
     )
     .unwrap();
     assert_eq!(roundtrip_bytes.as_slice(), prose.as_bytes());
@@ -493,7 +496,7 @@ fn gate_1_every_toolbar_action_round_trips_across_save_reopen_and_compaction() {
         &OpenSources::new(),
         &[],
         &mut compact_res,
-        Selection::between(0, prose.len() as u64),
+        Selection::new(0, prose.len() as u64),
     )
     .unwrap();
     assert_eq!(compacted_bytes.as_slice(), prose.as_bytes());
@@ -730,7 +733,9 @@ fn gate_3_formatting_torture_corpus_across_every_slab_boundary_reverts_in_one_un
             blockquote: Some((boundary as u8) % 3),
             ..StylePatch::default()
         };
-        typing.apply_style(center - 12, center + 12, &patch).unwrap();
+        typing
+            .apply_style(center - 12, center + 12, &patch)
+            .unwrap();
     }
     let seeded_spine = typing.spine().clone();
     assert!(
@@ -746,7 +751,9 @@ fn gate_3_formatting_torture_corpus_across_every_slab_boundary_reverts_in_one_un
         size_milli: Some(1_200),
         ..StylePatch::default()
     };
-    typing.apply_style(0, typing.document_len(), &sweep).unwrap();
+    typing
+        .apply_style(0, typing.document_len(), &sweep)
+        .unwrap();
     assert!(!typing.spine().ptr_eq(&seeded_spine));
     assert_eq!(
         typing.toolbar_state(0, typing.document_len()).bold,

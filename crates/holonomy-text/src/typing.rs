@@ -1171,12 +1171,7 @@ impl<S: SegmentSink> Typing<S> {
 
     /// Sets or clears (`url = None` or `Some("")`) a hyperlink over `[start, end)` as a single
     /// undoable root transaction.
-    pub fn set_link(
-        &mut self,
-        start: u64,
-        end: u64,
-        url: Option<&str>,
-    ) -> Result<(), TypingError> {
+    pub fn set_link(&mut self, start: u64, end: u64, url: Option<&str>) -> Result<(), TypingError> {
         let doc_len = self.document_len();
         let (lo, hi) = if start <= end {
             (start.min(doc_len), end.min(doc_len))

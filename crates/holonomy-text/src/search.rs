@@ -59,7 +59,10 @@ impl std::fmt::Display for SearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Source { segment, message } => {
-                write!(f, "failed to load segment {segment} during search: {message}")
+                write!(
+                    f,
+                    "failed to load segment {segment} during search: {message}"
+                )
             }
             Self::UnknownSource { source } => {
                 write!(f, "search encountered unknown provisional source {source}")
@@ -114,7 +117,9 @@ pub fn find_streaming<R: SegmentSource>(
     let mut window_start = 0u64;
 
     while window_start < total_len {
-        let window_end = window_start.saturating_add(SCAN_WINDOW_BYTES).min(total_len);
+        let window_end = window_start
+            .saturating_add(SCAN_WINDOW_BYTES)
+            .min(total_len);
         let spans = draft.spans_in(spine, window_start, window_end);
         if spans.is_empty() {
             break;
@@ -166,10 +171,10 @@ pub fn find_streaming<R: SegmentSource>(
                         let reuse = cached.as_ref().is_some_and(|(id, _)| *id == segment);
                         if !reuse {
                             // Drop and zeroize the previous segment before loading the next one.
-                            cached = None;
-                            let bytes = source.load(segment).map_err(|message| {
-                                SearchError::Source { segment, message }
-                            })?;
+                            drop(cached.take());
+                            let bytes = source
+                                .load(segment)
+                                .map_err(|message| SearchError::Source { segment, message })?;
                             cached = Some((segment, Zeroizing::new(bytes)));
                         }
                         let seg_bytes = &cached.as_ref().expect("just populated").1;
@@ -216,7 +221,8 @@ pub fn find_streaming<R: SegmentSource>(
                 }
             }
 
-            let mut idx = usize::try_from(next_allowed.saturating_sub(doc_pos)).unwrap_or(chunk.len());
+            let mut idx =
+                usize::try_from(next_allowed.saturating_sub(doc_pos)).unwrap_or(chunk.len());
             if chunk.len() >= m {
                 let last_start = chunk.len() + 1 - m;
                 while idx < last_start {

@@ -700,7 +700,12 @@ impl WorldLine {
             return Ok(self.current_receipt());
         }
         if let Some(existing) = &self.manifest {
-            if existing.slabs.len().saturating_add(plaintext_segments.len()) > MAX_MANIFEST_SLABS {
+            if existing
+                .slabs
+                .len()
+                .saturating_add(plaintext_segments.len())
+                > MAX_MANIFEST_SLABS
+            {
                 return Err(LineError::InvalidManifest(
                     "manifest exceeds maximum slab count",
                 ));
@@ -1778,11 +1783,12 @@ fn validate_manifest_against_pending(
                 "manifest slab exceeds segment plaintext length",
             ));
         }
-        total_doc_bytes = total_doc_bytes
-            .checked_add(u64::from(slab.len))
-            .ok_or(LineError::InvalidManifest(
-                "manifest total document length overflows u64",
-            ))?;
+        total_doc_bytes =
+            total_doc_bytes
+                .checked_add(u64::from(slab.len))
+                .ok_or(LineError::InvalidManifest(
+                    "manifest total document length overflows u64",
+                ))?;
     }
 
     let mut prev_end = 0u64;

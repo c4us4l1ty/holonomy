@@ -359,7 +359,7 @@ pub fn layout_window<'a, S: Shaper + ?Sized>(
 /// row, or the line after a trailing newline — takes the height of the style that reaches it.
 #[must_use]
 pub fn layout_styled<'a, S: Shaper + ?Sized>(
-    styled: StyledText<'a>,
+    styled: StyledText<'a, '_>,
     origin: u64,
     width: Fixed,
     shaper: &S,
@@ -385,7 +385,7 @@ pub fn layout_styled<'a, S: Shaper + ?Sized>(
 /// With `start_x == Fixed::ZERO` this is exactly [`layout_styled`], line for line.
 #[must_use]
 pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
-    styled: StyledText<'a>,
+    styled: StyledText<'a, '_>,
     origin: u64,
     start_x: Fixed,
     width: Fixed,
@@ -414,7 +414,7 @@ pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
 /// belongs to, however much of it the shaper is given.
 #[must_use]
 pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
-    styled: StyledText<'a>,
+    styled: StyledText<'a, '_>,
     origin: u64,
     start_x: Fixed,
     context: ClusterContext,
@@ -450,7 +450,7 @@ fn indent_for(style: Style, width: Fixed) -> Fixed {
 /// direction rather than resetting to LTR.
 #[must_use]
 pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
-    styled: StyledText<'a>,
+    styled: StyledText<'a, '_>,
     origin: u64,
     start_x: Fixed,
     context: ClusterContext,
@@ -694,7 +694,7 @@ fn reorder_bidi_line(line: &mut Line<'_>, origin: u64, para: &ResolvedParagraph)
 /// inherit; the style at the line's own position is the only answer the window contains.
 fn filled_height<S: Shaper + ?Sized>(
     line_height: Fixed,
-    styled: StyledText<'_>,
+    styled: StyledText<'_, '_>,
     offset: usize,
     shaper: &S,
 ) -> Fixed {

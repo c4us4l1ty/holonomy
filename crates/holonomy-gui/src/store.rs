@@ -540,17 +540,17 @@ impl SegmentSink for DocumentSink {
             len,
         });
         slabs.extend(to_line_slabs(after));
-        let receipt = if styles.is_empty() && line.line.is_implicit_after_append(&[plaintext], &slabs)
-        {
-            line.line
-                .append_segments(&[plaintext])
-                .map_err(|error| error.to_string())?
-        } else {
-            let full = to_line_manifest(slabs, styles);
-            line.line
-                .append_segments_with_full_manifest(&[plaintext], &full)
-                .map_err(|error| error.to_string())?
-        };
+        let receipt =
+            if styles.is_empty() && line.line.is_implicit_after_append(&[plaintext], &slabs) {
+                line.line
+                    .append_segments(&[plaintext])
+                    .map_err(|error| error.to_string())?
+            } else {
+                let full = to_line_manifest(slabs, styles);
+                line.line
+                    .append_segments_with_full_manifest(&[plaintext], &full)
+                    .map_err(|error| error.to_string())?
+            };
         Ok(Appended {
             segment: next_segment,
             witness_sequence: receipt.witness_sequence,

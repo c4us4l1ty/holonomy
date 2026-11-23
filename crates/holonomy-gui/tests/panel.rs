@@ -223,7 +223,9 @@ fn live_reaper_arms_document_keys_and_residency_and_reports_honestly_in_panel() 
         tripwire.evaluate().is_some(),
     );
     assert!(tripped_facts.reaper_line().contains("TRIPPED"));
-    assert!(tripped_facts.reaper_line().contains("4/4 canaries zeroized"));
+    assert!(tripped_facts
+        .reaper_line()
+        .contains("4/4 canaries zeroized"));
 }
 
 #[test]
@@ -244,14 +246,22 @@ fn document_persists_and_restores_ribbon_formatting_through_app() {
         Fixed::units(80),
         Fixed::units(24),
     );
-    let mut app = App::new(editor, Keymap::new(Fixed::units(24)), CellSurface::new(80, 24, 1));
+    let mut app = App::new(
+        editor,
+        Keymap::new(Fixed::units(24)),
+        CellSurface::new(80, 24, 1),
+    );
     for ch in "Hello Ribbon".chars() {
         app.press(Key::Character(ch), Modifiers::none()).unwrap();
     }
-    app.press(Key::Character('a'), Modifiers::control()).unwrap();
-    app.press(Key::Character('b'), Modifiers::control()).unwrap();
-    app.press(Key::Character('1'), Modifiers::control()).unwrap();
-    app.press(Key::Character('s'), Modifiers::control()).unwrap();
+    app.press(Key::Character('a'), Modifiers::control())
+        .unwrap();
+    app.press(Key::Character('b'), Modifiers::control())
+        .unwrap();
+    app.press(Key::Character('1'), Modifiers::control())
+        .unwrap();
+    app.press(Key::Character('s'), Modifiers::control())
+        .unwrap();
     assert_eq!(app.toolbar_summary(), "Sans H1 [B]");
     drop(app);
     drop(doc);
@@ -271,6 +281,7 @@ fn document_persists_and_restores_ribbon_formatting_through_app() {
         Keymap::new(Fixed::units(24)),
         CellSurface::new(80, 24, 1),
     );
-    app2.press(Key::Character('a'), Modifiers::control()).unwrap();
+    app2.press(Key::Character('a'), Modifiers::control())
+        .unwrap();
     assert_eq!(app2.toolbar_summary(), "Sans H1 [B]");
 }

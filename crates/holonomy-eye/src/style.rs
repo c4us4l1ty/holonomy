@@ -332,12 +332,12 @@ impl StyledRun {
 /// text arrived in: the Eye is handed one viewport window and the runs that intersect it, never the
 /// document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StyledText<'a> {
+pub struct StyledText<'a, 'r> {
     text: &'a str,
-    runs: &'a [StyledRun],
+    runs: &'r [StyledRun],
 }
 
-impl<'a> StyledText<'a> {
+impl<'a, 'r> StyledText<'a, 'r> {
     /// Text with no runs: every cluster is [`Style::DEFAULT`].
     #[must_use]
     pub const fn plain(text: &'a str) -> Self {
@@ -346,7 +346,7 @@ impl<'a> StyledText<'a> {
 
     /// Text with `runs`, which must be sorted by `start` and start at most once per byte.
     #[must_use]
-    pub fn new(text: &'a str, runs: &'a [StyledRun]) -> Self {
+    pub fn new(text: &'a str, runs: &'r [StyledRun]) -> Self {
         debug_assert!(
             runs.windows(2).all(|pair| pair[0].start < pair[1].start),
             "style runs must be sorted by start and unique"
@@ -362,7 +362,7 @@ impl<'a> StyledText<'a> {
 
     /// The window's runs, as given.
     #[must_use]
-    pub const fn runs(self) -> &'a [StyledRun] {
+    pub const fn runs(self) -> &'r [StyledRun] {
         self.runs
     }
 

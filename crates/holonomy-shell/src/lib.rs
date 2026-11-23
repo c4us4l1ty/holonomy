@@ -326,7 +326,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let changed = !self.typing.spine().ptr_eq(&before);
         self.invalidate_after_cut_or_restore(&before);
         if changed {
-            self.selection = Selection::between(lo, hi.min(self.typing.document_len()));
+            self.selection = Selection::new(lo, hi.min(self.typing.document_len()));
         }
         Ok(changed)
     }
@@ -342,7 +342,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let changed = !self.typing.spine().ptr_eq(&before);
         self.invalidate_after_cut_or_restore(&before);
         if changed {
-            self.selection = Selection::between(lo, hi.min(self.typing.document_len()));
+            self.selection = Selection::new(lo, hi.min(self.typing.document_len()));
         }
         Ok(changed)
     }
@@ -361,7 +361,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let lo = start.min(doc_len);
         let hi = end.min(doc_len);
         self.typing.insert_at(hi, &[])?;
-        self.selection = Selection::between(lo, hi);
+        self.selection = Selection::new(lo, hi);
         Ok(())
     }
 
@@ -1802,7 +1802,8 @@ impl<S, R: SegmentSource, H> Editor<S, R, H> {
         };
         let (ptr, cap) = win.allocation_range();
         if cap > 0 {
-            self.window_slot = reg.register(ptr, cap);
+            // SAFETY: the window is unregistered before it is replaced or dropped.
+            self.window_slot = unsafe { reg.register(ptr, cap) };
         }
     }
 
