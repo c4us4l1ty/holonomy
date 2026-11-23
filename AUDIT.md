@@ -68,11 +68,28 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-83 — Encrypted sparse search memory diagnostic.** Push CI run
+  [45238499667](https://github.com/c4us4l1ty/holonomy/actions/runs/45238499667) on
+  `17161dd` ran the release-mode `encrypted_search_memory` test successfully: a reopened,
+  production-fenced encrypted world-line contained 180,092,928 plaintext bytes and 30,013,653
+  whitespace-delimited words. Five matches included three segment seams. The Rust global
+  allocator measured a peak live-heap increase over the pre-open baseline of 1,177,528 bytes
+  for find and 1,781,497 bytes for replace-all, including reopened document metadata, editor,
+  resident allocations, and operation allocations; resident capacity was 199,680 bytes. One undo
+  restored the original in-memory root. The 4 MiB threshold was asserted for this fixture.
+  This is not total process memory: the pre-open baseline (including keys), stack, allocator
+  overhead, memory mappings and OS page cache are excluded; only one low-match-density workload
+  and a partly occupied resident set were exercised. Search collects matches in a vector, so
+  dense-match behavior is not bounded by this result. Block 7's memory gate remains open.
+  The successful measurement does not remove the cooperative reaper's timeout, coverage, and
+  safety-review limitations in D-82; no live L-7 deadline or full wipe guarantee is claimed.
+
 - **2026-11-22 — D-82 — Draft fixes for D-81; release gates still open.**
   Replace-all now asks the sink to reserve IDs and publish all replacement chunks and the final
   styled manifest in one world-line transaction; unsupported sinks fail closed. The editor root
   and undo history change only after the sink returns success. An injected sink failure test and
-  a multi-segment styled-manifest short-write/reopen test cover the new boundary, subject to CI.
+  a multi-segment styled-manifest short-write/reopen test cover the new boundary; the pinned
+  workspace tests passed in CI run 45232126253 on `59287b7`.
   The terminal now uses a cooperative reaper that waits for the UI thread to stop before registering
   live allocations and allowing the wipe; existing undo buffers are included, and canary sampling
   serializes with wipe. This avoids the identified editor/reaper concurrent-access path, but a
@@ -80,8 +97,8 @@ Listed so they stay dead.
   Terminal surface, temporary search strings and other transient plaintext still need a complete
   wipe-coverage and pointer-provenance audit. The panel labels cooperative operation honestly.
   `StyleMap` also coalesces adjacent runs after link-ID remapping. Local tests used Rust 1.99 with
-  zeroize 1.9.1 for text/eye and a minimal libc binding for reaper tests; they are not a substitute
-  for the pinned Rust 1.100 `--locked` workspace CI or a 30 M-word encrypted memory measurement.
+  zeroize 1.9.1 for text/eye and a minimal libc binding for reaper tests; subsequent pinned CI and
+  the limited encrypted memory measurement are recorded above.
 
 - **2026-11-22 — D-81 — Ribbon and live-reaper work is a draft, not a closed gate.**
   Cross-crate review found two release blockers in the current working tree:
