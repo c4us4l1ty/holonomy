@@ -378,6 +378,7 @@ fn push_styled_cluster(out: &mut String, shown: &str, style: Style) {
     out.push_str("\x1b[0m");
 }
 
+/// Renders the styled surface, security panel, and status line as a terminal screen.
 #[must_use]
 pub fn screen_with(
     surface: &CellSurface,

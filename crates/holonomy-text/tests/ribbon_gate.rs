@@ -491,12 +491,12 @@ fn gate_1_every_toolbar_action_round_trips_across_save_reopen_and_compaction() {
     assert_eq!(compacted_spine.styles(), &expected_styles);
     let mut compact_res = ResidentSet::new(LineStore(compacted), 4 * 1024 * 1024, 64).unwrap();
     let compacted_bytes = copy(
+        &mut compact_res,
         &compacted_spine,
         &Draft::new(),
         &OpenSources::new(),
-        &[],
-        &mut compact_res,
         Selection::new(0, prose.len() as u64),
+        &[],
     )
     .unwrap();
     assert_eq!(compacted_bytes.as_slice(), prose.as_bytes());
