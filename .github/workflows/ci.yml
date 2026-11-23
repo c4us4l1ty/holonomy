@@ -159,10 +159,21 @@ jobs:
       # A sparse-match diagnostic, not yet the full Block 7 memory gate: measures incremental
       # heap plus resident capacity while searching a real encrypted 30 M-word file.
       - name: Measure encrypted 30 M-word search and replacement memory
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -o pipefail
-          cargo test --locked -p holonomy-text --release --test encrypted_search_memory -- \
-            --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/encrypted-search.log"
+          if cargo test --locked -p holonomy-text --release --test encrypted_search_memory -- \
+            --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/encrypted-search.log"; then
+            result=0
+          else
+            result=$?
+          fi
+          if [[ "${{ github.event_name }}" == push && "${{ github.ref }}" == refs/heads/arena/* ]]; then
+            { echo "### Encrypted search measurement for ${{ github.sha }} (exit $result)"; echo '```'; cat "$RUNNER_TEMP/encrypted-search.log"; echo '```'; } > "$RUNNER_TEMP/encrypted-search-comment.md"
+            gh issue comment 51 --body-file "$RUNNER_TEMP/encrypted-search-comment.md"
+          fi
+          if [[ "$result" -ne 0 ]]; then exit "$result"; fi
           grep 'HOLONOMY_ENCRYPTED_SEARCH' "$RUNNER_TEMP/encrypted-search.log"
       # Block 4's third gate is a *count*, so it is run instead of remembered. The step above runs the
       # short slice of the same harness in a debug build; this runs the gate's million keystrokes in
