@@ -64,6 +64,7 @@ jobs:
               "cargo clippy --locked --workspace --all-targets -- -D warnings" \
               "cargo test --locked --workspace" \
               "cargo test --locked -p holonomy-text --release --test keystroke_fuzz -- --exact --ignored --nocapture a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement" \
+              "cargo test --locked -p holonomy-text --release --test encrypted_search_memory -- --ignored --nocapture" \
               "cargo run --locked -p xtask -- gates --check" \
               "cargo test --locked -p holonomy-line --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored --nocapture" \
               "scripts/qualify-ext4-enospc.sh"; do
@@ -168,6 +169,14 @@ jobs:
             a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement \
             2>&1 | tee "$RUNNER_TEMP/keystroke-fuzz.log"
           grep 'HOLONOMY_KEYSTROKE_FUZZ' "$RUNNER_TEMP/keystroke-fuzz.log"
+      # A sparse-match diagnostic, not yet the full Block 7 memory gate: measures incremental
+      # heap plus resident capacity while searching a real encrypted 30 M-word file.
+      - name: Measure encrypted 30 M-word search and replacement memory
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-text --release --test encrypted_search_memory -- \
+            --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/encrypted-search.log"
+          grep 'HOLONOMY_ENCRYPTED_SEARCH' "$RUNNER_TEMP/encrypted-search.log"
       # Block 5's third gate, both halves asserted: cluster-boundary honesty, UAX #9 visual
       # ordering (`displaced=0`, OQ-11 closed), and L-8 click-to-caret round trip across RTL and
       # mixed-BiDi lines.
