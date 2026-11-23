@@ -264,6 +264,11 @@ pub(crate) struct WindowBidi {
 }
 
 impl WindowBidi {
+    #[cfg(test)]
+    pub(crate) fn resolve(text: &str) -> Option<Self> {
+        Self::resolve_with_context(text, ParagraphContext::START)
+    }
+
     /// Resolves every hard-break-delimited paragraph of `text` that contains bidirectional
     /// triggers (or opens inside a carried RTL paragraph); returns `None` when the entire window
     /// is left-to-right.

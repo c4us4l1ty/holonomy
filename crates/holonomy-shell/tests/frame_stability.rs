@@ -295,8 +295,7 @@ struct ExactLeaves {
 
 impl SegmentSource for ExactLeaves {
     fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
-        let index = usize::try_from(segment.get())
-            .map_err(|_| format!("no {segment}"))?;
+        let index = usize::try_from(segment.get()).map_err(|_| format!("no {segment}"))?;
         self.leaves
             .get(index)
             .cloned()

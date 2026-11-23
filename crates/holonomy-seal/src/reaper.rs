@@ -426,9 +426,12 @@ impl Tripwire {
         let _ = self
             .tripped_at_ns
             .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
-        let _ = self
-            .explicit_reason
-            .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.explicit_reason.compare_exchange(
+            0,
+            reason as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     /// Evaluates whether the tripwire has fired at the current monotonic instant.
