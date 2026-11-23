@@ -16,9 +16,11 @@ pub use format::LineHeader;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use holonomy_seal::{
     open_object, seal_object, CompactionApproval, DEMKey, OpenedPlaintext, SealedObject,
+    SecretArenas,
 };
 
 use crate::format::{HEADER_BYTES, RECORD_FIXED_BYTES, RECORD_HEADER_BYTES};
@@ -36,9 +38,13 @@ const MAX_WITNESS_BYTES: usize = WITNESS_BASE_BYTES + 64 * 32 + WITNESS_MANIFEST
 const MAX_WITNESS_CIPHERTEXT_BYTES: u32 = (MAX_WITNESS_BYTES as u32) + AEAD_TAG_BYTES;
 const MANIFEST_HEADER_BYTES: usize = 4;
 const MANIFEST_ENTRY_BYTES: usize = 8 + 4 + 4;
+const MANIFEST_V2_MAGIC: &[u8; 4] = b"M6V2";
+const MANIFEST_STYLE_BYTES: usize = 8 + 8 + 8 + 4 + 4 + 4;
 const MAX_MANIFEST_SLABS: usize = 1_048_576;
-const MAX_MANIFEST_BYTES: u32 =
-    (MANIFEST_HEADER_BYTES + MAX_MANIFEST_SLABS * MANIFEST_ENTRY_BYTES) as u32;
+const MAX_MANIFEST_STYLES: usize = 262_144;
+const MAX_MANIFEST_LINKS: usize = 65_536;
+const MAX_LINK_BYTES: usize = 4_096;
+const MAX_MANIFEST_BYTES: u32 = 32 * 1024 * 1024;
 const MAX_MANIFEST_CIPHERTEXT_BYTES: u32 = MAX_MANIFEST_BYTES + AEAD_TAG_BYTES;
 
 // Test-only hooks exercise short writes and failed durability barriers through the same
@@ -294,6 +300,47 @@ pub struct LineSlab {
     pub len: u32,
 }
 
+/// One canonical rich-text style span over `[start, end)` in document byte coordinates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineStyleRun {
+    /// Inclusive start byte offset in the active document (`start < end`).
+    pub start: u64,
+    /// Exclusive end byte offset in the active document (`end <= total_doc_bytes`).
+    pub end: u64,
+    /// Packed boolean inline flags (`0x01` bold, `0x02` italic, `0x04` underline,
+    /// `0x08` strikethrough, `0x10` code_span, `0x20` horizontal_rule).
+    pub flags: u8,
+    /// Font family selector (`0` = Sans, `1` = Serif, `2` = Mono).
+    pub family: u8,
+    /// Paragraph heading level (`0` = None, `1` = Title, `2` = H1, `3` = H2, `4` = H3).
+    pub heading: u8,
+    /// Paragraph alignment (`0` = Start, `1` = Center, `2` = End, `3` = Justify).
+    pub alignment: u8,
+    /// List kind (`0` = None, `1` = Bullet, `2` = Ordered).
+    pub list_kind: u8,
+    /// Nesting depth (`0..=8`; `0` when `list_kind == 0`).
+    pub list_depth: u8,
+    /// Blockquote nesting depth (`0..=8`).
+    pub blockquote: u8,
+    /// Font size in thousandths (`1_000` = `1.0x`; must be `> 0`).
+    pub size_milli: u32,
+    /// Starting item index for ordered lists (`>= 1` when `list_kind == 2`, else `0`).
+    pub list_start: u32,
+    /// 1-based index into [`LineManifest::links`], or `0` when unlinked.
+    pub link_id: u32,
+}
+
+/// Complete authenticated structural manifest: slab spans plus optional rich-text style layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineManifest {
+    /// Ordered [`LineSlab`] spans forming the active document byte stream.
+    pub slabs: Vec<LineSlab>,
+    /// Sorted, non-overlapping style spans over `[0, total_doc_bytes)`.
+    pub styles: Vec<LineStyleRun>,
+    /// Link target table referenced by 1-based [`LineStyleRun::link_id`].
+    pub links: Vec<String>,
+}
+
 /// Result of fully authenticating all committed segment bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyReport {
@@ -354,7 +401,7 @@ pub struct WorldLine {
     file_identity: FileIdentity,
     segments: Vec<SegmentDescriptor>,
     manifests: Vec<ManifestDescriptor>,
-    manifest: Option<Vec<LineSlab>>,
+    manifest: Option<LineManifest>,
     mmr: Mmr,
     next_witness_sequence: u64,
     last_witness_tag: [u8; 32],
@@ -514,6 +561,17 @@ impl WorldLine {
         &self.header
     }
 
+    /// Arms this world-line's live [`DEMKey`] capability cell in `arenas` for emergency zeroing.
+    pub fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
+        self.key.arm_reaper(arenas)
+    }
+
+    /// Whether the emergency reaper has zeroized this world-line's [`DEMKey`] in place.
+    #[must_use]
+    pub fn is_key_zeroized(&self) -> bool {
+        self.key.is_zeroized()
+    }
+
     /// The number of segments covered by the current authenticated witness.
     pub fn segment_count(&self) -> u64 {
         self.mmr.count()
@@ -550,7 +608,7 @@ impl WorldLine {
     #[must_use]
     pub fn document_slabs(&self) -> Vec<LineSlab> {
         if let Some(manifest) = &self.manifest {
-            return manifest.clone();
+            return manifest.slabs.clone();
         }
         self.segments
             .iter()
@@ -560,6 +618,20 @@ impl WorldLine {
                 len: descriptor.plaintext_len,
             })
             .collect()
+    }
+
+    /// The active document's full [`LineManifest`] (slab spans plus rich-text style and link
+    /// tables), without opening any segment ciphertext.
+    #[must_use]
+    pub fn document_manifest(&self) -> LineManifest {
+        if let Some(manifest) = &self.manifest {
+            return manifest.clone();
+        }
+        LineManifest {
+            slabs: self.document_slabs(),
+            styles: Vec::new(),
+            links: Vec::new(),
+        }
     }
 
     /// Whether `desired` equals the implicit append-order geometry that would result from
@@ -628,7 +700,7 @@ impl WorldLine {
             return Ok(self.current_receipt());
         }
         if let Some(existing) = &self.manifest {
-            if existing.len().saturating_add(plaintext_segments.len()) > MAX_MANIFEST_SLABS {
+            if existing.slabs.len().saturating_add(plaintext_segments.len()) > MAX_MANIFEST_SLABS {
                 return Err(LineError::InvalidManifest(
                     "manifest exceeds maximum slab count",
                 ));
@@ -650,8 +722,23 @@ impl WorldLine {
         plaintext_segments: &[&[u8]],
         manifest: &[LineSlab],
     ) -> Result<AppendReceipt, LineError> {
+        let full = LineManifest {
+            slabs: manifest.to_vec(),
+            styles: Vec::new(),
+            links: Vec::new(),
+        };
+        self.append_segments_with_full_manifest(plaintext_segments, &full)
+    }
+
+    /// Atomically append one or more sealed segments and commit `manifest` (slab spans, rich-text
+    /// style runs, and link targets) under a single witness commit point.
+    pub fn append_segments_with_full_manifest(
+        &mut self,
+        plaintext_segments: &[&[u8]],
+        manifest: &LineManifest,
+    ) -> Result<AppendReceipt, LineError> {
         if plaintext_segments.is_empty() {
-            return self.commit_manifest(manifest);
+            return self.commit_full_manifest(manifest);
         }
         self.validate_append_inputs(plaintext_segments)?;
         validate_manifest_against_pending(&self.segments, plaintext_segments, manifest)?;
@@ -668,6 +755,20 @@ impl WorldLine {
     /// An empty `manifest` (`&[]`) records an explicitly emptied document (`Select All` + `Delete`)
     /// so reopening yields zero bytes rather than falling back to append order (AUDIT OQ-30).
     pub fn commit_manifest(&mut self, manifest: &[LineSlab]) -> Result<AppendReceipt, LineError> {
+        let full = LineManifest {
+            slabs: manifest.to_vec(),
+            styles: Vec::new(),
+            links: Vec::new(),
+        };
+        self.commit_full_manifest(&full)
+    }
+
+    /// Commit `manifest` (slab spans plus optional rich-text styles and links) without appending
+    /// any segment plaintext.
+    pub fn commit_full_manifest(
+        &mut self,
+        manifest: &LineManifest,
+    ) -> Result<AppendReceipt, LineError> {
         if !durability_supported() {
             return Err(LineError::UnsupportedDurability);
         }
@@ -847,7 +948,7 @@ impl WorldLine {
         }
 
         self.verify()?;
-        let slabs = self.document_slabs();
+        let source_manifest = self.document_manifest();
         let temporary = compaction_path(&destination, new_header.file_id());
         if temporary == destination {
             return Err(LineError::InvalidCompactionDestination);
@@ -855,7 +956,7 @@ impl WorldLine {
         let mut compacted = WorldLine::create(&temporary, new_header, new_key.duplicate())?;
         let mut publication =
             CompactionPublication::new(temporary, destination.clone(), compacted.file_identity);
-        for slab in &slabs {
+        for slab in &source_manifest.slabs {
             let plaintext = self.open_segment(slab.segment)?;
             let start = slab.start as usize;
             let end = start
@@ -864,6 +965,14 @@ impl WorldLine {
             let slice = plaintext.get(start..end).ok_or(LineError::InvalidRecord)?;
             compacted.append_segments(&[slice])?;
             // `plaintext` drops and zeroizes before the next slab's segment is opened.
+        }
+        if !source_manifest.styles.is_empty() || !source_manifest.links.is_empty() {
+            let preserved = LineManifest {
+                slabs: compacted.document_slabs(),
+                styles: source_manifest.styles,
+                links: source_manifest.links,
+            };
+            compacted.commit_full_manifest(&preserved)?;
         }
         compacted.verify()?;
         publication.publish()?;
@@ -884,7 +993,7 @@ impl WorldLine {
     fn commit_internal(
         &mut self,
         plaintext_segments: &[&[u8]],
-        explicit_manifest: Option<&[LineSlab]>,
+        explicit_manifest: Option<&LineManifest>,
     ) -> Result<AppendReceipt, LineError> {
         let mut file = open_worldline_file(&self.path, true, true)?;
         validate_regular_file(&file)?;
@@ -932,14 +1041,14 @@ impl WorldLine {
         }
 
         let next_manifest = match explicit_manifest {
-            Some(slabs) => Some(slabs.to_vec()),
+            Some(manifest) => Some(manifest.clone()),
             None => {
                 if let Some(existing) = &self.manifest {
                     let mut extended = Vec::new();
                     extended
-                        .try_reserve(existing.len() + plaintext_segments.len())
+                        .try_reserve(existing.slabs.len() + plaintext_segments.len())
                         .map_err(|_| LineError::ResourceExhausted)?;
-                    extended.extend_from_slice(existing);
+                    extended.extend_from_slice(&existing.slabs);
                     let base = self.mmr.count();
                     for (index, plaintext) in plaintext_segments.iter().enumerate() {
                         let len = u32::try_from(plaintext.len())
@@ -950,7 +1059,11 @@ impl WorldLine {
                             len,
                         });
                     }
-                    Some(extended)
+                    Some(LineManifest {
+                        slabs: extended,
+                        styles: existing.styles.clone(),
+                        links: existing.links.clone(),
+                    })
                 } else {
                     None
                 }
@@ -1090,7 +1203,7 @@ impl WorldLine {
         })
     }
 
-    fn read_manifest(&self, descriptor: &ManifestDescriptor) -> Result<Vec<LineSlab>, LineError> {
+    fn read_manifest(&self, descriptor: &ManifestDescriptor) -> Result<LineManifest, LineError> {
         let mut file = open_worldline_file(&self.path, true, false)?;
         validate_regular_file(&file)?;
         if file_identity(&file)? != self.file_identity {
@@ -1334,20 +1447,30 @@ struct EncodedManifest {
     tag: [u8; 32],
 }
 
+fn scrub_manifest_buffer(buf: &mut [u8]) {
+    for byte in buf {
+        // SAFETY: `byte` is a live mutable reference inside `buf`.
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 fn encode_manifest_record(
     header: &LineHeader,
     epoch: &[u8; 32],
     key: &DEMKey,
     sequence: u64,
     previous_witness_tag: &[u8; 32],
-    slabs: &[LineSlab],
+    manifest: &LineManifest,
 ) -> Result<EncodedManifest, LineError> {
-    let plaintext = encode_manifest_plain(slabs)?;
+    let mut plaintext = encode_manifest_plain(manifest)?;
     let plaintext_len = u32::try_from(plaintext.len()).map_err(|_| {
+        scrub_manifest_buffer(&mut plaintext);
         LineError::InvalidManifest("manifest plaintext exceeds maximum record length")
     })?;
     let aad = manifest_aad(header, epoch, sequence, previous_witness_tag, plaintext_len);
     let sealed = seal_object(key, &aad, &plaintext);
+    scrub_manifest_buffer(&mut plaintext);
     let ciphertext_len =
         u32::try_from(sealed.ciphertext.len()).map_err(|_| LineError::InvalidRecord)?;
     let nonce = sealed.nonce;
@@ -1361,20 +1484,79 @@ fn encode_manifest_record(
     })
 }
 
-fn encode_manifest_plain(slabs: &[LineSlab]) -> Result<Vec<u8>, LineError> {
-    if slabs.len() > MAX_MANIFEST_SLABS {
+fn encode_manifest_plain(manifest: &LineManifest) -> Result<Vec<u8>, LineError> {
+    if manifest.slabs.len() > MAX_MANIFEST_SLABS {
         return Err(LineError::InvalidManifest(
             "manifest exceeds maximum slab count",
         ));
     }
-    let count = u32::try_from(slabs.len())
+    if manifest.styles.len() > MAX_MANIFEST_STYLES {
+        return Err(LineError::InvalidManifest(
+            "manifest exceeds maximum style run count",
+        ));
+    }
+    if manifest.links.len() > MAX_MANIFEST_LINKS {
+        return Err(LineError::InvalidManifest(
+            "manifest exceeds maximum link count",
+        ));
+    }
+    let slab_count = u32::try_from(manifest.slabs.len())
         .map_err(|_| LineError::InvalidManifest("manifest exceeds maximum slab count"))?;
-    let total = MANIFEST_HEADER_BYTES + slabs.len() * MANIFEST_ENTRY_BYTES;
+
+    if manifest.styles.is_empty() && manifest.links.is_empty() {
+        let total = MANIFEST_HEADER_BYTES + manifest.slabs.len() * MANIFEST_ENTRY_BYTES;
+        let mut out = Vec::new();
+        out.try_reserve_exact(total)
+            .map_err(|_| LineError::ResourceExhausted)?;
+        out.extend_from_slice(&slab_count.to_le_bytes());
+        for slab in &manifest.slabs {
+            if slab.len == 0 || slab.start.checked_add(slab.len).is_none() {
+                return Err(LineError::InvalidManifest(
+                    "manifest slab has zero or overflowing byte span",
+                ));
+            }
+            out.extend_from_slice(&slab.segment.to_le_bytes());
+            out.extend_from_slice(&slab.start.to_le_bytes());
+            out.extend_from_slice(&slab.len.to_le_bytes());
+        }
+        return Ok(out);
+    }
+
+    let style_count = u32::try_from(manifest.styles.len())
+        .map_err(|_| LineError::InvalidManifest("manifest exceeds maximum style run count"))?;
+    let link_count = u32::try_from(manifest.links.len())
+        .map_err(|_| LineError::InvalidManifest("manifest exceeds maximum link count"))?;
+    let mut link_bytes_total = 0usize;
+    for link in &manifest.links {
+        if link.is_empty() || link.len() > MAX_LINK_BYTES {
+            return Err(LineError::InvalidManifest(
+                "manifest link target must be 1..=4096 UTF-8 bytes",
+            ));
+        }
+        link_bytes_total = link_bytes_total
+            .checked_add(2 + link.len())
+            .ok_or(LineError::ResourceExhausted)?;
+    }
+    let total = 4usize
+        .checked_add(4)
+        .and_then(|n| n.checked_add(manifest.slabs.len().checked_mul(MANIFEST_ENTRY_BYTES)?))
+        .and_then(|n| n.checked_add(4))
+        .and_then(|n| n.checked_add(manifest.styles.len().checked_mul(MANIFEST_STYLE_BYTES)?))
+        .and_then(|n| n.checked_add(4))
+        .and_then(|n| n.checked_add(link_bytes_total))
+        .ok_or(LineError::ResourceExhausted)?;
+    if total > MAX_MANIFEST_BYTES as usize {
+        return Err(LineError::InvalidManifest(
+            "manifest plaintext exceeds maximum record length",
+        ));
+    }
+
     let mut out = Vec::new();
     out.try_reserve_exact(total)
         .map_err(|_| LineError::ResourceExhausted)?;
-    out.extend_from_slice(&count.to_le_bytes());
-    for slab in slabs {
+    out.extend_from_slice(MANIFEST_V2_MAGIC);
+    out.extend_from_slice(&slab_count.to_le_bytes());
+    for slab in &manifest.slabs {
         if slab.len == 0 || slab.start.checked_add(slab.len).is_none() {
             return Err(LineError::InvalidManifest(
                 "manifest slab has zero or overflowing byte span",
@@ -1384,26 +1566,38 @@ fn encode_manifest_plain(slabs: &[LineSlab]) -> Result<Vec<u8>, LineError> {
         out.extend_from_slice(&slab.start.to_le_bytes());
         out.extend_from_slice(&slab.len.to_le_bytes());
     }
+    out.extend_from_slice(&style_count.to_le_bytes());
+    for run in &manifest.styles {
+        out.extend_from_slice(&run.start.to_le_bytes());
+        out.extend_from_slice(&run.end.to_le_bytes());
+        out.push(run.flags);
+        out.push(run.family);
+        out.push(run.heading);
+        out.push(run.alignment);
+        out.push(run.list_kind);
+        out.push(run.list_depth);
+        out.push(run.blockquote);
+        out.push(0);
+        out.extend_from_slice(&run.size_milli.to_le_bytes());
+        out.extend_from_slice(&run.list_start.to_le_bytes());
+        out.extend_from_slice(&run.link_id.to_le_bytes());
+    }
+    out.extend_from_slice(&link_count.to_le_bytes());
+    for link in &manifest.links {
+        let len = u16::try_from(link.len())
+            .map_err(|_| LineError::InvalidManifest("manifest link exceeds u16"))?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(link.as_bytes());
+    }
     Ok(out)
 }
 
-fn decode_manifest_plain(bytes: &[u8]) -> Result<Vec<LineSlab>, LineError> {
-    if bytes.len() < MANIFEST_HEADER_BYTES || bytes.len() > MAX_MANIFEST_BYTES as usize {
-        return Err(LineError::InvalidRecord);
-    }
-    let mut offset = 0usize;
-    let count = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?) as usize;
+fn decode_slabs(
+    bytes: &[u8],
+    offset: &mut usize,
+    count: usize,
+) -> Result<Vec<LineSlab>, LineError> {
     if count > MAX_MANIFEST_SLABS {
-        return Err(LineError::InvalidRecord);
-    }
-    let expected_len = MANIFEST_HEADER_BYTES
-        .checked_add(
-            count
-                .checked_mul(MANIFEST_ENTRY_BYTES)
-                .ok_or(LineError::InvalidRecord)?,
-        )
-        .ok_or(LineError::InvalidRecord)?;
-    if bytes.len() != expected_len {
         return Err(LineError::InvalidRecord);
     }
     let mut slabs = Vec::new();
@@ -1411,9 +1605,9 @@ fn decode_manifest_plain(bytes: &[u8]) -> Result<Vec<LineSlab>, LineError> {
         .try_reserve_exact(count)
         .map_err(|_| LineError::ResourceExhausted)?;
     for _ in 0..count {
-        let segment = take_u64(bytes, &mut offset)?;
-        let start = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
-        let len = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+        let segment = take_u64(bytes, offset)?;
+        let start = u32::from_le_bytes(take_array::<4>(bytes, offset)?);
+        let len = u32::from_le_bytes(take_array::<4>(bytes, offset)?);
         if len == 0 || start.checked_add(len).is_none() {
             return Err(LineError::InvalidRecord);
         }
@@ -1426,21 +1620,137 @@ fn decode_manifest_plain(bytes: &[u8]) -> Result<Vec<LineSlab>, LineError> {
     Ok(slabs)
 }
 
+fn decode_manifest_plain(bytes: &[u8]) -> Result<LineManifest, LineError> {
+    if bytes.len() < MANIFEST_HEADER_BYTES || bytes.len() > MAX_MANIFEST_BYTES as usize {
+        return Err(LineError::InvalidRecord);
+    }
+    let mut offset = 0usize;
+    let first = take_array::<4>(bytes, &mut offset)?;
+    if &first != MANIFEST_V2_MAGIC {
+        let count = u32::from_le_bytes(first) as usize;
+        if count > MAX_MANIFEST_SLABS {
+            return Err(LineError::InvalidRecord);
+        }
+        let expected_len = MANIFEST_HEADER_BYTES
+            .checked_add(
+                count
+                    .checked_mul(MANIFEST_ENTRY_BYTES)
+                    .ok_or(LineError::InvalidRecord)?,
+            )
+            .ok_or(LineError::InvalidRecord)?;
+        if bytes.len() != expected_len {
+            return Err(LineError::InvalidRecord);
+        }
+        let slabs = decode_slabs(bytes, &mut offset, count)?;
+        return Ok(LineManifest {
+            slabs,
+            styles: Vec::new(),
+            links: Vec::new(),
+        });
+    }
+
+    let slab_count = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?) as usize;
+    let slabs = decode_slabs(bytes, &mut offset, slab_count)?;
+
+    let style_count = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?) as usize;
+    if style_count > MAX_MANIFEST_STYLES {
+        return Err(LineError::InvalidRecord);
+    }
+    let mut styles = Vec::new();
+    styles
+        .try_reserve_exact(style_count)
+        .map_err(|_| LineError::ResourceExhausted)?;
+    for _ in 0..style_count {
+        let start = take_u64(bytes, &mut offset)?;
+        let end = take_u64(bytes, &mut offset)?;
+        let meta = take_array::<8>(bytes, &mut offset)?;
+        if meta[7] != 0 {
+            return Err(LineError::InvalidRecord);
+        }
+        let size_milli = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+        let list_start = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+        let link_id = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?);
+        styles.push(LineStyleRun {
+            start,
+            end,
+            flags: meta[0],
+            family: meta[1],
+            heading: meta[2],
+            alignment: meta[3],
+            list_kind: meta[4],
+            list_depth: meta[5],
+            blockquote: meta[6],
+            size_milli,
+            list_start,
+            link_id,
+        });
+    }
+
+    let link_count = u32::from_le_bytes(take_array::<4>(bytes, &mut offset)?) as usize;
+    if link_count > MAX_MANIFEST_LINKS {
+        return Err(LineError::InvalidRecord);
+    }
+    if style_count == 0 && link_count == 0 {
+        return Err(LineError::InvalidRecord);
+    }
+    let mut links = Vec::new();
+    links
+        .try_reserve_exact(link_count)
+        .map_err(|_| LineError::ResourceExhausted)?;
+    for _ in 0..link_count {
+        let len = u16::from_le_bytes(take_array::<2>(bytes, &mut offset)?) as usize;
+        if len == 0 || len > MAX_LINK_BYTES {
+            return Err(LineError::InvalidRecord);
+        }
+        let end = offset.checked_add(len).ok_or(LineError::InvalidRecord)?;
+        let raw = bytes.get(offset..end).ok_or(LineError::InvalidRecord)?;
+        let text = core::str::from_utf8(raw).map_err(|_| LineError::InvalidRecord)?;
+        offset = end;
+        links.push(text.to_owned());
+    }
+    if offset != bytes.len() {
+        return Err(LineError::InvalidRecord);
+    }
+    Ok(LineManifest {
+        slabs,
+        styles,
+        links,
+    })
+}
+
 fn validate_manifest_against_pending(
     committed: &[SegmentDescriptor],
     pending: &[&[u8]],
-    manifest: &[LineSlab],
+    manifest: &LineManifest,
 ) -> Result<(), LineError> {
-    if manifest.len() > MAX_MANIFEST_SLABS {
+    if manifest.slabs.len() > MAX_MANIFEST_SLABS {
         return Err(LineError::InvalidManifest(
             "manifest exceeds maximum slab count",
         ));
+    }
+    if manifest.styles.len() > MAX_MANIFEST_STYLES {
+        return Err(LineError::InvalidManifest(
+            "manifest exceeds maximum style run count",
+        ));
+    }
+    if manifest.links.len() > MAX_MANIFEST_LINKS {
+        return Err(LineError::InvalidManifest(
+            "manifest exceeds maximum link count",
+        ));
+    }
+    for link in &manifest.links {
+        if link.is_empty() || link.len() > MAX_LINK_BYTES {
+            return Err(LineError::InvalidManifest(
+                "manifest link target must be 1..=4096 UTF-8 bytes",
+            ));
+        }
     }
     let total_segments = committed
         .len()
         .checked_add(pending.len())
         .ok_or(LineError::TooManySegments)?;
-    for slab in manifest {
+    let mut total_doc_bytes = 0u64;
+    for slab in &manifest.slabs {
         if slab.len == 0 {
             return Err(LineError::InvalidManifest("manifest slab has zero length"));
         }
@@ -1468,6 +1778,37 @@ fn validate_manifest_against_pending(
                 "manifest slab exceeds segment plaintext length",
             ));
         }
+        total_doc_bytes = total_doc_bytes
+            .checked_add(u64::from(slab.len))
+            .ok_or(LineError::InvalidManifest(
+                "manifest total document length overflows u64",
+            ))?;
+    }
+
+    let mut prev_end = 0u64;
+    for run in &manifest.styles {
+        if run.start >= run.end || run.end > total_doc_bytes || run.start < prev_end {
+            return Err(LineError::InvalidManifest(
+                "manifest style run is empty, out of bounds, or overlapping",
+            ));
+        }
+        if (run.flags & !0x3F) != 0
+            || run.family > 2
+            || run.heading > 4
+            || run.alignment > 3
+            || run.list_kind > 2
+            || run.list_depth > 8
+            || run.blockquote > 8
+            || run.size_milli == 0
+            || (run.link_id as usize) > manifest.links.len()
+            || (run.list_kind == 0 && (run.list_depth != 0 || run.list_start != 0))
+            || (run.list_kind == 2 && run.list_start == 0)
+        {
+            return Err(LineError::InvalidManifest(
+                "manifest style run carries invalid attribute values",
+            ));
+        }
+        prev_end = run.end;
     }
     Ok(())
 }
@@ -1479,7 +1820,7 @@ fn read_manifest_from<R: Read + Seek>(
     key: &DEMKey,
     descriptor: &ManifestDescriptor,
     allowed_segments: &[SegmentDescriptor],
-) -> Result<Vec<LineSlab>, LineError> {
+) -> Result<LineManifest, LineError> {
     if descriptor.ciphertext_len < AEAD_TAG_BYTES + MANIFEST_HEADER_BYTES as u32
         || descriptor.ciphertext_len > MAX_MANIFEST_CIPHERTEXT_BYTES
     {
@@ -1510,10 +1851,11 @@ fn read_manifest_from<R: Read + Seek>(
     if plaintext.len() != plaintext_len as usize {
         return Err(LineError::AuthenticationRejected);
     }
-    let slabs = decode_manifest_plain(&plaintext).map_err(|_| LineError::AuthenticationRejected)?;
-    validate_manifest_against_pending(allowed_segments, &[], &slabs)
+    let manifest =
+        decode_manifest_plain(&plaintext).map_err(|_| LineError::AuthenticationRejected)?;
+    validate_manifest_against_pending(allowed_segments, &[], &manifest)
         .map_err(|_| LineError::AuthenticationRejected)?;
-    Ok(slabs)
+    Ok(manifest)
 }
 
 // All eight fields are the authenticated witness payload; a wrapper struct would only restate
@@ -1714,7 +2056,7 @@ fn encode_record(kind: u8, sequence: u64, sealed: SealedObject) -> Result<Vec<u8
 struct ScanResult {
     segments: Vec<SegmentDescriptor>,
     manifests: Vec<ManifestDescriptor>,
-    manifest: Option<Vec<LineSlab>>,
+    manifest: Option<LineManifest>,
     mmr: Mmr,
     next_witness_sequence: u64,
     last_witness_tag: [u8; 32],

@@ -76,14 +76,22 @@
 //! recorded over pending typing would name a leaf whose bytes undo discards, so a root step records
 //! the **settled** tree — the one without the open leaf (D-17).
 
+use std::sync::Arc;
+
 use zeroize::Zeroizing;
 
 use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
+use crate::formatting::{StylePatch, ToolbarState};
+use crate::residency::{SegmentSource, WipeRegistry};
+use crate::search::{find_streaming, SearchError, SearchMatch};
 use crate::slab::{SegmentId, Slab, SlabSpan};
 use crate::source::OpenSources;
 use crate::spine::{Spine, SpineError};
 use crate::text::{EditOutcome, SlabText, TextError};
+
+/// Maximum segment chunk size sealed during atomic `replace_all`.
+const MAX_REPLACE_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Why a keystroke could not be taken.
 #[derive(Debug)]
@@ -105,6 +113,8 @@ pub enum TypingError {
         /// The sink's message.
         reason: String,
     },
+    /// Streaming search failed while reading a sealed segment.
+    Search(SearchError),
 }
 
 impl std::fmt::Display for TypingError {
@@ -119,6 +129,7 @@ impl std::fmt::Display for TypingError {
             Self::Append { reason } => {
                 write!(formatter, "the world-line refused the seal: {reason}")
             }
+            Self::Search(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -134,6 +145,12 @@ impl From<TextError> for TypingError {
 impl From<SpineError> for TypingError {
     fn from(error: SpineError) -> Self {
         Self::Spine(error)
+    }
+}
+
+impl From<SearchError> for TypingError {
+    fn from(error: SearchError) -> Self {
+        Self::Search(error)
     }
 }
 
@@ -188,6 +205,73 @@ enum Mark {
     },
 }
 
+/// Zeroizing undo buffer optionally armed in an external [`WipeRegistry`] (`L-7`).
+struct HeldBytes {
+    bytes: Zeroizing<Vec<u8>>,
+    wipe_slot: Option<(Arc<dyn WipeRegistry>, usize)>,
+}
+
+impl HeldBytes {
+    fn new(raw: Vec<u8>, registry: Option<&Arc<dyn WipeRegistry>>) -> Self {
+        let mut bytes = Zeroizing::new(raw);
+        let wipe_slot = registry.and_then(|reg| {
+            let cap = bytes.capacity();
+            if cap == 0 {
+                return None;
+            }
+            // SAFETY: `bytes` is never grown after construction, and `HeldBytes::drop` /
+            // `into_vec` unregisters `slot` before `bytes` is moved or freed.
+            unsafe { reg.register(bytes.as_mut_ptr(), cap) }.map(|slot| (Arc::clone(reg), slot))
+        });
+        Self { bytes, wipe_slot }
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn into_vec(mut self) -> Vec<u8> {
+        if let Some((reg, slot)) = self.wipe_slot.take() {
+            reg.unregister(slot);
+        }
+        core::mem::take(&mut *self.bytes)
+    }
+
+    fn wipe_in_place(&mut self) -> usize {
+        let cap = self.bytes.capacity();
+        let ptr = self.bytes.as_mut_ptr();
+        for offset in 0..cap {
+            // SAFETY: `self.bytes` owns `cap` allocated bytes.
+            unsafe { ptr.add(offset).write_volatile(0) };
+        }
+        self.bytes.clear();
+        cap
+    }
+}
+
+impl core::fmt::Debug for HeldBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HeldBytes")
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}
+
+impl Clone for HeldBytes {
+    fn clone(&self) -> Self {
+        let reg = self.wipe_slot.as_ref().map(|(r, _)| r);
+        Self::new(self.bytes.to_vec(), reg)
+    }
+}
+
+impl Drop for HeldBytes {
+    fn drop(&mut self) {
+        if let Some((reg, slot)) = self.wipe_slot.take() {
+            reg.unregister(slot);
+        }
+    }
+}
+
 /// One state the session can return to.
 #[derive(Debug, Clone)]
 enum Step {
@@ -214,9 +298,9 @@ enum Step {
         /// thing an undo can re-attach the text from. `None` for the two states where the buffer is
         /// still the live one — a root recorded before a cut, and a state recorded on the way out of
         /// an undo — where copying would be a copy of bytes already in hand. Wrapped in
-        /// [`Zeroizing`] so trimming, clearing, or dropping undo/redo history wipes the plaintext
-        /// before returning the allocation to the heap.
-        held: Option<Zeroizing<Vec<u8>>>,
+        /// [`HeldBytes`] so trimming, clearing, or dropping undo/redo history wipes the plaintext
+        /// before returning the allocation to the heap and keeps any [`WipeRegistry`] armed.
+        held: Option<HeldBytes>,
     },
 }
 
@@ -258,6 +342,8 @@ pub struct Typing<S> {
     /// after a deletion across sealed text, or an undo/redo of a root step). Cleared only after
     /// the sink confirms the manifest or combined append commit (OQ-29, OQ-30).
     structure_dirty: bool,
+    wipe_registry: Option<Arc<dyn WipeRegistry>>,
+    buffer_slot: Option<usize>,
 }
 
 impl<S: SegmentSink> Typing<S> {
@@ -286,6 +372,8 @@ impl<S: SegmentSink> Typing<S> {
             steps: Vec::new(),
             undone: Vec::new(),
             structure_dirty: false,
+            wipe_registry: None,
+            buffer_slot: None,
         }
     }
 
@@ -500,7 +588,10 @@ impl<S: SegmentSink> Typing<S> {
                     "the settled tree and the open bytes do not add up to the document"
                 );
                 let held = if pending > 0 {
-                    Some(Zeroizing::new(self.buffer.as_bytes().to_vec()))
+                    Some(HeldBytes::new(
+                        self.buffer.as_bytes().to_vec(),
+                        self.wipe_registry.as_ref(),
+                    ))
                 } else {
                     None
                 };
@@ -612,7 +703,7 @@ impl<S: SegmentSink> Typing<S> {
         spine: Spine,
         at: u64,
         pending: usize,
-        held: Option<Zeroizing<Vec<u8>>>,
+        held: Option<HeldBytes>,
     ) -> Result<(), TypingError> {
         self.structure_dirty = true;
         if let Some(open) = self.open {
@@ -627,12 +718,14 @@ impl<S: SegmentSink> Typing<S> {
             "a state with open bytes carries them ({pending} open, {held:?})",
             held = held.as_ref().map(|bytes| bytes.len())
         );
-        if let Some(mut held) = held {
+        if let Some(held) = held {
             // The copy is what the leaf comes back from: a seal has replaced the buffer with
             // another leaf's, and even without a seal the state a redo lands in need not be the one
             // the bytes were typed into. They came from a buffer of this capacity, so they fit.
-            self.buffer = SlabText::from_plaintext(core::mem::take(&mut *held), self.capacity)
+            self.unarm_buffer();
+            self.buffer = SlabText::from_plaintext(held.into_vec(), self.capacity)
                 .expect("the bytes came from a buffer of this capacity");
+            self.arm_buffer();
         }
         if pending > 0 {
             self.attach(pending)?;
@@ -984,18 +1077,230 @@ impl<S: SegmentSink> Typing<S> {
         Ok(Slab::new(segment, slab.start(), slab.len()))
     }
 
-    /// Commits the current fully-sealed spine geometry to the sink without reading or appending
-    /// any segment bytes (OQ-29, OQ-30).
+    /// Commits the current fully-sealed spine geometry and rich-text styles to the sink without
+    /// reading or appending any segment bytes (OQ-29, OQ-30, Block 7).
     fn commit_current_spine(&mut self) -> Result<(), TypingError> {
         let mut slabs = Vec::new();
         for span in self.spine.spans_in(0, self.spine.len()) {
             slabs.push(self.resolve_slab(span.slab())?);
         }
         self.sink
-            .commit_spine(&slabs)
+            .commit_manifest(&slabs, self.spine.styles())
             .map_err(|reason| TypingError::Append { reason })?;
         self.structure_dirty = false;
         Ok(())
+    }
+
+    /// Computes the live [`ToolbarState`] for caret (`start == end`) or selection `[start, end)`.
+    #[must_use]
+    pub fn toolbar_state(&self, start: u64, end: u64) -> ToolbarState {
+        self.draft.live_toolbar_state(&self.spine, start, end)
+    }
+
+    /// Applies `patch` over `[start, end)` as a single undoable root transaction without cutting
+    /// any underlying [`Slab`] leaf (`OQ-9`, Block 7).
+    pub fn apply_style(
+        &mut self,
+        start: u64,
+        end: u64,
+        patch: &StylePatch,
+    ) -> Result<(), TypingError> {
+        let doc_len = self.document_len();
+        let (lo, hi) = if start <= end {
+            (start.min(doc_len), end.min(doc_len))
+        } else {
+            (end.min(doc_len), start.min(doc_len))
+        };
+        if lo == hi {
+            return Ok(());
+        }
+        self.flush()?;
+        let next = self.spine.apply_style(lo, hi, patch)?;
+        if next.styles() == self.spine.styles() {
+            return Ok(());
+        }
+        self.undone.clear();
+        self.push_root(lo);
+        self.spine = next;
+        self.next_at = Some(hi);
+        self.structure_dirty = true;
+        Ok(())
+    }
+
+    /// Applies a batch of `(start, end, patch)` formatting operations as **one** single-undo root
+    /// transaction across arbitrary slab boundaries (Block 7 Gate 3).
+    pub fn apply_styles_batch(
+        &mut self,
+        edits: &[(u64, u64, StylePatch)],
+    ) -> Result<(), TypingError> {
+        if edits.is_empty() {
+            return Ok(());
+        }
+        self.flush()?;
+        let doc_len = self.spine.len();
+        let mut next = self.spine.clone();
+        let mut first_at = self.caret();
+        let mut last_end = self.caret();
+        let mut any = false;
+        for (start, end, patch) in edits {
+            let (lo, hi) = if start <= end {
+                ((*start).min(doc_len), (*end).min(doc_len))
+            } else {
+                ((*end).min(doc_len), (*start).min(doc_len))
+            };
+            if lo == hi {
+                continue;
+            }
+            if !any {
+                first_at = lo;
+            }
+            last_end = hi;
+            any = true;
+            next = next.apply_style(lo, hi, patch)?;
+        }
+        if !any || next.styles() == self.spine.styles() {
+            return Ok(());
+        }
+        self.undone.clear();
+        self.push_root(first_at);
+        self.spine = next;
+        self.next_at = Some(last_end);
+        self.structure_dirty = true;
+        Ok(())
+    }
+
+    /// Sets or clears (`url = None` or `Some("")`) a hyperlink over `[start, end)` as a single
+    /// undoable root transaction.
+    pub fn set_link(
+        &mut self,
+        start: u64,
+        end: u64,
+        url: Option<&str>,
+    ) -> Result<(), TypingError> {
+        let doc_len = self.document_len();
+        let (lo, hi) = if start <= end {
+            (start.min(doc_len), end.min(doc_len))
+        } else {
+            (end.min(doc_len), start.min(doc_len))
+        };
+        if lo == hi {
+            return Ok(());
+        }
+        self.flush()?;
+        let next = self.spine.set_link(lo, hi, url)?;
+        if next.styles() == self.spine.styles() {
+            return Ok(());
+        }
+        self.undone.clear();
+        self.push_root(lo);
+        self.spine = next;
+        self.next_at = Some(hi);
+        self.structure_dirty = true;
+        Ok(())
+    }
+
+    /// Streams across the live document (including any unsealed typing draft) to find all
+    /// non-overlapping occurrences of `needle` without touching [`crate::ResidentSet`].
+    pub fn find_all<R: SegmentSource>(
+        &self,
+        needle: &[u8],
+        source: &mut R,
+    ) -> Result<Vec<SearchMatch>, SearchError> {
+        find_streaming(
+            &self.spine,
+            &self.draft,
+            &self.sources,
+            self.pending(),
+            needle,
+            source,
+        )
+    }
+
+    /// Atomically replaces every non-overlapping occurrence of `needle` with `replacement` across
+    /// the entire document as **one** undoable transaction, without widening [`crate::ResidentSet`]
+    /// (`L-2`, Block 7 Gate 2).
+    ///
+    /// Returns the number of occurrences replaced. Untouched leaves are never read or re-sealed;
+    /// `replacement` is sealed once in `<= 64 KiB` UTF-8 chunks and referenced across all match
+    /// sites by Spine path-copying.
+    pub fn replace_all<R: SegmentSource>(
+        &mut self,
+        needle: &[u8],
+        replacement: &[u8],
+        source: &mut R,
+    ) -> Result<usize, TypingError> {
+        if core::str::from_utf8(needle).is_err() || core::str::from_utf8(replacement).is_err() {
+            return Err(TypingError::Text(TextError::InvalidUtf8));
+        }
+        if needle.is_empty() {
+            return Ok(0);
+        }
+        self.flush()?;
+        let matches = find_streaming(&self.spine, &self.draft, &self.sources, &[], needle, source)?;
+        if matches.is_empty() || needle == replacement {
+            return Ok(matches.len());
+        }
+
+        let mut rep_slabs: Vec<Slab> = Vec::new();
+        if !replacement.is_empty() {
+            let mut rest = replacement;
+            while !rest.is_empty() {
+                let mut take = rest.len().min(MAX_REPLACE_CHUNK_BYTES);
+                while take > 0 && !starts_a_character(rest, take) {
+                    take -= 1;
+                }
+                let appended = self
+                    .sink
+                    .append_segment(&rest[..take])
+                    .map_err(|reason| TypingError::Append { reason })?;
+                let prov = self.sources.open();
+                self.sources
+                    .seal(prov, appended.segment)
+                    .expect("newly opened provisional id seals cleanly");
+                rep_slabs.push(Slab::new(
+                    prov,
+                    0,
+                    u32::try_from(take).expect("chunk <= 64 KiB"),
+                ));
+                self.sealed_bytes += take as u64;
+                rest = &rest[take..];
+            }
+        }
+
+        let mut next_spine = self.spine.clone();
+        let needle_len = needle.len() as u64;
+        let rep_len = replacement.len() as u64;
+        let step_delta = i128::from(rep_len) - i128::from(needle_len);
+        let mut cumulative_delta: i128 = 0;
+        let mut final_caret = matches[0].start;
+
+        for hit in &matches {
+            let adj_start =
+                u64::try_from(i128::from(hit.start) + cumulative_delta).expect("valid offset");
+            let adj_end = adj_start + needle_len;
+            if rep_slabs.is_empty() {
+                next_spine = next_spine.remove_range(adj_start, adj_end)?;
+            } else if rep_slabs.len() == 1 {
+                next_spine = next_spine.replace_range(adj_start, adj_end, rep_slabs[0])?;
+            } else {
+                next_spine = next_spine.remove_range(adj_start, adj_end)?;
+                let mut cur = adj_start;
+                for slab in &rep_slabs {
+                    next_spine = next_spine.insert_slab(cur, *slab)?;
+                    cur += u64::from(slab.len());
+                }
+            }
+            final_caret = adj_start + rep_len;
+            cumulative_delta += step_delta;
+        }
+
+        self.undone.clear();
+        self.push_root(matches[0].start);
+        self.spine = next_spine;
+        self.next_at = Some(final_caret.min(self.spine.len()));
+        self.structure_dirty = true;
+        self.commit_current_spine()?;
+        Ok(matches.len())
     }
 
     /// Seals the open source: append once, rename, correct the leaf's length, drop the draft.
@@ -1033,6 +1338,11 @@ impl<S: SegmentSink> Typing<S> {
             return Ok(());
         }
         let end = open.at + u64::from(open.registered);
+        let len_u32 = u32::try_from(len).expect("capacity fits in u32");
+        let next_styles = self
+            .spine
+            .styles()
+            .replace_range(open.at, end, u64::from(len_u32));
         let mut before = Vec::new();
         for span in self.spine.spans_in(0, open.at) {
             before.push(self.resolve_slab(span.slab())?);
@@ -1043,44 +1353,27 @@ impl<S: SegmentSink> Typing<S> {
         }
         let appended: Appended = self
             .sink
-            .append_segment_with_spine(&self.buffer.as_bytes()[..len], &before, &after)
+            .append_segment_with_manifest(
+                &self.buffer.as_bytes()[..len],
+                &before,
+                &after,
+                &next_styles,
+            )
             .map_err(|reason| TypingError::Append { reason })?;
         self.sources
             .seal(open.source, appended.segment)
             .expect("the register handed this id out");
-        let corrected = Slab::new(
-            open.source,
-            0,
-            u32::try_from(len).expect("capacity fits in u32"),
-        );
+        let corrected = Slab::new(open.source, 0, len_u32);
         // The state being sealed, kept so an undo can come back to it (D-43). It has to be taken
         // now: the replace below is what makes the leaf final, and the buffer is dropped after it.
         let settled = self.settled_spine()?;
-        let held = Zeroizing::new(self.buffer.as_bytes().to_vec());
+        let held = HeldBytes::new(self.buffer.as_bytes().to_vec(), self.wipe_registry.as_ref());
         self.spine = self.spine.replace_range(open.at, end, corrected)?;
         self.draft.forget(open.at);
         self.sealed_bytes += u64::try_from(len).expect("a buffer fits in u64");
         self.next_at = Some(open.at + u64::try_from(len).expect("a buffer fits in u64"));
         self.open = None;
         self.structure_dirty = false;
-        // A seal used to be a floor that cleared the history — and that was D-43: the buffer is
-        // dropped here, so no state behind the seal could produce the bytes it promised, and every
-        // caret move seals (an open leaf's caret is its end), so one arrow key made the typing
-        // before it permanent.
-        //
-        // The floor keeps **one** state instead, and it is the one a user would ask for: the last
-        // mark's. A mark is where the burst being typed began, so the seal turns "everything up to
-        // here is settled, and the last burst is still undoable" into a state that carries the
-        // bytes (`held`) the buffer is about to lose. Only one state is kept on purpose: the marks
-        // of older leaves cannot be honoured against a buffer that a later leaf has since become
-        // (they are lengths, and two leaves can start at the same offset) — the million-keystroke
-        // walk found exactly that as a document cut inside a character.
-        //
-        // With no mark above the seal there is nothing older to keep, so the state is the leaf
-        // itself: one undo takes back what was just written. Roots behind the seal go with it, for
-        // the reason the floor existed — a root recorded before this append names a tree whose open
-        // leaf the append has moved, so restoring it would orphan the segment written here. Redo
-        // goes too: it would name a state the append has already moved past.
         let pending = match self.steps.last() {
             Some(Step::Mark(Mark::Live { at, len: mark })) if *at == open.at => *mark,
             Some(Step::Mark(_)) => 0,
@@ -1094,13 +1387,41 @@ impl<S: SegmentSink> Typing<S> {
             held: Some(held),
         });
         self.undone.clear();
+        self.unarm_buffer();
         self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
             .expect("an empty slab is valid UTF-8");
+        self.arm_buffer();
         Ok(())
     }
 }
 
 impl<S> Typing<S> {
+    fn arm_buffer(&mut self) {
+        if self.buffer_slot.is_some() {
+            return;
+        }
+        if let Some(reg) = &self.wipe_registry {
+            let (ptr, cap) = self.buffer.allocation_range();
+            // SAFETY: `self.buffer` owns `[ptr, ptr + cap)` at a fixed heap address until
+            // `unarm_buffer` unregisters `slot` prior to buffer replacement or `Typing::drop`.
+            self.buffer_slot = unsafe { reg.register(ptr, cap) };
+        }
+    }
+
+    fn unarm_buffer(&mut self) {
+        if let (Some(reg), Some(slot)) = (&self.wipe_registry, self.buffer_slot.take()) {
+            reg.unregister(slot);
+        }
+    }
+
+    /// Attaches a [`WipeRegistry`] so the open typing buffer and every held undo buffer are armed
+    /// for emergency volatile zeroing and automatically unarmed before deallocation (`L-7`).
+    pub fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
+        self.unarm_buffer();
+        self.wipe_registry = Some(registry);
+        self.arm_buffer();
+    }
+
     /// Volatile-zeroes the open typing buffer and every plaintext copy held in the undo/redo
     /// stacks in place, returning the total capacity bytes scrubbed (`L-7`).
     pub fn wipe_in_place(&mut self) -> usize {
@@ -1110,14 +1431,7 @@ impl<S> Typing<S> {
                 held: Some(bytes), ..
             } = step
             {
-                let cap = bytes.capacity();
-                let ptr = bytes.as_mut_ptr();
-                for offset in 0..cap {
-                    // SAFETY: `bytes` owns `cap` allocated bytes.
-                    unsafe { ptr.add(offset).write_volatile(0) };
-                }
-                bytes.clear();
-                wiped = wiped.saturating_add(cap);
+                wiped = wiped.saturating_add(bytes.wipe_in_place());
             }
         }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
@@ -1126,6 +1440,12 @@ impl<S> Typing<S> {
         self.draft.clear();
         self.open = None;
         wiped
+    }
+}
+
+impl<S> Drop for Typing<S> {
+    fn drop(&mut self) {
+        self.unarm_buffer();
     }
 }
 

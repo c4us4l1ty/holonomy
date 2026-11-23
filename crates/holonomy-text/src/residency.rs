@@ -18,8 +18,28 @@
 //! The source of plaintext is a trait so the Spine does not depend on the world-line: in
 //! production it is `holonomy-line`'s `WorldLine` opening one sealed segment at a time.
 
+use std::sync::Arc;
+
 use crate::slab::SegmentId;
 use crate::text::SlabText;
+
+/// Zero-crypto hook allowing an external lock-free reaper (such as `holonomy-seal`'s
+/// `SecretArenas`) to register live resident plaintext allocations at birth and unregister them
+/// before heap deallocation (`L-7`, while keeping `holonomy-text` free of crypto crates per
+/// `RFC-001 §1`).
+pub trait WipeRegistry: Send + Sync {
+    /// Registers `[ptr, ptr + len)` as a live mutable plaintext allocation and returns an opaque
+    /// slot index when armed.
+    ///
+    /// # Safety
+    ///
+    /// `[ptr, ptr + len)` must remain valid for volatile zero writes at that exact address until
+    /// [`Self::unregister`] returns for the returned slot index.
+    unsafe fn register(&self, ptr: *mut u8, len: usize) -> Option<usize>;
+
+    /// Unregisters a previously armed `slot` before the backing allocation is freed.
+    fn unregister(&self, slot: usize);
+}
 
 /// A supplier of sealed-segment plaintext — the world-line, in production.
 pub trait SegmentSource {
@@ -91,6 +111,29 @@ struct Entry {
     segment: SegmentId,
     text: SlabText,
     last_used: u64,
+    wipe_slot: Option<(Arc<dyn WipeRegistry>, usize)>,
+}
+
+impl Entry {
+    fn arm(&mut self, registry: &Arc<dyn WipeRegistry>) {
+        if self.wipe_slot.is_some() {
+            return;
+        }
+        let (ptr, cap) = self.text.allocation_range();
+        // SAFETY: `self.text` owns `[ptr, ptr + cap)` at a fixed heap address (`SlabText` never
+        // reallocates), and `Entry::drop` unregisters `slot` before `self.text` is dropped.
+        if let Some(slot) = unsafe { registry.register(ptr, cap) } {
+            self.wipe_slot = Some((Arc::clone(registry), slot));
+        }
+    }
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        if let Some((registry, slot)) = self.wipe_slot.take() {
+            registry.unregister(slot);
+        }
+    }
 }
 
 /// A hard-bounded, least-recently-used set of decrypted, editable segments.
@@ -100,6 +143,7 @@ pub struct ResidentSet<S: SegmentSource> {
     slack_bytes: usize,
     clock: u64,
     entries: Vec<Entry>,
+    wipe_registry: Option<Arc<dyn WipeRegistry>>,
 }
 
 impl<S: SegmentSource> ResidentSet<S> {
@@ -119,7 +163,17 @@ impl<S: SegmentSource> ResidentSet<S> {
             slack_bytes,
             clock: 0,
             entries: Vec::new(),
+            wipe_registry: None,
         })
+    }
+
+    /// Attaches a [`WipeRegistry`] so every currently resident and subsequently faulted-in slab is
+    /// armed for emergency volatile zeroing and automatically unarmed on LRU eviction or drop.
+    pub fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
+        for entry in &mut self.entries {
+            entry.arm(&registry);
+        }
+        self.wipe_registry = Some(registry);
     }
 
     /// The configured budget in bytes of **allocated capacity**.
@@ -283,11 +337,16 @@ impl<S: SegmentSource> ResidentSet<S> {
             drop(evicted);
         }
         self.clock += 1;
-        self.entries.push(Entry {
+        let mut entry = Entry {
             segment,
             text,
             last_used: self.clock,
-        });
+            wipe_slot: None,
+        };
+        if let Some(registry) = &self.wipe_registry {
+            entry.arm(registry);
+        }
+        self.entries.push(entry);
         Ok(self.entries.len() - 1)
     }
 

@@ -68,6 +68,24 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-81 — Ribbon and live-reaper work is a draft, not a closed gate.**
+  Cross-crate review found two release blockers in the current working tree:
+  (1) `SecretArenas` prevents a registered allocation from being freed during `wipe`, but its
+  slot state does not prevent the editor from reading or writing that allocation concurrently.
+  A dead-man trip can therefore race with normal plaintext or key access; volatile accesses do
+  not make that data race safe. Canary sampling can race with wiping for the same reason. The
+  app wiring must not be considered safe until ownership/access is synchronized or the editor
+  is quiesced before any registered data is wiped, with tests for trip/edit races.
+  (2) `Typing::replace_all` calls `append_segment` for replacement chunks before committing the
+  final manifest. The production sink publishes each append in the active document, so a crash
+  or later failure can expose a partial replacement transaction. It also swaps the in-memory root
+  before the final commit succeeds. Replace-all needs a single atomic sink operation and failure
+  injection/reopen coverage before its atomicity claim is valid.
+  The 30 M-word test uses a generated `SegmentSource`, not an encrypted world-line, and checking
+  only `ResidentSet::resident_bytes()` does not bound the search seam buffers or match list. No
+  Block 7 gate is claimed by this draft. Local Rust tools are unavailable; compilation, lint,
+  formatting and the new tests have not been verified.
+
 - **2026-11-22 — D-80 — Cross-crate bug hunt closed split-BiDi selection rendering, multi-leaf
   `ParagraphContext` and `Carry` invariants, UAX #9 `P2`/`L1.4` edge cases, reaper provenance and
   timestamp ordering, and residual plaintext buffers.**

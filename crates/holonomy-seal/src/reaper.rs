@@ -15,8 +15,8 @@
 use core::hint::spin_loop;
 use core::ptr::{read_volatile, slice_from_raw_parts_mut, write_volatile, NonNull};
 use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, OnceLock};
+use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 /// Maximum simultaneously armed secret/slab/canary arenas (`2048` covers a full 4 MiB viewport of
@@ -32,6 +32,24 @@ const SLOT_UNREGISTERING: usize = 4;
 /// Opaque handle to one armed slot inside [`SecretArenas`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArenaSlot(usize);
+
+impl ArenaSlot {
+    /// Returns the slot's zero-based index (`0..MAX_ARENAS`).
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0
+    }
+
+    /// Reconstructs an [`ArenaSlot`] from a raw index when `index < MAX_ARENAS`.
+    #[must_use]
+    pub const fn from_index(index: usize) -> Option<Self> {
+        if index < MAX_ARENAS {
+            Some(Self(index))
+        } else {
+            None
+        }
+    }
+}
 
 struct Slot {
     state: AtomicUsize,
@@ -322,6 +340,18 @@ impl CanarySet {
         armed
     }
 
+    /// How many canary buffers this set holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slabs.len()
+    }
+
+    /// Whether this canary set holds no buffers.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slabs.is_empty()
+    }
+
     /// Volatile-reads every canary buffer and counts surviving non-zero ghost bytes.
     ///
     /// Zero allocations, zero locks, zero syscalls — safe to call on the emergency reaper path.
@@ -390,6 +420,7 @@ pub struct Tripwire {
     tripped_at_ns: AtomicU64,
     explicit_reason: AtomicU8,
     deadman_timeout_ns: u64,
+    reaper_thread: OnceLock<Thread>,
 }
 
 impl Tripwire {
@@ -405,6 +436,7 @@ impl Tripwire {
             tripped_at_ns: AtomicU64::new(0),
             explicit_reason: AtomicU8::new(0),
             deadman_timeout_ns: timeout_ns,
+            reaper_thread: OnceLock::new(),
         })
     }
 
@@ -432,6 +464,9 @@ impl Tripwire {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        if let Some(watcher) = self.reaper_thread.get() {
+            watcher.unpark();
+        }
     }
 
     /// Evaluates whether the tripwire has fired at the current monotonic instant.
@@ -518,6 +553,7 @@ impl ReaperGuard {
             .name("holonomy-reaper".to_owned())
             .spawn(move || {
                 let sched_class = promote_realtime();
+                let _ = tripwire.reaper_thread.set(thread::current());
                 sched_bg.store(sched_class as u8, Ordering::Release);
 
                 while !stop_bg.load(Ordering::Acquire) {
@@ -536,7 +572,7 @@ impl ReaperGuard {
                             trip_to_verified_ns: verified_ns.saturating_sub(tripped_at_ns),
                         });
                     }
-                    thread::sleep(poll_interval);
+                    thread::park_timeout(poll_interval);
                 }
                 None
             })
@@ -583,6 +619,7 @@ impl Drop for ReaperGuard {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
             let _ = handle.join();
         }
     }
@@ -653,5 +690,34 @@ mod tests {
                 "observed clamped timestamp {at} < {min_expected}"
             );
         }
+    }
+
+    #[test]
+    fn idle_reaper_parks_without_polling_and_wakes_on_fire_or_drop() {
+        let arenas = SecretArenas::new();
+        let canaries = Arc::new(CanarySet::new(2, 256));
+        let tripwire = Tripwire::new(None);
+        let guard = ReaperGuard::spawn(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_secs(3_600),
+        );
+        let started = Instant::now();
+        drop(guard);
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let tripwire = Tripwire::new(None);
+        let guard = ReaperGuard::spawn(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_secs(3_600),
+        );
+        let started = Instant::now();
+        tripwire.fire(TripReason::Manual);
+        let outcome = guard.wait_outcome().expect("tripwire fired");
+        assert_eq!(outcome.reason, TripReason::Manual);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

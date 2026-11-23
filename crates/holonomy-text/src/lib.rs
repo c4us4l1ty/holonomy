@@ -55,7 +55,9 @@
 
 pub mod commit;
 pub mod draft;
+pub mod formatting;
 pub mod residency;
+pub mod search;
 pub mod select;
 pub mod slab;
 pub mod source;
@@ -66,7 +68,12 @@ pub mod typing;
 
 pub use commit::{commit_slab, Appended, CommitError, Committed, SegmentSink, Witness};
 pub use draft::{Draft, DraftError, LiveHit, LiveSpan};
-pub use residency::{ResidencyError, ResidentSet, SegmentSource};
+pub use formatting::{
+    Alignment, DocStyle, DocStyleSpan, FontFamily, Heading, ListKind, StyleMap, StylePatch,
+    ToolbarState, TriState,
+};
+pub use residency::{ResidencyError, ResidentSet, SegmentSource, WipeRegistry};
+pub use search::{find_streaming, SearchError, SearchMatch};
 pub use select::{copy, CopyError, Selection};
 pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
 pub use source::{is_provisional, Location, OpenSources, SealError};

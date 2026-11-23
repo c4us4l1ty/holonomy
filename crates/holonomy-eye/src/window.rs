@@ -266,6 +266,15 @@ impl WindowText {
         self.leaves
     }
 
+    /// Returns `(ptr, capacity)` of the backing allocation for [`holonomy_text::WipeRegistry`]
+    /// registration without altering UTF-8 length or capacity.
+    #[must_use]
+    pub fn allocation_range(&mut self) -> (*mut u8, usize) {
+        // SAFETY: reading `(as_mut_ptr, capacity)` does not mutate any UTF-8 bytes or length.
+        let vec = unsafe { self.text.as_mut_vec() };
+        (vec.as_mut_ptr(), vec.capacity())
+    }
+
     /// Volatile-zeroes this window's assembled plaintext capacity in place (`L-7`).
     pub fn wipe_in_place(&mut self) -> usize {
         // SAFETY: `wipe_byte_vec` clears the vector to length `0`, which is valid UTF-8.

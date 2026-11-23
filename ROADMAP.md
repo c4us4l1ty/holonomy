@@ -384,6 +384,11 @@ v3 died bolting a Wordcraft-shaped ribbon onto split geometry. v6 puts the toolb
 5's single geometry and the Block 1 UI spec — same visual language, none of the split-brain. It
 sits above the quiet-md page Block 6 installs, in the same window, in the same run tree.
 
+**Draft status (2026-11-22):** implementation is in progress; none of the gates below is claimed.
+The current replace-all commit path is not crash-atomic and the live reaper wiring has unresolved
+concurrent-access safety issues. The 30 M-word search test does not yet measure total working memory
+or use an encrypted world-line. See AUDIT D-81 before using or shipping this draft.
+
 **Deliverables**
 - Toolbar per spec: font family/size, bold/italic/underline/strike, headings 1–3, alignment,
   lists (real list structure — not v3's literal-prefix `- ` fake), link, horizontal rule,

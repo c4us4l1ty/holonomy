@@ -17,7 +17,10 @@
 
 use holonomy_eye::{Fixed, Point, Shaper, Style, View};
 use holonomy_shell::{Editor, Effect, Intent, Move};
-use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
+use holonomy_text::{
+    Alignment, Appended, Heading, ResidentSet, SegmentId, SegmentSink, SegmentSource, StylePatch,
+    Typing,
+};
 
 /// One logical unit per cluster, two for `m` and `中` — as in the other shell tests.
 #[derive(Debug, Default)]
@@ -271,6 +274,18 @@ fn directly(shell: &mut Shell, intent: &Intent) {
         }
         Intent::Flush => shell.flush().expect("flushed"),
         Intent::Reflow => shell.reflow().expect("measured"),
+        Intent::Format(patch) => {
+            shell.format_selection(patch).expect("formatted");
+        }
+        Intent::SetLink(url) => {
+            shell.set_selection_link(url.as_deref()).expect("linked");
+        }
+        Intent::ReplaceAll {
+            needle,
+            replacement,
+        } => {
+            shell.replace_all(needle, replacement).expect("replaced");
+        }
     }
 }
 
@@ -371,4 +386,49 @@ fn a_redraw_is_asked_for_exactly_when_something_changed() {
     // A flush says the bytes landed, and asks for no repaint of its own.
     let effects = shell.apply(Intent::Flush).expect("applied");
     assert_eq!(effects, vec![Effect::Saved], "a flush said the wrong thing");
+}
+
+#[test]
+fn formatting_links_and_replace_all_intents_agree_with_direct_calls() {
+    let mut through_intents = editor();
+    let mut directly_called = editor();
+    for sh in [&mut through_intents, &mut directly_called] {
+        sh.type_text("Heading line\nBody paragraph with target and target.\n")
+            .expect("seeded");
+        sh.reflow().expect("measured");
+    }
+
+    let sequence = [
+        Intent::SelectAll,
+        Intent::Format(StylePatch {
+            bold: Some(true),
+            heading: Some(Heading::H2),
+            alignment: Some(Alignment::Center),
+            ..StylePatch::default()
+        }),
+        Intent::SetLink(Some("https://example.org/spec".to_owned())),
+        Intent::ReplaceAll {
+            needle: "target".to_owned(),
+            replacement: "witness".to_owned(),
+        },
+        Intent::Undo,
+        Intent::Undo,
+        Intent::Redo,
+        Intent::Redo,
+    ];
+
+    for (idx, intent) in sequence.iter().enumerate() {
+        through_intents.apply(intent.clone()).expect("applied");
+        directly(&mut directly_called, intent);
+        assert_eq!(
+            state(&mut through_intents),
+            state(&mut directly_called),
+            "rich-text step {idx} ({intent:?}) diverged from direct call"
+        );
+        assert_eq!(
+            through_intents.toolbar_state(),
+            directly_called.toolbar_state(),
+            "toolbar_state diverged at step {idx}"
+        );
+    }
 }

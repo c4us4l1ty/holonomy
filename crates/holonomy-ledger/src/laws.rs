@@ -170,7 +170,9 @@ pub const BUDGETS: &[Budget] = &[
         law: "L-2",
         measured_by: Some(
             "`holonomy-text` tests::open_memory asserts the ResidentSet bound at two sizes; \
-             tests::keystroke_allocations counts zero allocations on the keystroke path",
+             tests::keystroke_allocations counts zero allocations on the keystroke path; \
+             tests::ribbon_gate streams find and replace-all over 30 M words without widening \
+             ResidentSet",
         ),
         owes: "nothing for the plaintext bound itself — this is the one row whose measured half \
                is the whole claim, and the index is separate (D-36)",
@@ -210,7 +212,9 @@ pub const BUDGETS: &[Budget] = &[
         law: "L-7",
         measured_by: Some(
             "`holonomy-text` tests::wipe_gate fires the reaper across a 4 MiB ResidentSet, live \
-             capability keys and 32 zeroize canaries and prints HOLONOMY_WIPE_GATE",
+             capability keys and 32 zeroize canaries and prints HOLONOMY_WIPE_GATE; \
+             `holonomy-gui` arms `SecretArenas`/`ReaperGuard` across live `Document`, \
+             `ResidentSet`, `Typing`, and `WindowText` with `Ctrl+G` evidence (`tests::panel`)",
         ),
         owes: "OS suspend / USB-yank hooks wired into the shipped window and reference-hardware \
                calibration — Block 9's OS shell and Block 10",

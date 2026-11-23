@@ -24,6 +24,7 @@
 //! a counting allocator. The engine therefore does not claim that editing is allocation-free; it
 //! claims that *typing* is, and that the cost of sealing is paid in one place.
 
+use crate::formatting::StyleMap;
 use crate::slab::{SegmentId, Slab, SlabHit, SlabSpan};
 use crate::spine::{Spine, SpineError};
 use crate::text::SlabText;
@@ -84,6 +85,37 @@ pub trait SegmentSink {
     /// A human-readable message when the sink cannot persist the spine geometry.
     fn commit_spine(&mut self, _slabs: &[Slab]) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Seals `plaintext` as one new segment alongside the resolved spine slabs around it and the
+    /// active rich-text [`StyleMap`].
+    ///
+    /// By default delegates to [`Self::append_segment_with_spine`]; world-line sinks override this
+    /// to write v2 styled manifests when `styles` is non-empty.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message when the sink refuses the append or its manifest.
+    fn append_segment_with_manifest(
+        &mut self,
+        plaintext: &[u8],
+        before: &[Slab],
+        after: &[Slab],
+        _styles: &StyleMap,
+    ) -> Result<Appended, String> {
+        self.append_segment_with_spine(plaintext, before, after)
+    }
+
+    /// Commits `slabs` and `styles` as the active document manifest without appending segment
+    /// bytes.
+    ///
+    /// By default delegates to [`Self::commit_spine`].
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message when the sink cannot persist the manifest.
+    fn commit_manifest(&mut self, slabs: &[Slab], _styles: &StyleMap) -> Result<(), String> {
+        self.commit_spine(slabs)
     }
 }
 

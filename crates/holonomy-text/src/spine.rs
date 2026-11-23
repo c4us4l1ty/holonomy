@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use crate::formatting::{DocStyle, DocStyleSpan, StyleMap, StylePatch, ToolbarState};
 use crate::slab::{Slab, SlabHit, SlabSpan};
 use crate::tree::{self, Node};
 
@@ -57,10 +58,11 @@ impl std::fmt::Display for SpineError {
 
 impl std::error::Error for SpineError {}
 
-/// An immutable sequence of slabs describing a document.
+/// An immutable sequence of slabs describing a document, plus its path-copied style layer.
 #[derive(Debug, Clone)]
 pub struct Spine {
     root: Arc<Node>,
+    styles: StyleMap,
 }
 
 impl Default for Spine {
@@ -75,6 +77,7 @@ impl Spine {
     pub fn empty() -> Self {
         Self {
             root: tree::empty(),
+            styles: StyleMap::empty(),
         }
     }
 
@@ -122,13 +125,85 @@ impl Spine {
         coalesced.extend(open);
         Self {
             root: tree::build_balanced(&coalesced),
+            styles: StyleMap::empty(),
         }
     }
 
-    /// Whether `self` and `other` share the exact same root node in O(1).
+    /// Builds a spine from slabs and an initial [`StyleMap`], clamping any out-of-range style runs
+    /// to the resulting document length.
+    #[must_use]
+    pub fn from_slabs_and_styles<I>(slabs: I, styles: StyleMap) -> Self
+    where
+        I: IntoIterator<Item = Slab>,
+    {
+        let mut spine = Self::from_slabs(slabs);
+        if !styles.is_empty() {
+            let (clamped, _) = styles.split(spine.len());
+            spine.styles = clamped;
+        }
+        spine
+    }
+
+    /// Whether `self` and `other` share the exact same root node and style map in O(1).
     #[must_use]
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.root, &other.root)
+        Arc::ptr_eq(&self.root, &other.root) && self.styles.ptr_eq(&other.styles)
+    }
+
+    /// The path-copied rich-text [`StyleMap`] carried by this spine.
+    #[must_use]
+    pub fn styles(&self) -> &StyleMap {
+        &self.styles
+    }
+
+    /// Returns a copy of this spine carrying `styles` (clamped to `0..self.len()`).
+    #[must_use]
+    pub fn with_styles(&self, styles: StyleMap) -> Self {
+        let clamped = if styles.is_empty() {
+            StyleMap::empty()
+        } else {
+            styles.split(self.len()).0
+        };
+        Self {
+            root: Arc::clone(&self.root),
+            styles: clamped,
+        }
+    }
+
+    /// Active [`DocStyle`] at caret `offset`.
+    #[must_use]
+    pub fn style_at(&self, offset: u64) -> DocStyle {
+        self.styles.style_at(offset.min(self.len()))
+    }
+
+    /// Non-default [`DocStyleSpan`]s overlapping `[start, end)`, clipped to `[start, end)`.
+    #[must_use]
+    pub fn style_spans_in(&self, start: u64, end: u64) -> Vec<DocStyleSpan> {
+        self.styles.spans_in(start, end.min(self.len()))
+    }
+
+    /// Computes [`ToolbarState`] for caret (`start == end`) or selection `[start, end)`.
+    #[must_use]
+    pub fn toolbar_state(&self, start: u64, end: u64) -> ToolbarState {
+        self.styles.toolbar_state(self.len(), start, end)
+    }
+
+    /// Applies `patch` over `[start, end)` without cutting any underlying [`Slab`] leaf (`OQ-9`).
+    pub fn apply_style(&self, start: u64, end: u64, patch: &StylePatch) -> Result<Self, SpineError> {
+        let styles = self.styles.apply_patch(self.len(), start, end, patch)?;
+        Ok(Self {
+            root: Arc::clone(&self.root),
+            styles,
+        })
+    }
+
+    /// Sets or clears (`url = None`) a link target over `[start, end)`.
+    pub fn set_link(&self, start: u64, end: u64, url: Option<&str>) -> Result<Self, SpineError> {
+        let styles = self.styles.set_link(self.len(), start, end, url)?;
+        Ok(Self {
+            root: Arc::clone(&self.root),
+            styles,
+        })
     }
 
     /// The document length in bytes.
@@ -159,6 +234,7 @@ impl Spine {
         }
         Self {
             root: tree::join(Arc::clone(&self.root), tree::leaf(slab)),
+            styles: self.styles.clone(),
         }
     }
 
@@ -171,6 +247,7 @@ impl Spine {
     pub fn concat(&self, other: &Self) -> Self {
         Self {
             root: tree::join(Arc::clone(&self.root), Arc::clone(&other.root)),
+            styles: self.styles.concat(self.len(), &other.styles),
         }
     }
 
@@ -192,6 +269,7 @@ impl Spine {
         let (before, after) = tree::split(&self.root, at);
         Ok(Self {
             root: tree::join(tree::join(before, tree::leaf(slab)), after),
+            styles: self.styles.insert_gap(at, u64::from(slab.len())),
         })
     }
 
@@ -211,6 +289,7 @@ impl Spine {
         let (_removed, after) = tree::split(&rest, end - start);
         Ok(Self {
             root: tree::join(before, after),
+            styles: self.styles.remove_range(start, end),
         })
     }
 
@@ -237,6 +316,7 @@ impl Spine {
         };
         Ok(Self {
             root: tree::join(tree::join(before, middle), after),
+            styles: self.styles.replace_range(start, end, u64::from(slab.len())),
         })
     }
 
@@ -249,7 +329,17 @@ impl Spine {
             });
         }
         let (before, after) = tree::split(&self.root, at);
-        Ok((Self { root: before }, Self { root: after }))
+        let (left_styles, right_styles) = self.styles.split(at);
+        Ok((
+            Self {
+                root: before,
+                styles: left_styles,
+            },
+            Self {
+                root: after,
+                styles: right_styles,
+            },
+        ))
     }
 
     /// Finds the slab containing `offset`, in O(log N), or `None` past the end.

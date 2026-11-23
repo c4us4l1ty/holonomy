@@ -1640,6 +1640,90 @@ fn compact_active_to_erases_deleted_bytes_and_resets_manifest() {
     assert_eq!(compacted.verify().unwrap().plaintext_bytes_verified, 10);
 }
 
+#[test]
+fn styled_manifest_roundtrips_and_survives_active_compaction() {
+    let source = temp_path("styled-manifest-source");
+    let destination = temp_path("styled-manifest-compacted");
+    let salt = [0x66; 64];
+    let params = test_params();
+    let keys = MasterKeys::derive(b"styled manifest", &salt, None, ParamsClass::Test).unwrap();
+    let (old_capsule, old_dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
+    let old_header = test_header(salt, old_capsule);
+    let old_file_id = *old_header.file_id();
+    let mut line = WorldLine::create(&source.0, old_header, old_dem.duplicate()).unwrap();
+
+    let manifest = LineManifest {
+        slabs: vec![LineSlab {
+            segment: 0,
+            start: 7,
+            len: 11,
+        }],
+        styles: vec![
+            LineStyleRun {
+                start: 0,
+                end: 5,
+                flags: 0x05,
+                family: 1,
+                heading: 2,
+                alignment: 1,
+                list_kind: 0,
+                list_depth: 0,
+                blockquote: 0,
+                size_milli: 1_550,
+                list_start: 0,
+                link_id: 0,
+            },
+            LineStyleRun {
+                start: 6,
+                end: 11,
+                flags: 0x02,
+                family: 0,
+                heading: 0,
+                alignment: 0,
+                list_kind: 2,
+                list_depth: 1,
+                blockquote: 1,
+                size_milli: 1_000,
+                list_start: 1,
+                link_id: 1,
+            },
+        ],
+        links: vec!["https://example.invalid/spec".to_owned()],
+    };
+    line.append_segments_with_full_manifest(&[&b"draft: hello world"[..]], &manifest)
+        .unwrap();
+
+    let reopened = WorldLine::open(&source.0, old_dem.duplicate()).unwrap();
+    assert_eq!(reopened.document_manifest(), manifest);
+    assert_eq!(reopened.verify().unwrap().segments_verified, 1);
+
+    let mut out_of_bounds = manifest.clone();
+    out_of_bounds.styles[1].end = 12;
+    assert!(matches!(
+        line.commit_full_manifest(&out_of_bounds),
+        Err(LineError::InvalidManifest(_))
+    ));
+
+    let approval = holonomy_seal::confirm_compaction(
+        b"styled manifest",
+        &salt,
+        None,
+        &params,
+        keys.unwrap_key(),
+        &old_file_id,
+    )
+    .unwrap();
+    let (new_capsule, new_dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
+    let new_header = test_header(salt, new_capsule);
+    let compacted = reopened
+        .compact_active_to(&destination.0, new_header, &new_dem, approval)
+        .unwrap();
+    let compacted_manifest = compacted.document_manifest();
+    assert_eq!(compacted_manifest.styles, manifest.styles);
+    assert_eq!(compacted_manifest.links, manifest.links);
+    assert_eq!(&compacted.open_segment(0).unwrap()[..], b"hello world");
+}
+
 struct GuardedReader {
     cursor: Cursor<Vec<u8>>,
     forbidden: Vec<Range<u64>>,
