@@ -9,9 +9,12 @@
 //! Block 3 (`holonomy-line`) will hold a [`DEMKey`] from unlock to lock and request segment
 //! sealing/opening through it; at no point does the world-line crate learn what the key *is*.
 
+use std::sync::Arc;
+
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::lock::LockReport;
+use crate::reaper::SecretArenas;
 use crate::secret::LockedSecret;
 
 /// The document-encryption key capability. Seals and opens segment payloads and witness
@@ -54,6 +57,17 @@ impl DEMKey {
             inner: LockedSecret::new(*self.expose()),
         }
     }
+
+    /// Arms this key cell in `arenas` for emergency reaper zeroization without exposing key bytes.
+    pub fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
+        self.inner.arm_reaper(arenas)
+    }
+
+    /// Whether an emergency wipe has zeroed every byte of this key cell in place.
+    #[must_use]
+    pub fn is_zeroized(&self) -> bool {
+        self.inner.is_zeroized()
+    }
 }
 
 impl core::fmt::Debug for DEMKey {
@@ -87,6 +101,17 @@ impl UnwrapKey {
     /// The memory-ladder state for this token's cell.
     pub fn memory_report(&self) -> LockReport {
         self.inner.report()
+    }
+
+    /// Arms this key cell in `arenas` for emergency reaper zeroization without exposing key bytes.
+    pub fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
+        self.inner.arm_reaper(arenas)
+    }
+
+    /// Whether an emergency wipe has zeroed every byte of this key cell in place.
+    #[must_use]
+    pub fn is_zeroized(&self) -> bool {
+        self.inner.is_zeroized()
     }
 }
 

@@ -76,6 +76,8 @@
 //! recorded over pending typing would name a leaf whose bytes undo discards, so a root step records
 //! the **settled** tree — the one without the open leaf (D-17).
 
+use zeroize::Zeroizing;
+
 use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
 use crate::slab::{SegmentId, Slab, SlabSpan};
@@ -211,8 +213,10 @@ enum Step {
         /// A seal appends the open leaf and drops the buffer it lived in, so a copy is the only
         /// thing an undo can re-attach the text from. `None` for the two states where the buffer is
         /// still the live one — a root recorded before a cut, and a state recorded on the way out of
-        /// an undo — where copying would be a copy of bytes already in hand.
-        held: Option<Vec<u8>>,
+        /// an undo — where copying would be a copy of bytes already in hand. Wrapped in
+        /// [`Zeroizing`] so trimming, clearing, or dropping undo/redo history wipes the plaintext
+        /// before returning the allocation to the heap.
+        held: Option<Zeroizing<Vec<u8>>>,
     },
 }
 
@@ -495,6 +499,11 @@ impl<S: SegmentSink> Typing<S> {
                     self.document_len(),
                     "the settled tree and the open bytes do not add up to the document"
                 );
+                let held = if pending > 0 {
+                    Some(Zeroizing::new(self.buffer.as_bytes().to_vec()))
+                } else {
+                    None
+                };
                 Step::Root {
                     spine,
                     at: self.open.map_or_else(|| self.caret(), |open| open.at),
@@ -502,7 +511,7 @@ impl<S: SegmentSink> Typing<S> {
                     // The bytes travel with the state. A redo can land after a seal has replaced
                     // the buffer with another leaf's, so a length alone would point into the wrong
                     // text (found by the million-keystroke walk when a seal stopped being a floor).
-                    held: (pending > 0).then(|| self.buffer.as_bytes().to_vec()),
+                    held,
                 }
             }
         };
@@ -603,7 +612,7 @@ impl<S: SegmentSink> Typing<S> {
         spine: Spine,
         at: u64,
         pending: usize,
-        held: Option<Vec<u8>>,
+        held: Option<Zeroizing<Vec<u8>>>,
     ) -> Result<(), TypingError> {
         self.structure_dirty = true;
         if let Some(open) = self.open {
@@ -616,13 +625,13 @@ impl<S: SegmentSink> Typing<S> {
         debug_assert!(
             pending == 0 || held.is_some(),
             "a state with open bytes carries them ({pending} open, {held:?})",
-            held = held.as_ref().map(Vec::len)
+            held = held.as_ref().map(|bytes| bytes.len())
         );
-        if let Some(held) = held {
+        if let Some(mut held) = held {
             // The copy is what the leaf comes back from: a seal has replaced the buffer with
             // another leaf's, and even without a seal the state a redo lands in need not be the one
             // the bytes were typed into. They came from a buffer of this capacity, so they fit.
-            self.buffer = SlabText::from_plaintext(held, self.capacity)
+            self.buffer = SlabText::from_plaintext(core::mem::take(&mut *held), self.capacity)
                 .expect("the bytes came from a buffer of this capacity");
         }
         if pending > 0 {
@@ -1047,7 +1056,7 @@ impl<S: SegmentSink> Typing<S> {
         // The state being sealed, kept so an undo can come back to it (D-43). It has to be taken
         // now: the replace below is what makes the leaf final, and the buffer is dropped after it.
         let settled = self.settled_spine()?;
-        let held = self.buffer.as_bytes().to_vec();
+        let held = Zeroizing::new(self.buffer.as_bytes().to_vec());
         self.spine = self.spine.replace_range(open.at, end, corrected)?;
         self.draft.forget(open.at);
         self.sealed_bytes += u64::try_from(len).expect("a buffer fits in u64");
@@ -1088,6 +1097,35 @@ impl<S: SegmentSink> Typing<S> {
         self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
             .expect("an empty slab is valid UTF-8");
         Ok(())
+    }
+}
+
+impl<S> Typing<S> {
+    /// Volatile-zeroes the open typing buffer and every plaintext copy held in the undo/redo
+    /// stacks in place, returning the total capacity bytes scrubbed (`L-7`).
+    pub fn wipe_in_place(&mut self) -> usize {
+        let mut wiped = self.buffer.wipe_in_place();
+        for step in self.steps.iter_mut().chain(self.undone.iter_mut()) {
+            if let Step::Root {
+                held: Some(bytes), ..
+            } = step
+            {
+                let cap = bytes.capacity();
+                let ptr = bytes.as_mut_ptr();
+                for offset in 0..cap {
+                    // SAFETY: `bytes` owns `cap` allocated bytes.
+                    unsafe { ptr.add(offset).write_volatile(0) };
+                }
+                bytes.clear();
+                wiped = wiped.saturating_add(cap);
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        self.steps.clear();
+        self.undone.clear();
+        self.draft.clear();
+        self.open = None;
+        wiped
     }
 }
 
@@ -2147,5 +2185,23 @@ mod tests {
             .last()
             .expect("recorded empty")
             .is_empty());
+    }
+
+    #[test]
+    fn wipe_in_place_scrubs_open_buffer_and_root_history() {
+        let mut typing = Typing::new(SpineRecorder::default(), 64);
+        typing.mark();
+        typing.insert(b"sealed-burst-plaintext").expect("typed");
+        typing.flush().expect("sealed into root history");
+        typing.insert(b"live-tail-plaintext").expect("typed tail");
+        assert_eq!(typing.steps.len(), 1);
+        let wiped = typing.wipe_in_place();
+        assert!(
+            wiped >= 64 + b"sealed-burst-plaintext".len(),
+            "expected both live capacity and held root copy wiped, got {wiped}"
+        );
+        assert!(typing.pending().is_empty());
+        assert!(typing.steps.is_empty());
+        assert!(typing.undone.is_empty());
     }
 }

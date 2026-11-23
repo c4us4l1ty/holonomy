@@ -6,7 +6,7 @@
 //! proof about every caret a frame offers instead of a sample of them.
 
 use holonomy_eye::{layout_styled, Clusters, Fixed, Point, Shaper, Style, StyledText, View};
-use holonomy_shell::Editor;
+use holonomy_shell::{Editor, Move};
 use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -1065,4 +1065,108 @@ fn trimming_a_single_sealed_leaf_recomputes_its_height_and_clamps_scroll() {
     assert_eq!(second_text, "0");
     assert_eq!(shell.heights().total(), Fixed::units(20));
     assert_eq!(shell.scroll(), Fixed::ZERO);
+}
+
+#[test]
+fn multi_leaf_bidi_paragraph_reflow_matches_continuous_layout_and_clicks_round_trip() {
+    let mut shell = session();
+    let chunk = "hello \u{5e9}\u{5dc}\u{5d5}\u{5dd} 42 (\u{645}\u{631}\u{62d}\u{628}\u{627}) \
+                 world \u{5e2}\u{5d5}\u{5dc}\u{5dd} end ";
+    let paragraph = chunk.repeat(3);
+    shell.type_text(&paragraph).expect("typed");
+    shell.flush().expect("sealed");
+    shell.resize(Fixed::units(12), VIEWPORT);
+    shell.reflow().expect("measured");
+    assert!(
+        shell.typing().spine().slab_count() >= 3,
+        "must span multiple leaves"
+    );
+
+    let continuous = layout_styled(StyledText::plain(&paragraph), 0, Fixed::units(12), &Fake);
+    assert_eq!(
+        shell.heights().total(),
+        continuous.height(),
+        "leaf-by-leaf bidi reflow must match continuous paragraph height"
+    );
+
+    // Frame write-back must preserve the exact total height and keep every caret clickable.
+    let boundaries: Vec<(Fixed, Fixed, u64)> = {
+        let frame = shell.frame().expect("frame");
+        let mut out = Vec::new();
+        for line in frame.layout().lines() {
+            for (x, byte) in line.boundaries() {
+                out.push((x, line.top() + Fixed::ONE, byte));
+            }
+        }
+        out
+    };
+    assert_eq!(shell.heights().total(), continuous.height());
+    assert!(!boundaries.is_empty());
+    for (x, y, byte) in boundaries {
+        let clicked = shell
+            .click(Point::new(x, y))
+            .expect("click ok")
+            .expect("caret hit");
+        assert_eq!(clicked.byte, byte, "click on bidi boundary drifted");
+    }
+}
+
+#[test]
+fn frame_write_back_preserves_tail_leaf_height_across_straddling_cluster() {
+    // Leaf 0 (0..64) ends on `e` at byte 63 and Leaf 1 (64..128) begins with U+0301 followed by
+    // multi-line prose at narrow width. `frame()` extends `end` by 2 bytes into Leaf 1 to finish
+    // the straddling grapheme; `Draft::spans_in` clips Leaf 1 to `64..66`, and `measure_window`
+    // must not overwrite Leaf 1's full measured height with that 2-byte prefix's zero height.
+    let mut text = "a".repeat(63);
+    text.push('e');
+    text.push('\u{0301}');
+    text.push_str(&"b".repeat(80));
+
+    let mut shell = session();
+    shell.type_text(&text).expect("typed");
+    shell.flush().expect("sealed");
+    shell.resize(Fixed::units(12), VIEWPORT);
+    shell.reflow().expect("measured");
+
+    let continuous = layout_styled(StyledText::plain(&text), 0, Fixed::units(12), &Fake);
+    assert_eq!(shell.heights().total(), continuous.height());
+
+    shell.frame().expect("frame");
+    assert_eq!(
+        shell.heights().total(),
+        continuous.height(),
+        "clipped tail span must not zero out the next leaf's measured height"
+    );
+}
+
+#[test]
+fn delete_and_right_arrow_at_leaf_boundary_step_one_cluster() {
+    // Leaf 0 (`0..64`) ends on `x` at byte 63 and Leaf 1 (`64..128`) begins on `y` at byte 64.
+    // Neither `Move::Right` nor `delete_forward` at byte 63 may absorb `y` across the leaf seam.
+    let mut text = "a".repeat(63);
+    text.push('x');
+    text.push('y');
+    text.push_str(&"b".repeat(63));
+
+    let mut shell = session();
+    shell.type_text(&text).expect("typed");
+    shell.flush().expect("sealed");
+    shell.reflow().expect("measured");
+
+    shell
+        .click(Point::new(Fixed::units(63), Fixed::ZERO))
+        .expect("clicked");
+    assert_eq!(shell.caret(), 63);
+
+    assert!(shell.move_caret_to(Move::Right, false).expect("right"));
+    assert_eq!(shell.caret(), 64, "right arrow must stop at leaf seam");
+
+    assert!(shell.move_caret_to(Move::Left, false).expect("left"));
+    assert_eq!(shell.caret(), 63);
+    assert!(shell.delete_forward().expect("delete"));
+    assert_eq!(
+        shell.document_len(),
+        127,
+        "delete must remove only one byte"
+    );
 }

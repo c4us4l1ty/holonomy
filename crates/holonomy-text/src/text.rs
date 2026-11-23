@@ -103,20 +103,52 @@ impl SlabText {
     /// If `plaintext.len() + slack` exceeds the maximum allocation size — the same panic
     /// `Vec::reserve` gives, and reachable only by configuring an absurd slack.
     pub fn from_plaintext(plaintext: Vec<u8>, slack: usize) -> Result<Self, TextError> {
+        let mut plaintext = Zeroizing::new(plaintext);
+        let source_cap = plaintext.capacity();
         if std::str::from_utf8(&plaintext).is_err() {
+            if plaintext.len() < source_cap {
+                plaintext.resize(source_cap, 0);
+            }
             return Err(TextError::InvalidUtf8);
         }
-        let mut bytes = Zeroizing::new(plaintext);
-        bytes.reserve(slack);
-        Ok(Self { bytes })
+        let len = plaintext.len();
+        let needed = len
+            .checked_add(slack)
+            .expect("plaintext + slack capacity overflow");
+        if source_cap >= needed {
+            if len < source_cap {
+                plaintext.resize(source_cap, 0);
+                plaintext.truncate(len);
+            }
+            return Ok(Self { bytes: plaintext });
+        }
+        // Allocate the slack-bearing buffer directly instead of calling `Vec::reserve` on
+        // `plaintext`: `reserve` may `realloc`, which frees the old heap block without wiping the
+        // plaintext copy inside it. Zero-initializing `0..needed` also keeps the full capacity
+        // initialized for volatile emergency wipe and verification.
+        let mut bytes = vec![0u8; needed];
+        bytes[..len].copy_from_slice(&plaintext);
+        bytes.truncate(len);
+        if len < source_cap {
+            plaintext.resize(source_cap, 0);
+        }
+        drop(plaintext);
+        Ok(Self {
+            bytes: Zeroizing::new(bytes),
+        })
     }
 
     /// Builds a slab from a `&str` with `slack` spare bytes. Convenience for callers and tests
     /// that already hold text rather than world-line bytes.
     #[must_use]
     pub fn from_text(text: &str, slack: usize) -> Self {
-        let mut bytes = Vec::with_capacity(text.len() + slack);
-        bytes.extend_from_slice(text.as_bytes());
+        let len = text.len();
+        let needed = len
+            .checked_add(slack)
+            .expect("text + slack capacity overflow");
+        let mut bytes = vec![0u8; needed];
+        bytes[..len].copy_from_slice(text.as_bytes());
+        bytes.truncate(len);
         Self {
             bytes: Zeroizing::new(bytes),
         }
@@ -231,6 +263,28 @@ impl SlabText {
         );
         self.bytes.truncate(new_len);
         Ok(())
+    }
+
+    /// Volatile-zeroes the entire backing allocation (`0..capacity`), fences, and clears the
+    /// logical length in place without deallocating. Returns the number of bytes scrubbed.
+    pub fn wipe_in_place(&mut self) -> usize {
+        let cap = self.bytes.capacity();
+        let ptr = self.bytes.as_mut_ptr();
+        for offset in 0..cap {
+            // SAFETY: `ptr` owns `cap` initialized bytes and `SlabText` is exclusively borrowed.
+            unsafe { core::ptr::write_volatile(ptr.add(offset), 0u8) };
+        }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.bytes.clear();
+        cap
+    }
+
+    /// Returns the fixed `(ptr, capacity)` byte range of this slab's backing allocation.
+    ///
+    /// Because `SlabText` never reallocates on `insert` (`WouldSplit`) and never shrinks on
+    /// `delete`, this range remains initialized and pinned at one address until `self` drops.
+    pub fn allocation_range(&mut self) -> (*mut u8, usize) {
+        (self.bytes.as_mut_ptr(), self.bytes.capacity())
     }
 }
 

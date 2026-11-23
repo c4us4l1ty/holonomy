@@ -116,13 +116,25 @@ impl Picture {
             .unwrap_or(&[])
     }
 
-    /// The selection run on line `index`, if any.
-    #[must_use]
-    pub fn selection_on(&self, index: usize) -> Option<SelectionSpan> {
+    /// Every visual selection box on line `index`, in left-to-right order.
+    ///
+    /// A single logical selection across an LTR/RTL transition on a mixed-direction line splits
+    /// into two or more disjoint visual spans (`AUDIT OQ-11`), so renderers iterate this rather
+    /// than assuming one box per line.
+    pub fn selections_on(&self, index: usize) -> impl Iterator<Item = SelectionSpan> + '_ {
         self.selection
             .iter()
             .copied()
-            .find(|span| span.line == index)
+            .filter(move |span| span.line == index)
+    }
+
+    /// The first visual selection run on line `index`, if any.
+    ///
+    /// Prefer [`Self::selections_on`] when rendering: mixed bidirectional lines can carry more
+    /// than one disjoint visual selection box on the same line.
+    #[must_use]
+    pub fn selection_on(&self, index: usize) -> Option<SelectionSpan> {
+        self.selections_on(index).next()
     }
 }
 
@@ -174,9 +186,11 @@ impl<'a> Layout<'a> {
     ///
     /// The ends may be in either order. A selection paints from a cluster's left edge to a
     /// cluster's right edge: a range that ends *inside* a cluster paints the whole cluster, because
-    /// a cluster is atomic and a half-painted grapheme is not a picture of anything. A range that
-    /// covers a hard break paints to the end of the line's content on the line before it and from
-    /// the start of the next line on the line after; the break itself is painted by neither.
+    /// a cluster is atomic and a half-painted grapheme is not a picture of anything. On a mixed
+    /// bidirectional line where a logical byte range splits into non-adjacent visual runs, each
+    /// contiguous visual run is emitted as its own [`SelectionSpan`]. A range that covers a hard
+    /// break paints to the end of the line's content on the line before it and from the start of
+    /// the next line on the line after; the break itself is painted by neither.
     #[must_use]
     pub fn selection_spans(&self, start: u64, end: u64) -> Vec<SelectionSpan> {
         let (start, end) = if start <= end {
@@ -194,13 +208,39 @@ impl<'a> Layout<'a> {
             if from >= to {
                 continue;
             }
-            let x = line.x_at(from);
-            let end_x = line.x_after(to);
-            if end_x > x {
+            let mut open_run: Option<(Fixed, Fixed)> = None;
+            for cluster in line.clusters() {
+                let selected = cluster.byte < to && cluster.byte_end() > from;
+                if selected && cluster.end() > cluster.x {
+                    match open_run {
+                        Some((run_start, run_end)) if run_end == cluster.x => {
+                            open_run = Some((run_start, cluster.end()));
+                        }
+                        Some((run_start, run_end)) => {
+                            spans.push(SelectionSpan {
+                                line: index,
+                                x: run_start,
+                                end: run_end,
+                            });
+                            open_run = Some((cluster.x, cluster.end()));
+                        }
+                        None => {
+                            open_run = Some((cluster.x, cluster.end()));
+                        }
+                    }
+                } else if let Some((run_start, run_end)) = open_run.take() {
+                    spans.push(SelectionSpan {
+                        line: index,
+                        x: run_start,
+                        end: run_end,
+                    });
+                }
+            }
+            if let Some((run_start, run_end)) = open_run {
                 spans.push(SelectionSpan {
                     line: index,
-                    x,
-                    end: end_x,
+                    x: run_start,
+                    end: run_end,
                 });
             }
         }

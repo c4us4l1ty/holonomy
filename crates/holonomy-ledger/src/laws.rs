@@ -208,8 +208,12 @@ pub const BUDGETS: &[Budget] = &[
     Budget {
         vision: "Wipe: everything readable, wiped in milliseconds and *proven* gone",
         law: "L-7",
-        measured_by: None,
-        owes: "Block 9 entirely: the reaper fire test, the canary ghosts and the counted wipe",
+        measured_by: Some(
+            "`holonomy-text` tests::wipe_gate fires the reaper across a 4 MiB ResidentSet, live \
+             capability keys and 32 zeroize canaries and prints HOLONOMY_WIPE_GATE",
+        ),
+        owes: "OS suspend / USB-yank hooks wired into the shipped window and reference-hardware \
+               calibration — Block 9's OS shell and Block 10",
     },
     Budget {
         vision: "Portability: one passphrase, one file, any machine, no account",
@@ -356,9 +360,9 @@ mod tests {
         }
         let unmeasured = BUDGETS.iter().filter(|b| b.measured_by.is_none()).count();
         assert_eq!(
-            unmeasured, 2,
-            "exactly two budgets (L-7 wipe, L-9 portability) have no harness; if one gains or \
-             loses one, update this count and the prose that quotes it"
+            unmeasured, 1,
+            "exactly one budget (L-9 portability) has no harness; if one gains or loses one, \
+             update this count and the prose that quotes it"
         );
     }
 }

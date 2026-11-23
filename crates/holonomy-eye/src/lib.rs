@@ -43,16 +43,15 @@
 //! L-8 still carries `status: spec`, and the crate says why rather than leaving it to a reader. The
 //! segmentation *rules* are the standard's, applied in order, and the **property data** they read
 //! is generated from the Unicode Character Database (`scripts/gen-cluster-tables.py` writes
-//! `cluster.rs`'s tables), so a mark from any script joins its base, not only the scripts this
-//! UI's spec names. The rules run through GB13, Unicode 15.1's Indic conjunct rule included (AUDIT
-//! D-28). One thing is still outside it: **BiDi reordering**, not attempted at all — but its
-//! absence is narrower than it sounds, and the width was measured (AUDIT D-66): segmentation is
-//! already honest for right-to-left scripts, so a caret never lands inside a Hebrew or Arabic
-//! grapheme; what is missing is visual *order*, because `layout.rs` places every cluster at
-//! `x += advance`. `tests/script_gate.rs` asserts the first and prints the size of the second.
-//! The run tree is also built from a whole window of text, so nothing here yet constrains shaping
-//! cost to the viewport. Those are Block 5's remaining gates, not this crate's footnotes.
+//! `cluster/tables.rs`), so a mark from any script joins its base, not only the scripts this UI's
+//! spec names. The rules run through GB13, Unicode 15.1's Indic conjunct rule included (AUDIT
+//! D-28). Per-paragraph bidirectional resolution and per-line visual reordering follow UAX #9
+//! (`bidi.rs` + `bidi/tables.rs`, generated from UCD 18.0.0 by `scripts/gen-bidi-tables.py`),
+//! preserving L-8's single-geometry bijection across RTL and mixed-direction lines (AUDIT OQ-11).
+//! Complex-script glyph shaping (`GSUB`/`GPOS` beyond `Face`'s `cmap`/`hmtx` metrics, `OQ-24`) and
+//! reference-hardware certification remain open before L-8 promotes from `spec` to `gated`.
 
+mod bidi;
 mod cluster;
 mod face;
 mod geom;
@@ -64,13 +63,14 @@ mod style;
 mod view;
 mod window;
 
+pub use crate::bidi::ParagraphContext;
 pub use crate::cluster::{cluster_cells, ClusterContext, Clusters};
 pub use crate::face::{Face, FaceError};
 pub use crate::geom::{Fixed, Point};
 pub use crate::heights::{HeightModel, Window};
 pub use crate::layout::{
-    layout_styled, layout_styled_continuing, layout_styled_from, layout_window, Caret, Layout,
-    Line, Placed,
+    layout_styled, layout_styled_continuing, layout_styled_from, layout_styled_in_paragraph,
+    layout_window, Caret, Layout, Line, Placed,
 };
 pub use crate::picture::{Picture, PictureCluster, PictureLine, SelectionSpan};
 pub use crate::shaper::Shaper;

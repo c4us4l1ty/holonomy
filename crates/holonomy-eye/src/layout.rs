@@ -14,18 +14,15 @@
 //! first cluster of the next line. Offering both would give one byte two visual positions, and a
 //! caret that can be in two places is exactly the drift this block exists to prevent.
 //!
-//! # What is not here yet
+//! # Direction and wrapping
 //!
-//! BiDi reordering, style runs, word wrapping and the Spine window (which slab supplies the text)
-//! are later slices. The layout takes the window's text and its document offset, which is all the
-//! arithmetic needs — and all a test needs to build the whole tree.
-//!
-//! **Placement is strictly logical order** — every cluster at `x += advance`, nothing reversed.
-//! For left-to-right text that is the visual order; for a right-to-left run it is not, and the
-//! difference is the deferral AUDIT OQ-11 records and `tests/script_gate.rs` measures rather than
-//! describes. Segmentation is unaffected: a caret may not be placed inside a cluster in either
-//! direction, and that half is asserted there.
+//! Paragraph embedding levels and explicit/weak/neutral runs follow UAX #9 (`bidi.rs`). Lines wrap
+//! greedily between clusters in logical order first, and each wrapped line reorders its clusters
+//! (`L1.4`, `L2`) into visual left-to-right order while pairing every logical cluster boundary
+//! bijectively onto the line's visual boundary positions so L-8 holds across LTR, RTL, and mixed
+//! bidirectional text (AUDIT OQ-11). Word-level break opportunities remain a separate concern.
 
+use crate::bidi::{reorder_line, BidiClass, ParagraphContext, ResolvedParagraph, WindowBidi};
 use crate::cluster::{ClusterContext, Clusters};
 use crate::geom::{Fixed, Point};
 use crate::shaper::Shaper;
@@ -67,6 +64,7 @@ pub struct Line<'a> {
     top: Fixed,
     height: Fixed,
     clusters: Vec<Placed<'a>>,
+    bidi_boundaries: Option<Vec<(Fixed, u64)>>,
     start_byte: u64,
     end_byte: u64,
     end_x: Fixed,
@@ -75,6 +73,28 @@ pub struct Line<'a> {
     /// continuation — so the window's first byte is inside a cluster and is not a caret position
     /// (AUDIT OQ-17). Only ever set on the first line.
     continues_cluster: bool,
+}
+
+enum BoundaryIter<'a> {
+    Logical {
+        clusters: core::slice::Iter<'a, Placed<'a>>,
+        end: Option<(Fixed, u64)>,
+    },
+    Reordered(core::slice::Iter<'a, (Fixed, u64)>),
+}
+
+impl Iterator for BoundaryIter<'_> {
+    type Item = (Fixed, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Logical { clusters, end } => clusters
+                .next()
+                .map(|cluster| (cluster.x, cluster.byte))
+                .or_else(|| end.take()),
+            Self::Reordered(iter) => iter.next().copied(),
+        }
+    }
 }
 
 impl<'a> Line<'a> {
@@ -137,13 +157,14 @@ impl<'a> Line<'a> {
     /// This is the one list both directions of the geometry walk. A line has a boundary before
     /// each cluster, plus its end position when the line ends in a hard break.
     pub fn boundaries(&self) -> impl Iterator<Item = (Fixed, u64)> + '_ {
+        if let Some(ref bounds) = self.bidi_boundaries {
+            return BoundaryIter::Reordered(bounds.iter());
+        }
         let skip = usize::from(self.continues_cluster);
-        let starts = self
-            .clusters
-            .iter()
-            .skip(skip)
-            .map(|cluster| (cluster.x, cluster.byte));
-        starts.chain(self.has_end.then_some((self.end_x, self.end_byte)))
+        BoundaryIter::Logical {
+            clusters: self.clusters[skip.min(self.clusters.len())..].iter(),
+            end: self.has_end.then_some((self.end_x, self.end_byte)),
+        }
     }
 
     /// The x where the cluster holding `byte` begins, or the line's own start when `byte` is before
@@ -154,6 +175,18 @@ impl<'a> Line<'a> {
     /// line's content ends.
     #[must_use]
     pub fn x_at(&self, byte: u64) -> Fixed {
+        if byte >= self.end_byte {
+            return self.end_x;
+        }
+        if self.bidi_boundaries.is_some() {
+            return self
+                .clusters
+                .iter()
+                .filter(|cluster| cluster.byte <= byte)
+                .max_by_key(|cluster| cluster.byte)
+                .or_else(|| self.clusters.iter().min_by_key(|cluster| cluster.byte))
+                .map_or(Fixed::ZERO, |cluster| cluster.x);
+        }
         let mut x = self
             .clusters
             .first()
@@ -164,17 +197,21 @@ impl<'a> Line<'a> {
             }
             x = cluster.x;
         }
-        if byte >= self.end_byte {
-            self.end_x
-        } else {
-            x
-        }
+        x
     }
 
     /// The x just past the cluster holding `byte` — a cluster is painted whole — or the line's end
     /// when `byte` is at or past its last cluster.
     #[must_use]
     pub fn x_after(&self, byte: u64) -> Fixed {
+        if self.bidi_boundaries.is_some() {
+            return self
+                .clusters
+                .iter()
+                .filter(|cluster| byte < cluster.byte_end())
+                .min_by_key(|cluster| cluster.byte)
+                .map_or(self.end_x, |cluster| cluster.end());
+        }
         for cluster in &self.clusters {
             if byte < cluster.byte_end() {
                 return cluster.end();
@@ -191,6 +228,7 @@ pub struct Layout<'a> {
     width: Fixed,
     height: Fixed,
     carry: ClusterContext,
+    paragraph: ParagraphContext,
 }
 
 impl<'a> Layout<'a> {
@@ -221,6 +259,14 @@ impl<'a> Layout<'a> {
     #[must_use]
     pub fn carry(&self) -> ClusterContext {
         self.carry
+    }
+
+    /// The UAX #9 paragraph-direction state (`P2–P3`) at the end of the window's text, carried
+    /// beside [`Self::carry`] so a scrolled viewport starting inside a multi-leaf paragraph
+    /// inherits the open paragraph's base direction.
+    #[must_use]
+    pub fn paragraph_carry(&self) -> ParagraphContext {
+        self.paragraph
     }
 
     /// The caret at document byte `byte`, if `byte` is a caret position in this window.
@@ -364,6 +410,34 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
     width: Fixed,
     shaper: &S,
 ) -> Layout<'a> {
+    layout_styled_in_paragraph(
+        styled,
+        origin,
+        start_x,
+        context,
+        ParagraphContext::START,
+        width,
+        shaper,
+    )
+}
+
+/// Lays styled text out as the continuation of a line, a grapheme cluster, and a UAX #9
+/// paragraph's base direction (`P2–P3`).
+///
+/// When a hard-break-delimited RTL paragraph spans multiple 4 KiB leaves and the viewport starts
+/// at a soft-wrapped line inside a later leaf, `paragraph` carries the open paragraph's direction
+/// into the window so pure-ASCII or neutral continuation lines keep the paragraph's RTL base
+/// direction rather than resetting to LTR.
+#[must_use]
+pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
+    styled: StyledText<'a>,
+    origin: u64,
+    start_x: Fixed,
+    context: ClusterContext,
+    paragraph: ParagraphContext,
+    width: Fixed,
+    shaper: &S,
+) -> Layout<'a> {
     let text = styled.text();
     let opens_inside_a_cluster = text
         .chars()
@@ -390,6 +464,7 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
                 top,
                 height,
                 clusters: core::mem::take(&mut clusters),
+                bidi_boundaries: None,
                 start_byte,
                 end_byte: byte,
                 end_x: x,
@@ -414,6 +489,7 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
                 top,
                 height,
                 clusters: core::mem::take(&mut clusters),
+                bidi_boundaries: None,
                 start_byte,
                 end_byte,
                 end_x: x,
@@ -444,6 +520,7 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
         top,
         height,
         clusters,
+        bidi_boundaries: None,
         start_byte,
         end_byte,
         end_x: x,
@@ -453,13 +530,100 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
     if let Some(first) = lines.first_mut() {
         first.continues_cluster = opens_inside_a_cluster;
     }
+    if let Some(bidi) = WindowBidi::resolve_with_context(text, paragraph) {
+        for line in &mut lines {
+            if line.clusters.is_empty() {
+                continue;
+            }
+            let rel = usize::try_from(line.start_byte.saturating_sub(origin)).unwrap_or(0);
+            if let Some(para) = bidi.paragraph_at(rel) {
+                reorder_bidi_line(line, origin, para);
+            }
+        }
+    }
     let total = top + height;
     Layout {
         lines,
         width,
         height: total,
         carry: segments.carry(),
+        paragraph: paragraph.advanced(text),
     }
+}
+
+/// Reorders one wrapped line's clusters into UAX #9 visual left-to-right order (`L1.4`, `L2`) and
+/// pairs every logical cluster boundary bijectively onto the line's visual boundary positions.
+fn reorder_bidi_line(line: &mut Line<'_>, origin: u64, para: &ResolvedParagraph) {
+    let m = line.clusters.len();
+    let base_x = line.clusters[0].x;
+    let para_level = para.para_level();
+    let mut info: Vec<(BidiClass, u8)> = Vec::with_capacity(m);
+    for cluster in &line.clusters {
+        let rel = usize::try_from(cluster.byte.saturating_sub(origin)).unwrap_or(0);
+        info.push(para.cluster_info(rel, cluster.text.len()));
+    }
+    let vis_order = reorder_line(para_level, &mut info);
+    let mut cursor = base_x;
+    let mut placed_x = vec![Fixed::ZERO; m];
+    let mut reordered = Vec::with_capacity(m);
+    for &logical_idx in &vis_order {
+        let mut cluster = line.clusters[logical_idx];
+        cluster.x = cursor;
+        placed_x[logical_idx] = cursor;
+        cursor += cluster.advance;
+        reordered.push(cluster);
+    }
+
+    let leading = |idx: usize| -> Fixed {
+        if info[idx].1 % 2 == 0 {
+            placed_x[idx]
+        } else {
+            placed_x[idx] + line.clusters[idx].advance
+        }
+    };
+    let trailing = |idx: usize| -> Fixed {
+        if info[idx].1 % 2 == 0 {
+            placed_x[idx] + line.clusters[idx].advance
+        } else {
+            placed_x[idx]
+        }
+    };
+
+    let skip = usize::from(line.continues_cluster);
+    let mut bounds = Vec::with_capacity(m + 1);
+    for k in skip..m {
+        let x = if k == 0 {
+            if para_level <= info[0].1 {
+                if para_level % 2 == 0 {
+                    base_x
+                } else {
+                    line.end_x
+                }
+            } else {
+                leading(0)
+            }
+        } else if info[k - 1].1 <= info[k].1 {
+            trailing(k - 1)
+        } else {
+            leading(k)
+        };
+        bounds.push((x, line.clusters[k].byte));
+    }
+    if line.has_end {
+        let end_caret_x = if para_level <= info[m - 1].1 {
+            if para_level % 2 == 0 {
+                line.end_x
+            } else {
+                base_x
+            }
+        } else {
+            trailing(m - 1)
+        };
+        bounds.push((end_caret_x, line.end_byte));
+    }
+    bounds.sort_by_key(|&(x, byte)| (x, byte));
+    line.clusters = reordered;
+    line.bidi_boundaries = Some(bounds);
 }
 
 /// A line's own height if it has clusters, otherwise the height of the style reaching `offset`.
@@ -863,6 +1027,44 @@ mod tests {
             fresh.clusters()[0].x,
             Fixed::ZERO,
             "the cluster starts the line"
+        );
+    }
+
+    #[test]
+    fn carried_rtl_paragraph_context_reorders_ascii_continuation_and_selections() {
+        let carried = ParagraphContext::START.advanced("שלום ");
+        let laid = layout_styled_in_paragraph(
+            StyledText::plain("ab!"),
+            10,
+            Fixed::ZERO,
+            ClusterContext::START,
+            carried,
+            Fixed::units(80),
+            &Fake::new(),
+        );
+        let line = &laid.lines()[0];
+        let visual: String = line.clusters().iter().map(|c| c.text).collect();
+        assert_eq!(visual, "!ab");
+        for (_, byte) in line.boundaries() {
+            let caret = laid.paint_point(byte).expect("caret exists");
+            let back = laid
+                .hit_test(Point::new(caret.x, caret.top))
+                .expect("hit exists");
+            assert_eq!(back.byte, byte);
+        }
+
+        let mixed = layout_styled(
+            StyledText::plain("ab של cd"),
+            0,
+            Fixed::units(80),
+            &Fake::new(),
+        );
+        let picture = mixed.picture(None, Some((1, 5)));
+        let boxes: Vec<_> = picture.selections_on(0).collect();
+        assert_eq!(
+            boxes.len(),
+            2,
+            "logical selection across LTR/RTL seam emits two visual selection spans"
         );
     }
 }

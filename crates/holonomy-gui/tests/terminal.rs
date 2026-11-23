@@ -339,3 +339,34 @@ fn off_screen_caret_never_jumps_onto_status_and_navigation_follows_caret() {
         "caret at document end was not placed on the bottom visible surface row:\n{at_end:?}"
     );
 }
+
+#[test]
+fn mixed_bidi_selection_highlights_every_disjoint_visual_span() {
+    let mut window = window();
+    type_bytes(&mut window, "ab של cd".as_bytes());
+    window
+        .press(Key::Home, Modifiers::control())
+        .expect("ctrl+home");
+    window.press(Key::Right, Modifiers::none()).expect("at 1");
+    for _ in 0..3 {
+        window
+            .press(Key::Right, Modifiers::shift())
+            .expect("shift+right");
+    }
+    window.draw().expect("drew");
+
+    // Visual row 0 is `a b <sp> ל ש <sp> c d`; selecting logical `1..5` (`b`, `<sp>`, `ש`) paints
+    // columns `1..3` AND column `4`, while leaving `ל` at column `3` unselected between them.
+    let surface = window.surface();
+    assert_eq!(surface.cluster_at(3, 0), Some(("ל", 1)));
+    assert_eq!(surface.cluster_at(4, 0), Some(("ש", 1)));
+    assert!(!surface.selected(0, 0));
+    assert!(surface.selected(1, 0));
+    assert!(surface.selected(2, 0));
+    assert!(!surface.selected(3, 0));
+    assert!(
+        surface.selected(4, 0),
+        "second disjoint visual selection span on mixed-BiDi line must be painted"
+    );
+    assert!(!surface.selected(5, 0));
+}

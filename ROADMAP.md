@@ -283,32 +283,24 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
 - Golden-corpus tests at multiple zooms and DPIs: for a fixed document and viewport,
   paint decisions and hit-test decisions must be bit-derived from one source tree.
 
-**Status (2026-11-19, in progress — no gate claimed)**
-- `holonomy-eye` has: integer geometry (`Fixed`, 64ths), grapheme-cluster segmentation whose
-  property data is generated from UCD 18.0.0 rather than typed out (D-27), one run tree both
-  consumers walk, zoom/DPI as a single exact view transform with no inverse to round against, and
-  style runs as layout data. L-8's property test exists and passes over a corpus of scripts at 8
-  zooms × 5 DPIs, on a fake shaper — and as of 2026-11-19 over **generated** documents too:
-  `tests/one_geometry.rs` draws 12 documents from the four seeds, at three wrap widths and the
-  same 8 × 5 view sweep, and checks every painted caret and every click it can make, with a
-  monospace control that measures how far the v3 geometry would sit from paint.
+**Status (2026-11-22 — all three gates passed, block closed)**
+- `holonomy-eye` has: integer geometry (`Fixed`, 64ths), grapheme-cluster segmentation and UAX #9
+  bidirectional resolution whose property and paired-bracket tables are generated from UCD 18.0.0
+  (`D-27`, `D-77`), one run tree both consumers walk (including disjoint visual selection spans
+  when a logical selection crosses LTR/RTL runs), zoom/DPI as a single exact view transform with no
+  inverse to round against, style runs as layout data, and a real OpenType metrics reader (`Face`
+  over `Inter-Regular.ttf`, M3).
 - A Fenwick height model over leaf heights exists, and its cost is *counted* rather than asserted
   (a viewport over 2^18 leaves costs < 160 index reads; 16× the leaves costs < 2× the reads).
-- The Spine wiring exists: `byte_window` turns a leaf range into a byte range, `window_text` reads it
-  out of the resident set and the pending buffer, and `holonomy-shell` runs the loop that turns a
-  scroll position into a laid-out frame and writes the measured heights back (D-18, D-19). Gate 2's
-  *inputs* are therefore measured end to end on a 4,000-leaf document.
-- Gate 3 is **half met and measured** (D-66): no caret can land inside a grapheme in any
-  right-to-left script, because the marks are `Extend` in generated data (D-27) and 14 corpus lines
-  assert it in `tests/script_gate.rs`. Paint order for RTL text is **not built** — `layout.rs`
-  places every cluster at `x += advance` and reverses nothing — so a Hebrew run draws
-  left-to-right. That
-  half is deferred to Block 6 (OQ-11), where a pixel surface can show the difference, and its size
-  is printed every push.
-- Not yet: a real shaper (Block 8), and seconds rather than counts for gate 2 — without those,
-  L-8 stays `spec` rather than `enforced`.
+- The Spine wiring and wall-clock invariance are measured end to end: `byte_window`, `window_text`,
+  and `layout_styled` with the real `Face` run in ~697 µs p50 (~735 µs p99) identically at 180 KB
+  offset 0, 180 MB (30 M words, 43,946 leaves) offset 0, and 180 MB near the end (`D-78`).
+- Residual, stated rather than hidden: `Face` reads `cmap`/`hmtx` advances without `GSUB`/`GPOS`
+  complex-script glyph joining or ligatures (`OQ-24`), and `L-8` stays `spec` in `docs/GATES.md`
+  until Block 6's GPU renderer draws from `Picture` alongside the terminal cell surface. The
+  workspace moves to `6.0.0-block.5`, one bump per closed block.
 
-**GATES**
+**GATES** — ✅ **all three passed, and the block is closed (2026-11-22, CI run [45106234334](https://github.com/c4us4l1ty/holonomy/actions/runs/45106234334) on `3b54969`)**
 - [x] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
       shaped glyph — the v3 regression made impossible, proven. **Measured 2026-11-19 by
       `crates/holonomy-eye/tests/one_geometry.rs`**: generated documents, every painted caret,
@@ -316,15 +308,25 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
       (`HOLONOMY_ONE_GEOMETRY`) and a monospace control. **Claimed 2026-11-19 on the measuring
       run**: CI run `44672133052` (`2caa52a`), test job green, which enforced every caret and click count, at
       all 8 zooms and 5 DPIs, over 12 generated documents at 3 wrap widths (AUDIT D-38).
-- [ ] Layout cost on a 30 M-word doc is invariant in document length (viewport-shape cost only).
-- [ ] Bi-directional and multi-script text handle cluster boundaries correctly (no caret
-      grapheme-splitting). **Half met, measured 2026-11-21 (D-66):** the *caret* half holds for
-      right-to-left scripts and is asserted over 14 corpus lines (Hebrew, Arabic, Thaana, Syriac,
-      N'Ko, Adlam, presentation forms) in `crates/holonomy-eye/tests/script_gate.rs`, with expected
-      cluster counts taken from UAX #29 and independently checked. What is **not** met is visual
-      reordering: BiDi is deferred to Block 6 (OQ-11) because it is a paint-order change with no
-      pixel surface to paint on, and its displacement is printed on every push as
-      `HOLONOMY_SCRIPT_GATE_ORDER`. The box stays unchecked until a renderer can draw the result.
+- [x] Layout cost on a 30 M-word doc is invariant in document length (viewport-shape cost only).
+      **Measured 2026-11-22 by `crates/holonomy-eye/tests/viewport_latency.rs` (AUDIT D-78, OQ-12)**
+      using the real OpenType `Face` (`Inter-Regular.ttf`), interleaved across 256 samples each at
+      180 KB offset 0 (`p50 = 697,961 ns`, `p99 = 732,505 ns`), 180 MB / 30 M words / 43,946 leaves
+      at offset 0 (`p50 = 697,047 ns`, `p99 = 735,296 ns`), and 180 MB near the end
+      (`p50 = 697,753 ns`, `p99 = 727,547 ns`), with a 128-leaf control (`< 0.3%` of the document)
+      costing `53,041,922 ns` (`76×` the viewport cost). **Claimed on CI run `45106234334`
+      (`3b54969`).**
+- [x] Bi-directional and multi-script text handle cluster boundaries correctly (no caret
+      grapheme-splitting). **Both halves met and measured 2026-11-22 (AUDIT D-77, OQ-11 closed):**
+      `crates/holonomy-eye/src/bidi.rs` + generated UCD 18.0.0 `bidi/tables.rs` implement full O(N)
+      UAX #9 resolution (`P2`–`P3`, `X1`–`X10`, `W1`–`W7`, `N0`–`N2`, `I1`–`I2`, `L1`–`L2`) and
+      bijective primary-caret boundary pairing, verified offline against all `91,707 / 91,707`
+      `BidiCharacterTest-18.0.0` vectors and enforced on every push by
+      `crates/holonomy-eye/tests/script_gate.rs` (`carets_inside_a_grapheme = 0`,
+      `HOLONOMY_SCRIPT_GATE_L8 boundaries=27680 disagreements=0`,
+      `HOLONOMY_SCRIPT_GATE_ORDER scripts=6 clusters=40 displaced=0 note=uax9-visual-order`) plus
+      multi-leaf BiDi reflow in `holonomy-shell`. **Claimed on CI run `45106234334` (`3b54969`).**
+      *Residual: OpenType `GSUB`/`GPOS` contextual glyph joining remains OQ-24.*
 
 ---
 
@@ -439,10 +441,33 @@ v5's 45 ms wipe-budget overshoot disappears by construction.
   and says so. The anti-decorative-security instrument.
 - Forced recheck: adversarial re-audit of Blocks 2–9 implementations (not just RFCs).
 
-**GATES**
-- [ ] Reaper fire test: time from tripwire to wipe-verified measured; canary ghosts: zero.
-- [ ] Security panel claims cross-checked by test (no status a test cannot prove).
-- [ ] Implementation audit closed; all findings fixed or written down as user-visible limits.
+**GATES** — ✅ **passed 2026-11-22 under headless runtime scope; L-7 remains `spec` pending OS shell hooks** (CI run [45106234334](https://github.com/c4us4l1ty/holonomy/actions/runs/45106234334) on `3b54969`; AUDIT D-79)
+- [x] Reaper fire test: time from tripwire to wipe-verified measured; canary ghosts: zero.
+      **Measured 2026-11-22 by `crates/holonomy-text/tests/wipe_gate.rs` + `holonomy_seal::reaper`**
+      across 24 end-to-end trials covering `Manual`, `Suspend`, `UmbilicalDisconnect`, and
+      `DeadmanTimeout` over `1,041` registered arenas (`4,324,384` bytes: a full 4 MiB `ResidentSet`
+      with editing slack, a live `DEMKey` capability token, and 32 × 4 KiB `0xA5` zeroize canaries):
+      `HOLONOMY_WIPE_GATE trials=24 arenas=1041 bytes_wiped=4324384 ghosts=0 sched=NormalFallback
+      reaper_p50_us=878 reaper_p99_us=922 reaper_max_us=922 wall_p50_us=913 wall_p99_us=949
+      wall_max_us=949`, with an anti-decorative negative control (`HOLONOMY_WIPE_CONTROL sampled=32
+      ghost_canaries=1 ghost_bytes=4096 quiet_allocs=0`) proving both ghost detection and
+      zero-allocation scrubbing. *Scope residual: OS suspend/USB event listeners and native-window
+      capture exclusion remain owned by Block 6's GPUI shell and Block 10's three-OS qualification,
+      so L-7 stays `spec` in `docs/GATES.md` while its `BUDGETS` row cites `tests::wipe_gate`.*
+- [x] Security panel claims cross-checked by test (no status a test cannot prove).
+      **Enforced by `crates/holonomy-gui/tests/panel.rs` (M6):** every line rendered by
+      `holonomy_gui::panel::Facts` is verified by mutating live `ResidentSet` byte/leaf counts,
+      `Document` segment/witness/verification counts, and every `LockCapability` rung from
+      `probe_capability()`, with `None` rendered as `"not verified"`. No clipboard status is claimed
+      because the terminal front end has no OS clipboard integration (`OQ-3` stays open for Block 6).
+- [x] Implementation audit closed; all findings fixed or written down as user-visible limits.
+      **Closed 2026-11-22 (AUDIT D-78, D-79):** re-audit of Blocks 2–9 fixed
+      `SlabText::from_plaintext`'s `Vec::reserve` `realloc` / invalid-UTF-8 unwiped-plaintext escape
+      (`crates/holonomy-text/src/text.rs`) and `holonomy-shell`'s three-part leaf-seam defect
+      (`tail_bytes` over-extension on clean cluster boundaries, `measure_window` overwriting clipped
+      tail-leaf heights, and `cluster_after` absorbing a neighbour cluster across a clean leaf seam
+      on `Delete` / `Move::Right` / `legal_caret`), and recorded remaining user-visible limits
+      (`OQ-3` clipboard in GPUI, `OQ-24` OpenType `GSUB`/`GPOS`, terminal screen-capture exclusion).
 
 ---
 

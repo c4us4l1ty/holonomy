@@ -15,3 +15,7 @@ workspace = true
 # (`window::byte_window`), and reading that range back out of the resident set and the pending
 # buffer (`window::window_text`). Geometry still enters through `Shaper` alone.
 holonomy-text = { path = "../holonomy-text" }
+
+[dev-dependencies]
+# Distribution summaries (`summarise`, `measure`) for the 30 M-word viewport layout timing gate.
+holonomy-ledger = { path = "../holonomy-ledger" }

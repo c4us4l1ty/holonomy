@@ -48,8 +48,8 @@ Listed so they stay dead.
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
 | OQ-10 | A full resident slab has **no continuation policy** — solved by D-7 and built as D-8/D-9: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; a seal appends the bytes once, renames the source, and corrects one leaf's length in the current root — **no history entry**, so undo never steps through a seal; each byte is written once. `Typing::insert_at` handles mid-document typing by cutting the leaf the caret lands in (pure geometry — the halves name adjacent ranges of one segment, so nothing moves). Deletion is D-11 (a pointer operation; the bytes stay in the log — OQ-14). Not yet: selection. | **closed 2026-11-17 — `typing.rs`** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. **Narrowed again 2026-11-19 by D-29:** the load-time half is built. `Spine::from_slabs` merges neighbours that name contiguous bytes of one segment, so a document rebuilt from a log carries the document's shape rather than its edit history; merging cannot overflow, because the second slab's range bounds the merged one. What is left is the live session: a structural insert cuts a leaf and nothing rejoins it until the document is written and read back. The seam-healing variant is not just unbuilt, it is the wrong half to build first: healing inside `join` renumbers leaves under `holonomy-shell`'s cached height model, which is a two-crate change and not this row's. | **open — narrowed again 2026-11-19: load-time coalescing done (D-29); a live session still fragments** |
-| OQ-11 | **Cluster segmentation: the rules are UAX #29's; the properties are the database's.** Segmentation classifies each code point into a property (CR, LF, Control, Extend, ZWJ, Regional_Indicator, Prepend, SpacingMark, Hangul L/V/T/LV/LVT, Extended_Pictographic, Other) and applies **GB3–GB13 in their numbered order**, carrying the cluster's own state (has it seen Extended_Pictographic, how many regional indicators) so GB11 and GB12/13 decide about the cluster and not the pair (D-16). The old code's real error is gone: it joined anything after a ZWJ — GB9 read as GB11 — so `a`+ZWJ+`b` was one cluster instead of two, an unsafe answer rather than a conservative one. The **property data is no longer typed by hand**: `cluster.rs`'s tables are generated from UCD 18.0.0 by `scripts/gen-cluster-tables.py` (D-27), 750 range triples behind one binary search, so a mark from *any* script joins its base — the coverage gap this row used to carry, where an unlisted mark split from its base and the seam became a caret position no renderer has, is closed by construction. GB9c is built too (D-28): the conjunct run is state carried in the cluster, the two properties it reads are generated, and a Devanagari conjunct (KA VIRAMA SSA) is one cluster. What remains is **one** gap: **BiDi reordering is not implemented at all**, because it is a paint-order question and belongs beside the run tree, not in the module that decides byte boundaries. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore still **cannot** be claimed: multi-script cluster honesty is now the database's, and direction has no answer. The API surface a fix would touch is still `cluster.rs` alone for GB9c, and the run tree's for BiDi. | **decided 2026-11-21 (D-66): the caret half is met and measured — RTL grapheme honesty is asserted over 14 corpus lines in `tests/script_gate.rs`, all green in CI — and BiDi reordering is DEFERRED, not waived: it is a paint-order change with no pixel surface to paint on (M4b-ii), so it is owned by Block 6 and its displacement is printed every push as `HOLONOMY_SCRIPT_GATE_ORDER` rather than described in prose** |
-| OQ-12 | **The window is viewport-sized, and now measured on the size the gate names.** The chain — `HeightModel` (O(log n) counted reads), `Spine::slab_span` (one descent), `holonomy_eye::byte_window` (contiguous, holes impossible since D-7) — is swept over a **180 MB / 44,000-leaf** document, every screen. Bytes handed to layout are bounded by one screen plus two leaves, **with the identical bound at 1/1000 the length**; index reads stay ≤ 64 and grow by at most a logarithm. **Narrowed 2026-11-18 by D-18:** the chain now has its missing link — `window_text` reads the window out of the resident set and the pending buffer, so "here is a scroll position" reaches "here is the text to shape" — and it faults the leaves of one screen whether the document has eight leaves or 4,096, and faults nothing on a second look. What is still missing is the timing half: seconds need a real shaper and a font, which is Block 6, and a fake shaper would make the number about the fake. Gate 2 therefore stays unclaimed — its *inputs* are measured end to end, its clock is not. | **Narrowed again by D-19:** the chain now has a *loop* — `holonomy-shell` finds the window, reads it, lays it out and writes the measured heights back, and its frames report the counts (clusters shaped, index reads) on a 4,000-leaf document. The clock is still the missing half and still needs a real shaper (Block 8), so gate 2 stays unclaimed. | **open — chain and loop complete and measured 2026-11-18; timing needs a real shaper** |
+| OQ-11 | **Cluster segmentation and UAX #9 bidirectional reordering: both halves are UCD 18.0.0 data + specification rules, and L-8 holds across LTR, RTL, and mixed text.** Segmentation classifies each code point into a property and applies **GB3–GB13** (including Unicode 15.1's GB9c conjuncts, `D-27`, `D-28`) over generated UCD 18.0.0 range tables. **Closed 2026-11-22 (D-77):** `crates/holonomy-eye/src/bidi.rs` and generated `bidi/tables.rs` (`scripts/gen-bidi-tables.py`: `766` `Bidi_Class` ranges + `130` `Bidi_Paired_Bracket` entries) implement O(N) UAX #9 resolution (`P2`–`P3`, `X1`–`X10`, `W1`–`W7`, `N0`–`N2` with stack-based `BD9` and canonical angle-bracket pairing, `I1`–`I2`, `L1`–`L2`), verified offline against all `91,707 / 91,707` `BidiCharacterTest-18.0.0` vectors. Wrapped lines reorder visually and pair every logical boundary bijectively onto the line's `(m + 1)` visual boundary slots so `hit_test(paint_point(g)) == g` holds without duplicate `x` ties; logical selections that cross direction runs split into disjoint visual `SelectionSpan`s, and `holonomy-shell` accumulates multi-leaf `Carry.x` in logical byte order. Enforced on every push in `crates/holonomy-eye/tests/script_gate.rs` (`carets_inside_a_grapheme = 0`, `displaced = 0`, `L-8` `27,680` boundaries / `0` disagreements; CI run `45106234334` on `3b54969`). Residual: OpenType `GSUB`/`GPOS` contextual glyph joining remains `OQ-24`. | **closed 2026-11-22 (D-77) — UAX #9 visual order (`displaced = 0`), split selection, and L-8 bijection enforced in CI; OpenType `GSUB`/`GPOS` shaping remains OQ-24** |
+| OQ-12 | **The window is viewport-sized, and both its structural counts and wall-clock latency with a real OpenType face are invariant in document length.** `HeightModel`, `Spine::slab_span`, `byte_window`, `window_text`, and `holonomy-shell` bound layout inputs to one screen plus two leaves across 44,000 leaves (`D-18`, `D-19`). **Closed 2026-11-22 (D-78):** `crates/holonomy-eye/tests/viewport_latency.rs` times the full viewport pipeline (`HeightModel::window` → `byte_window` → `window_text` → `layout_styled` with the real `Face` over `Inter-Regular.ttf`) interleaved across 256 samples each at 180 KB offset 0 (`p50 = 697,961 ns`, `p99 = 732,505 ns`), 180 MB / 30 M words / 43,946 leaves at offset 0 (`p50 = 697,047 ns`, `p99 = 735,296 ns`), and 180 MB near the end (`p50 = 697,753 ns`, `p99 = 727,547 ns`), alongside a 128-leaf control (`53,041,922 ns`, `76×` slower) in the same process (CI run `45106234334` on `3b54969`). | **closed 2026-11-22 (D-78) — real-`Face` wall-clock invariance at 30 M words enforced in CI** |
 | OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
 | OQ-14 | **Deletion does not erase on an ordinary save; explicit compaction rewrites the active spine.** `Typing::delete` removes a range from the tree and, on save, commits a sub-segment `RECORD_MANIFEST` (`OQ-29`, `OQ-30`) so deleted text never reappears on reopen, while the old ciphertext stays in the append-only `.wavefunction` by design (Vision III). **Closed for user-reachable compaction 2026-11-22:** `WorldLine::compact_active_to`, `Document::compact_to`, and CLI `holonomy compact <src> <dst>` re-confirm the passphrase via `confirm_compaction` and write a fresh, re-keyed world-line containing only the active `document_slabs()` with at most one segment plaintext resident at a time (`smoke-install.sh` + `persist.rs`). Residual by constitutional design: until the user runs `holonomy compact` (and prunes any external cloud mirror copies, `OQ-2`), deleted spans remain encrypted in the pre-compaction log. | **closed 2026-11-22 — `compact_active_to` + `holonomy compact`; pre-compaction ciphertext retention is disclosed design** |
 | OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8. The asymmetry was the finding: offsets inside the open buffer are checked (`SlabText` returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. **Narrowed by D-18:** the reader refuses a window whose edge falls inside a character, naming the offset. **Closed for the session by D-19:** the check OQ-15 asked for exists — `holonomy-shell` holds the reader and the edit in one place, and its test asserts over every caret every frame offers that the byte is a character boundary of the frame's text and hit-tests back to itself. What remains is not a missing check but a missing *type*: the offset is still a `u64` a caller can get wrong, and a caller that bypasses the Eye still asks for a mid-character cut — which is now refused at read time instead of silently rendered. Making it impossible would need an offset type the Eye alone can mint, which is a Block 6 API decision, not a hole in this one. | **closed 2026-11-18 — the caret check passes; a bypassing caller is refused at read** |
@@ -67,6 +67,97 @@ Listed so they stay dead.
 | OQ-30 | **Deletions and post-seal undos persist across reopen with zero segment rewrites.** Closed 2026-11-22: `Typing` tracks `structure_dirty` across `delete` on sealed text and `restore_root`, and flushes the exact `Slab` spine via `SegmentSink::{append_segment_with_spine, commit_spine}` without reading or rewriting surviving segments (preserving L-2 and L-6). Emptying an entire document (`Select All` + `Backspace`) commits an explicit zero-slab manifest so reopen yields `""` instead of falling back to append order, and `App::has_pending()` includes `has_uncommitted_structure()`. Pinned in `typing.rs` and `holonomy-gui/tests/persist.rs`. | **closed 2026-11-22 — zero-rewrite spine manifest commits** |
 
 ## Audit trail
+
+- **2026-11-22 — D-80 — Cross-crate bug hunt closed split-BiDi selection rendering, multi-leaf
+  `ParagraphContext` and `Carry` invariants, UAX #9 `P2`/`L1.4` edge cases, reaper provenance and
+  timestamp ordering, and residual plaintext buffers.**
+  Auditing `holonomy-eye`, `holonomy-shell`, `holonomy-gui`, `holonomy-text`, and `holonomy-seal`
+  together with differential multi-leaf fuzzing uncovered and closed six defects:
+  (1) `Picture::selection_on` and `App::draw` took `.find(...)` per line and dropped subsequent
+  disjoint visual `SelectionSpan`s on mixed-BiDi lines; `Picture::selections_on` and `App::draw`
+  now render every span (`picture.rs`, `holonomy-gui/tests/terminal.rs`).
+  (2) `ResolvedParagraph::cluster_info` classified `" \u{0301}"` (`WS` + `NSM`) from its leading
+  `WS` alone so `L1.4` reset the cluster across a non-resettable `NSM`, and `first_strong_level`
+  stopped `P2` early on an unmatched leading `PDI`; both now follow UAX #9 (`bidi.rs`).
+  (3) Multi-leaf `holonomy-shell` lost an open RTL paragraph's base direction when scrolled to a
+  pure-ASCII soft-wrap continuation in a later leaf, undercounted a final 1-byte `"\n"` leaf
+  completing a split `"\r\n"`, checked `spans[index + 1].len()` instead of `span.len()` for
+  straddling-cluster `skip`, and clobbered `Carry.x` in `measure_window` when a leaf opened on
+  `'\n'` or a wrapped wide cluster (`'中'`); fixed via `ParagraphContext`, `layout_styled_in_paragraph`,
+  `window_opening`, and predecessor-end `Carry.x` (`frame_stability.rs`).
+  (4) `Tripwire::fire` published `explicit_reason` before `tripped_at_ns`, allowing a concurrent
+  `evaluate()` to observe a zero sentinel clamped to `1`; `tripped_at_ns` is now won with `AcqRel`
+  before `explicit_reason` (`reaper.rs`).
+  (5) `LockedSecret<N>` and `CanarySlab` held `Box` (`Unique`/non-`UnsafeCell`) while armed in
+  `SecretArenas`, risking pointer-provenance invalidation when moved by value; both now hold raw
+  `NonNull` over `UnsafeCell` (`secret.rs`, `reaper.rs`).
+  (6) `Typing`'s `Step::Root.held` undo/redo copies, `WindowText`, and `App::draw`'s temporary
+  frame `String` freed plaintext without scrubbing; `Step::Root.held` and `App::draw` now use
+  `Zeroizing`, `Typing::wipe_in_place` scrubs both open and historical buffers, and `WindowText`
+  volatile-zeroes its backing capacity on `Drop` (`typing.rs`, `window.rs`).
+
+- **2026-11-22 — D-79 — Block 9 re-audit caught an unwiped `realloc` in `SlabText::from_plaintext`,
+  and `L-7` wipes a full 4 MiB viewport + live keys + 32 canaries in under 1 ms with zero
+  allocations.**
+  Re-auditing plaintext ownership across `holonomy-text` and `holonomy-seal` (Block 9's forced
+  implementation recheck) found a concrete defect in `SlabText::from_plaintext`
+  (`crates/holonomy-text/src/text.rs`): wrapping `plaintext: Vec<u8>` in `Zeroizing` and calling
+  `bytes.reserve(slack)` allowed `System::realloc` to free the old heap buffer whenever
+  `plaintext.capacity() < plaintext.len() + slack` — leaving a full copy of decrypted segment
+  plaintext unwiped on the heap — and early-returned on invalid UTF-8 without zeroing spare
+  capacity. Fixed by wrapping `plaintext` in `Zeroizing` immediately, copying into a
+  zero-initialized `vec![0u8; needed]`, and scrubbing `0..source_cap` before dropping the input.
+  For `L-7`, `crates/holonomy-seal/src/reaper.rs` implements a lock-free atomic slot table
+  (`SecretArenas`, `MAX_ARENAS = 2_048`) whose state machine (`EMPTY`, `INIT`, `ARMED`, `WIPING`,
+  `UNREGISTERING`) guarantees `Drop` unregistration spins on `WIPING` rather than racing a volatile
+  scrub; `LockedSecret<N>` (`DEMKey`, `UnwrapKey`) arms its 64 KiB page inside `holonomy-seal`
+  without exposing key pointers; `CanarySet` plants `0xA5` canaries and samples them via
+  `read_volatile`; and `ReaperGuard` runs the zero-allocation emergency thread across `Manual`,
+  `Suspend`, `UmbilicalDisconnect`, and `DeadmanTimeout` tripwires. Measured green in **CI run
+  `45106234334` on `3b54969`** (`crates/holonomy-text/tests/wipe_gate.rs`):
+  `HOLONOMY_WIPE_CONTROL sampled=32 ghost_canaries=1 ghost_bytes=4096 quiet_allocs=0` and
+  `HOLONOMY_WIPE_GATE trials=24 arenas=1041 bytes_wiped=4324384 ghosts=0 sched=NormalFallback
+  reaper_p50_us=878 reaper_p99_us=922 reaper_max_us=922 wall_p50_us=913 wall_p99_us=949
+  wall_max_us=949`. `BUDGETS` in `holonomy-ledger` updates `L-7` (`unmeasured == 1`, leaving only
+  `L-9`). Remaining user-visible limits stay named: `OQ-3` (OS clipboard in Block 6's GPUI shell;
+  the terminal front end has no OS clipboard integration) and OS-level suspend/capture hooks.
+
+- **2026-11-22 — D-78 — 30 M-word real-`Face` viewport latency is invariant to 0.1%, and testing
+  multi-leaf BiDi reflow exposed three leaf-seam bugs in `holonomy-shell`.**
+  `crates/holonomy-eye/tests/viewport_latency.rs` closes `OQ-12` and Block 5's second gate by
+  timing the real OpenType `Face` (`Inter-Regular.ttf`) across 256 interleaved samples at 180 KB
+  offset 0 (`p50 = 697,961 ns`, `p99 = 732,505 ns`), 180 MB / 30 M words / 43,946 leaves at offset
+  0 (`p50 = 697,047 ns`, `p99 = 735,296 ns`), and 180 MB near the end (`p50 = 697,753 ns`,
+  `p99 = 727,547 ns`), with a 128-leaf control (`53,041,922 ns`, `76×` slower) in **CI run
+  `45106234334` on `3b54969`**. Writing the multi-leaf narrow-viewport BiDi test in
+  `crates/holonomy-shell/tests/editing.rs` uncovered three pre-existing leaf-seam bugs in
+  `crates/holonomy-shell/src/lib.rs`: (1) `tail_bytes` returned `cluster.len()` instead of `0`
+  whenever a cluster started cleanly on `at`, extending every non-EOF frame by one cluster into the
+  next leaf; (2) `measure_window` lacked the tail twin of `D-39`'s `head_whole`, so whenever
+  `Draft::spans_in` clipped a sealed tail leaf to `end`, `span.offset() + span.len() <= end` held
+  and overwrote the next leaf's full measured height with the clipped prefix's height; and (3)
+  `cluster_after` hopped across a leaf boundary without checking `ctx.joins(first)`, causing
+  `Delete`, `Move::Right`, and `legal_caret` at the end of a leaf to absorb the first cluster of
+  the following leaf. All three are fixed and pinned in `crates/holonomy-shell/tests/editing.rs`.
+
+- **2026-11-22 — D-77 — UAX #9 bidirectional reordering, bijective primary carets, and split
+  selections close OQ-11 and Block 5's third gate.**
+  `scripts/gen-bidi-tables.py` extracts UCD 18.0.0 `DerivedBidiClass.txt` (`766` disjoint ranges)
+  and `BidiBrackets.txt` (`130` entries) into `crates/holonomy-eye/src/bidi/tables.rs`, and
+  `crates/holonomy-eye/src/bidi.rs` implements O(N) UAX #9 paragraph/explicit/weak/neutral/implicit
+  level resolution (including stack-based `BD9` isolate-run assembly and `N0` canonical angle
+  brackets, verified offline against `91,707 / 91,707` `BidiCharacterTest-18.0.0` cases). A fast
+  `may_reorder` check (`< U+0590`) keeps pure-LTR layout allocation-free (`Line::bidi_boundaries ==
+  None`). On wrapped lines that reorder, mapping logical boundary `k` to the higher-embedding-level
+  adjacent cluster's edge (`trailing(k - 1)` when `L_{k-1} <= L_k`, else `leading(k)`) pairs the
+  `(m + 1)` logical boundaries bijectively onto the `(m + 1)` visual boundary slots (`0..=m`),
+  preserving `L-8` (`hit_test(paint_point(g)) == g`) with zero duplicate-`x` ambiguity; logical
+  selections that span mixed runs emit split `SelectionSpan`s in visual `x` order; and
+  `holonomy-shell::measure_window` accumulates `Carry.x` in logical byte order so leaf-by-leaf
+  wrapping matches continuous layout. Verified in **CI run `45106234334` on `3b54969`**:
+  `HOLONOMY_SCRIPT_GATE_HONESTY scripts=14 clusters=45 carets=59 carets_inside_a_grapheme=0`,
+  `HOLONOMY_SCRIPT_GATE_L8 boundaries=27680 disagreements=0`, and
+  `HOLONOMY_SCRIPT_GATE_ORDER scripts=6 clusters=40 displaced=0 note=uax9-visual-order`.
 
 - **2026-11-21 — D-75 — the file records what was written, never what the document *is*.**
   Reading `WorldLine`'s record grammar rather than its docs: there are exactly two record kinds,
