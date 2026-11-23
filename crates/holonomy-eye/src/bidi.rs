@@ -77,7 +77,7 @@ impl BidiClass {
 }
 
 /// Paragraph base-direction policy for UAX #9 (`P2–P3`).
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParagraphDir {
     /// Automatic first-strong heuristic (`P2–P3`).
@@ -86,6 +86,93 @@ pub(crate) enum ParagraphDir {
     Ltr,
     /// Forced right-to-left (`level = 1`).
     Rtl,
+}
+
+/// Incremental UAX #9 paragraph-direction state (`P2–P3`) carried across leaf boundaries.
+///
+/// Mirrors [`crate::ClusterContext`] one layer up: a hard-break-delimited paragraph can span many
+/// 4 KiB leaves, and a scrolled viewport starting at a soft-wrapped line inside a later leaf still
+/// needs the open paragraph's base direction (`0` for LTR, `1` for RTL) without scanning backward
+/// to byte zero of the document.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParagraphContext {
+    resolved: Option<u8>,
+    isolate_depth: u16,
+}
+
+impl ParagraphContext {
+    /// Fresh state at the start of the document or immediately after a hard break (`\r` / `\n`).
+    pub const START: Self = Self {
+        resolved: None,
+        isolate_depth: 0,
+    };
+
+    /// Advances this paragraph-direction state across `text`.
+    pub fn advance(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let tail = match bytes.iter().rposition(|&b| b == b'\r' || b == b'\n') {
+            Some(pos) => {
+                *self = Self::START;
+                &text[pos + 1..]
+            }
+            None => {
+                if self.resolved.is_some() {
+                    return;
+                }
+                text
+            }
+        };
+        for ch in tail.chars() {
+            let class = tables::bidi_class(ch);
+            if class.is_isolate_initiator() {
+                self.isolate_depth = self.isolate_depth.saturating_add(1);
+            } else if class == BidiClass::Pdi {
+                self.isolate_depth = self.isolate_depth.saturating_sub(1);
+            } else if self.isolate_depth == 0 {
+                match class {
+                    BidiClass::L => {
+                        self.resolved = Some(0);
+                        return;
+                    }
+                    BidiClass::R | BidiClass::Al => {
+                        self.resolved = Some(1);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Returns `self` advanced across `text`.
+    #[must_use]
+    pub fn advanced(mut self, text: &str) -> Self {
+        self.advance(text);
+        self
+    }
+
+    pub(crate) fn resolve_level(self, classes: &[BidiClass]) -> u8 {
+        if let Some(level) = self.resolved {
+            return level;
+        }
+        let mut isolate_depth = usize::from(self.isolate_depth);
+        for &class in classes {
+            if class.is_isolate_initiator() {
+                isolate_depth += 1;
+            } else if class == BidiClass::Pdi {
+                isolate_depth = isolate_depth.saturating_sub(1);
+            } else if class == BidiClass::B && isolate_depth == 0 {
+                break;
+            } else if isolate_depth == 0 {
+                match class {
+                    BidiClass::L => return 0,
+                    BidiClass::R | BidiClass::Al => return 1,
+                    _ => {}
+                }
+            }
+        }
+        0
+    }
 }
 
 /// Whether `character` can introduce an odd embedding level under automatic paragraph direction.
@@ -142,16 +229,31 @@ impl ResolvedParagraph {
             return (BidiClass::L, self.para_level);
         }
         let limit = offset.saturating_add(len);
+        let mut picked: Option<(BidiClass, u8)> = None;
+        let mut all_resettable = true;
         let mut cursor = idx;
         while cursor < self.chars.len() && self.chars[cursor].0 < limit {
             let (_, orig, level) = self.chars[cursor];
-            if !orig.is_removed_x9() {
-                return (orig, level.max(self.para_level));
+            if !(orig.is_resettable_l1() || matches!(orig, BidiClass::S | BidiClass::B)) {
+                all_resettable = false;
+            }
+            if picked.is_none() && !orig.is_removed_x9() {
+                picked = Some((orig, level.max(self.para_level)));
             }
             cursor += 1;
         }
-        let (_, orig, level) = self.chars[idx];
-        (orig, level.max(self.para_level))
+        let (mut orig, level) = picked.unwrap_or_else(|| {
+            let (_, orig, level) = self.chars[idx];
+            (orig, level.max(self.para_level))
+        });
+        // UAX #9 L1.4 resets trailing runs only while every character in the run is L1-resettable;
+        // a cluster such as `" \u{0301}"` (`WS` + `NSM`) stops L1 at `NSM` and must not reset.
+        if !all_resettable
+            && (orig.is_resettable_l1() || matches!(orig, BidiClass::S | BidiClass::B))
+        {
+            orig = BidiClass::On;
+        }
+        (orig, level)
     }
 }
 
@@ -163,9 +265,10 @@ pub(crate) struct WindowBidi {
 
 impl WindowBidi {
     /// Resolves every hard-break-delimited paragraph of `text` that contains bidirectional
-    /// triggers; returns `None` when the entire window is left-to-right.
-    pub(crate) fn resolve(text: &str) -> Option<Self> {
-        if !may_reorder(text) {
+    /// triggers (or opens inside a carried RTL paragraph); returns `None` when the entire window
+    /// is left-to-right.
+    pub(crate) fn resolve_with_context(text: &str, mut context: ParagraphContext) -> Option<Self> {
+        if context.resolved != Some(1) && !may_reorder(text) {
             return None;
         }
         let bytes = text.as_bytes();
@@ -174,7 +277,8 @@ impl WindowBidi {
         let mut i = 0usize;
         while i < bytes.len() {
             if bytes[i] == b'\r' {
-                Self::push_if_bidi(text, start, i, &mut paragraphs);
+                Self::push_if_bidi(text, start, i, context, &mut paragraphs);
+                context = ParagraphContext::START;
                 if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
                     i += 2;
                 } else {
@@ -182,7 +286,8 @@ impl WindowBidi {
                 }
                 start = i;
             } else if bytes[i] == b'\n' {
-                Self::push_if_bidi(text, start, i, &mut paragraphs);
+                Self::push_if_bidi(text, start, i, context, &mut paragraphs);
+                context = ParagraphContext::START;
                 i += 1;
                 start = i;
             } else {
@@ -190,7 +295,7 @@ impl WindowBidi {
             }
         }
         if start <= bytes.len() {
-            Self::push_if_bidi(text, start, bytes.len(), &mut paragraphs);
+            Self::push_if_bidi(text, start, bytes.len(), context, &mut paragraphs);
         }
         if paragraphs.is_empty() {
             None
@@ -199,9 +304,15 @@ impl WindowBidi {
         }
     }
 
-    fn push_if_bidi(text: &str, start: usize, end: usize, out: &mut Vec<ResolvedParagraph>) {
+    fn push_if_bidi(
+        text: &str,
+        start: usize,
+        end: usize,
+        context: ParagraphContext,
+        out: &mut Vec<ResolvedParagraph>,
+    ) {
         let slice = &text[start..end];
-        if !may_reorder(slice) {
+        if context.resolved != Some(1) && !may_reorder(slice) {
             return;
         }
         let mut offsets = Vec::new();
@@ -210,7 +321,7 @@ impl WindowBidi {
             offsets.push(start + rel);
             cps.push(ch);
         }
-        let (para_level, orig, levels) = resolve_raw(&cps, ParagraphDir::Auto);
+        let (para_level, orig, levels) = resolve_with_context(&cps, context);
         let mut chars = Vec::with_capacity(cps.len());
         for idx in 0..cps.len() {
             chars.push((offsets[idx], orig[idx], levels[idx].max(para_level)));
@@ -332,37 +443,34 @@ fn canonical_bracket(ch: char) -> char {
 
 /// UAX #9 `P2–P3`: paragraph embedding level from the first strong character outside isolates.
 fn first_strong_level(classes: &[BidiClass]) -> u8 {
-    let mut isolate_depth = 0usize;
-    for &class in classes {
-        if class.is_isolate_initiator() {
-            isolate_depth += 1;
-        } else if class == BidiClass::Pdi {
-            if isolate_depth == 0 {
-                break;
-            }
-            isolate_depth -= 1;
-        } else if class == BidiClass::B && isolate_depth == 0 {
-            break;
-        } else if isolate_depth == 0 {
-            match class {
-                BidiClass::L => return 0,
-                BidiClass::R | BidiClass::Al => return 1,
-                _ => {}
-            }
-        }
-    }
-    0
+    ParagraphContext::START.resolve_level(classes)
+}
+
+/// Full UAX #9 character-level resolution seeded by [`ParagraphContext`].
+fn resolve_with_context(cps: &[char], context: ParagraphContext) -> (u8, Vec<BidiClass>, Vec<u8>) {
+    let orig: Vec<BidiClass> = cps.iter().copied().map(tables::bidi_class).collect();
+    let para_level = context.resolve_level(&orig);
+    resolve_with_level(cps, orig, para_level)
 }
 
 /// Full UAX #9 character-level resolution (`P2–P3`, `X1–X10`, `W1–W7`, `N0–N2`, `I1–I2`, `L1`).
+#[cfg(test)]
 fn resolve_raw(cps: &[char], dir: ParagraphDir) -> (u8, Vec<BidiClass>, Vec<u8>) {
-    let n = cps.len();
     let orig: Vec<BidiClass> = cps.iter().copied().map(tables::bidi_class).collect();
     let para_level = match dir {
         ParagraphDir::Ltr => 0,
         ParagraphDir::Rtl => 1,
         ParagraphDir::Auto => first_strong_level(&orig),
     };
+    resolve_with_level(cps, orig, para_level)
+}
+
+fn resolve_with_level(
+    cps: &[char],
+    orig: Vec<BidiClass>,
+    para_level: u8,
+) -> (u8, Vec<BidiClass>, Vec<u8>) {
+    let n = cps.len();
     if n == 0 {
         return (para_level, orig, Vec::new());
     }
@@ -1015,6 +1123,14 @@ mod tests {
                 levels: &[Some(2), Some(1)],
                 order: &[1, 0],
             },
+            // Unmatched leading PDI must not terminate P2 before the first strong RTL character.
+            ConformanceCase {
+                cps: &['\u{2069}', '\u{05e9}'],
+                dir: ParagraphDir::Auto,
+                para: 1,
+                levels: &[Some(1), Some(1)],
+                order: &[1, 0],
+            },
         ];
 
         for (index, case) in cases.iter().enumerate() {
@@ -1023,5 +1139,31 @@ mod tests {
             assert_eq!(levels.as_slice(), case.levels, "case {index}: levels");
             assert_eq!(order.as_slice(), case.order, "case {index}: visual order");
         }
+    }
+
+    #[test]
+    fn paragraph_context_carries_rtl_into_ascii_tail_and_resets_at_newline() {
+        let carried = ParagraphContext::START.advanced("שלום ");
+        let bidi = WindowBidi::resolve_with_context("hello!\nnext", carried)
+            .expect("carried RTL context resolves pure-ASCII continuation");
+        let first = bidi.paragraph_at(0).expect("first paragraph resolved");
+        assert_eq!(first.para_level(), 1);
+        assert!(bidi.paragraph_at("hello!\n".len()).is_none());
+    }
+
+    #[test]
+    fn space_plus_combining_mark_cluster_stops_l1_trailing_reset() {
+        let text = "\u{05d0} \u{202d}abc \u{0301}d\u{202c}";
+        let bidi = WindowBidi::resolve_with_context(text, ParagraphContext::START)
+            .expect("RTL + LRO paragraph resolves");
+        let para = bidi.paragraph_at(0).expect("paragraph at 0");
+        let mark_space_offset = "\u{05d0} \u{202d}abc".len();
+        let mark_space_len = " \u{0301}".len();
+        let (class, level) = para.cluster_info(mark_space_offset, mark_space_len);
+        assert_eq!(level, 2);
+        assert!(
+            !class.is_resettable_l1(),
+            "WS + NSM cluster must not reset under L1.4"
+        );
     }
 }

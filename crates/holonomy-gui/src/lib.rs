@@ -30,6 +30,7 @@ pub mod term;
 use holonomy_eye::{Fixed, Picture, Style};
 use holonomy_shell::{Editor, Effect, Intent, Move};
 use holonomy_text::{SegmentSink, SegmentSource};
+use zeroize::Zeroizing;
 
 /// The keyboard modifiers that change what a keystroke means.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -622,12 +623,16 @@ where
         let (picture, origin, text) = {
             let frame = self.editor.frame()?;
             let picture: Picture = frame.picture();
-            (picture, frame.origin(), frame.text().to_owned())
+            (
+                picture,
+                frame.origin(),
+                Zeroizing::new(frame.text().to_owned()),
+            )
         };
         self.surface.begin();
         self.surface.size(picture.width, picture.height);
         for (index, line) in picture.lines.iter().enumerate() {
-            if let Some(span) = picture.selection_on(index) {
+            for span in picture.selections_on(index) {
                 self.surface
                     .selection(span.x, line.top, span.end - span.x, line.height);
             }

@@ -63,13 +63,14 @@ mod style;
 mod view;
 mod window;
 
+pub use crate::bidi::ParagraphContext;
 pub use crate::cluster::{cluster_cells, ClusterContext, Clusters};
 pub use crate::face::{Face, FaceError};
 pub use crate::geom::{Fixed, Point};
 pub use crate::heights::{HeightModel, Window};
 pub use crate::layout::{
-    layout_styled, layout_styled_continuing, layout_styled_from, layout_window, Caret, Layout,
-    Line, Placed,
+    layout_styled, layout_styled_continuing, layout_styled_from, layout_styled_in_paragraph,
+    layout_window, Caret, Layout, Line, Placed,
 };
 pub use crate::picture::{Picture, PictureCluster, PictureLine, SelectionSpan};
 pub use crate::shaper::Shaper;

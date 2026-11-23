@@ -22,7 +22,9 @@
 
 use holonomy_eye::{Fixed, Shaper, Style};
 use holonomy_shell::Editor;
-use holonomy_text::{Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Typing};
+use holonomy_text::{
+    Appended, ResidentSet, SegmentId, SegmentSink, SegmentSource, Slab, Spine, Typing,
+};
 
 /// One logical unit per cluster, two for `m` and `中` — as in `editing.rs`.
 #[derive(Debug, Default)]
@@ -284,4 +286,116 @@ fn every_caret_a_frame_offers_lies_inside_its_text() {
             );
         }
     }
+}
+
+#[derive(Debug)]
+struct ExactLeaves {
+    leaves: Vec<Vec<u8>>,
+}
+
+impl SegmentSource for ExactLeaves {
+    fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+        let index = usize::try_from(segment.get())
+            .map_err(|_| format!("no {segment}"))?;
+        self.leaves
+            .get(index)
+            .cloned()
+            .ok_or_else(|| format!("no {segment}"))
+    }
+}
+
+fn editor_over_leaves(
+    pieces: &[&str],
+    width: Fixed,
+    viewport: Fixed,
+) -> Editor<Recorder, ExactLeaves, Fake> {
+    let mut spine = Spine::empty();
+    let mut leaves = Vec::with_capacity(pieces.len());
+    for (index, piece) in pieces.iter().enumerate() {
+        let bytes = piece.as_bytes().to_vec();
+        spine = spine.append(Slab::new(
+            SegmentId::new(index as u64),
+            0,
+            u32::try_from(bytes.len()).expect("leaf fits u32"),
+        ));
+        leaves.push(bytes);
+    }
+    let residency = ResidentSet::new(ExactLeaves { leaves }, 4_096, 0).expect("budget");
+    Editor::new(
+        Typing::resume(Recorder::default(), spine, 64),
+        residency,
+        Fake,
+        width,
+        viewport,
+    )
+}
+
+#[test]
+fn scrolled_rtl_paragraph_across_leaves_preserves_base_direction() {
+    // Leaf 0 opens an RTL paragraph ("שלום ", 5 units on line 0 at width 5); Leaf 1 holds a
+    // soft-wrapped pure-ASCII continuation ("ab!") with no RTL code points of its own.
+    let mut shell = editor_over_leaves(&["שלום ", "ab!"], Fixed::units(5), Fixed::units(20));
+    shell.reflow().expect("measured");
+    assert_eq!(shell.heights().total(), Fixed::units(40));
+
+    shell.scroll_to(Fixed::units(20));
+    let frame = shell.frame().expect("scrolled frame");
+    assert_eq!(frame.text(), "ab!");
+    let visual: String = frame.layout().lines()[0]
+        .clusters()
+        .iter()
+        .map(|cluster| cluster.text)
+        .collect();
+    assert_eq!(
+        visual, "!ab",
+        "scrolled continuation must inherit RTL paragraph direction from predecessor leaf"
+    );
+}
+
+#[test]
+fn newline_and_wide_cluster_at_leaf_start_preserve_carries_across_frames() {
+    // 1. Leaf 1 starts with '\n' after non-broken Leaf 0: frame write-back must keep `Carry.x > 0`
+    //    so scrolling to line 1 starts at "hello" rather than rendering a phantom blank line.
+    let mut nl = editor_over_leaves(&["abcd", "\nhello"], Fixed::units(10), Fixed::units(40));
+    nl.reflow().expect("measured");
+    assert_eq!(nl.heights().total(), Fixed::units(40));
+    let _ = nl.frame().expect("top frame");
+    assert_eq!(nl.heights().total(), Fixed::units(40));
+    nl.scroll_to(Fixed::units(20));
+    let scrolled = nl.frame().expect("scrolled to line 1");
+    assert_eq!(scrolled.text(), "hello");
+    assert_eq!(nl.heights().total(), Fixed::units(40));
+
+    // 2. Final 1-byte "\n" leaf completing a split "\r\n" owns the trailing empty line.
+    let mut crlf_shell = editor_over_leaves(&["ab\r", "\n"], Fixed::units(10), Fixed::units(40));
+    crlf_shell.reflow().expect("measured");
+    let reflow_total = crlf_shell.heights().total();
+    let _ = crlf_shell.frame().expect("frame");
+    assert_eq!(reflow_total, Fixed::units(40));
+    assert_eq!(crlf_shell.heights().total(), Fixed::units(40));
+
+    // 3. Leaf 1 starts with wide '中' (`adv = 2`) wrapping after Leaf 0's `"b"` (`adv = 1`).
+    let mut wide_shell = editor_over_leaves(&["b", "中"], Fixed::units(2), Fixed::units(40));
+    wide_shell.reflow().expect("measured");
+    let _ = wide_shell.frame().expect("top frame");
+    assert_eq!(wide_shell.heights().total(), Fixed::units(40));
+    wide_shell.scroll_to(Fixed::units(20));
+    let wide_scrolled = wide_shell.frame().expect("scrolled");
+    assert_eq!(wide_scrolled.text(), "中");
+}
+
+#[test]
+fn straddling_mark_followed_by_tiny_next_leaf_keeps_single_advance() {
+    // Leaf 1 ("\u{0301}b", 3 bytes) is wider than the 2-byte combining mark, while Leaf 2 ("z",
+    // 1 byte) is shorter than the mark: `measure_window` must check Leaf 1's own length rather
+    // than Leaf 2's when recording `skip`.
+    let pieces = ["a", "\u{0301}b", "z"];
+    let mut shell = editor_over_leaves(&pieces, Fixed::units(2), Fixed::units(40));
+    shell.reflow().expect("measured");
+    assert_eq!(shell.heights().total(), Fixed::units(40));
+    let _ = shell.frame().expect("top frame");
+    assert_eq!(shell.heights().total(), Fixed::units(40));
+    shell.scroll_to(Fixed::units(20));
+    let second_line = shell.frame().expect("second line");
+    assert_eq!(second_line.text(), "z");
 }

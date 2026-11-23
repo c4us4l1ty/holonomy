@@ -265,6 +265,30 @@ impl WindowText {
     pub fn leaves(&self) -> Window {
         self.leaves
     }
+
+    /// Volatile-zeroes this window's assembled plaintext capacity in place (`L-7`).
+    pub fn wipe_in_place(&mut self) -> usize {
+        // SAFETY: `wipe_byte_vec` clears the vector to length `0`, which is valid UTF-8.
+        wipe_byte_vec(unsafe { self.text.as_mut_vec() })
+    }
+}
+
+impl Drop for WindowText {
+    fn drop(&mut self) {
+        let _ = self.wipe_in_place();
+    }
+}
+
+fn wipe_byte_vec(buf: &mut Vec<u8>) -> usize {
+    let cap = buf.capacity();
+    let ptr = buf.as_mut_ptr();
+    for offset in 0..cap {
+        // SAFETY: `buf` owns `cap` allocated bytes.
+        unsafe { ptr.add(offset).write_volatile(0) };
+    }
+    buf.clear();
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    cap
 }
 
 /// Reads the text behind `window`, faulting in exactly the leaves the viewport covers.
@@ -299,9 +323,14 @@ pub fn window_text<S: SegmentSource>(
             origin: window.start(),
             leaves: window.leaves(),
         }),
-        Err(error) => Err(WindowTextError::NotText {
-            at: window.start() + error.utf8_error().valid_up_to() as u64,
-        }),
+        Err(error) => {
+            let valid_up_to = error.utf8_error().valid_up_to() as u64;
+            let mut raw = error.into_bytes();
+            let _ = wipe_byte_vec(&mut raw);
+            Err(WindowTextError::NotText {
+                at: window.start() + valid_up_to,
+            })
+        }
     }
 }
 
@@ -400,5 +429,24 @@ mod tests {
             assert!(window.end() <= spine.len());
             assert!(window.start() <= window.end());
         }
+    }
+
+    #[test]
+    fn window_text_wipe_in_place_zeroes_backing_capacity() {
+        let mut wt = WindowText {
+            text: String::from("decrypted-viewport-plaintext"),
+            origin: 0,
+            leaves: Window::empty(),
+        };
+        let cap = wt.text.capacity();
+        let ptr = wt.text.as_ptr();
+        assert_eq!(wt.wipe_in_place(), cap);
+        assert!(wt.is_empty());
+        let mut acc = 0u8;
+        for offset in 0..cap {
+            // SAFETY: `wt.text` still owns the `cap`-byte allocation until `wt` drops.
+            acc |= unsafe { core::ptr::read_volatile(ptr.add(offset)) };
+        }
+        assert_eq!(acc, 0);
     }
 }

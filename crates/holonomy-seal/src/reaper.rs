@@ -13,13 +13,11 @@
 //!    buffer reports `ghost_bytes > 0`, making decorative wipe claims fail loudly.
 
 use core::hint::spin_loop;
-use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::ptr::{read_volatile, slice_from_raw_parts_mut, write_volatile, NonNull};
+use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-
-use zeroize::Zeroize;
 
 /// Maximum simultaneously armed secret/slab/canary arenas (`2048` covers a full 4 MiB viewport of
 /// 4 KiB slabs plus capability keys and zeroize canaries).
@@ -208,9 +206,16 @@ pub struct CanaryReport {
 }
 
 struct CanarySlab {
-    bytes: Box<[u8]>,
+    ptr: NonNull<u8>,
+    len: usize,
     armed: Option<(Arc<SecretArenas>, ArenaSlot)>,
 }
+
+// SAFETY: `ptr` owns a heap allocation of `len` bytes mutated only while holding `&mut Self`
+// before arming, during `SecretArenas::wipe` (coordinated by atomic slot state), or in `Drop`
+// after `unregister` completes; concurrent inspection uses `read_volatile`.
+unsafe impl Send for CanarySlab {}
+unsafe impl Sync for CanarySlab {}
 
 impl CanarySlab {
     fn new(seed: u64, len: usize) -> Self {
@@ -226,21 +231,22 @@ impl CanarySlab {
             // Never emit `0x00`: every canary byte starts non-zero so any unwiped byte is caught.
             *byte = if raw == 0 { 0xA5 } else { raw };
         }
+        let raw = Box::into_raw(vec.into_boxed_slice()).cast::<u8>();
+        let ptr = NonNull::new(raw).expect("Box::into_raw is non-null");
         Self {
-            bytes: vec.into_boxed_slice(),
+            ptr,
+            len,
             armed: None,
         }
     }
 
     fn arm(&mut self, arenas: &Arc<SecretArenas>) -> bool {
-        if self.armed.is_some() || self.bytes.is_empty() {
+        if self.armed.is_some() || self.len == 0 {
             return false;
         }
-        let ptr = self.bytes.as_mut_ptr();
-        let len = self.bytes.len();
-        // SAFETY: `self.bytes` is a fixed-size boxed slice whose address does not move, and `Drop`
-        // unregisters the slot before zeroizing and freeing `self.bytes`.
-        if let Some(slot) = unsafe { arenas.register(ptr, len) } {
+        // SAFETY: `self.ptr` has raw-pointer provenance over `self.len` writable bytes unaffected
+        // by moving `Self`, and `Drop` unregisters `slot` before zeroizing and freeing `self.ptr`.
+        if let Some(slot) = unsafe { arenas.register(self.ptr.as_ptr(), self.len) } {
             self.armed = Some((Arc::clone(arenas), slot));
             true
         } else {
@@ -249,11 +255,11 @@ impl CanarySlab {
     }
 
     fn ghost_bytes(&self) -> usize {
-        let ptr = self.bytes.as_ptr();
-        let len = self.bytes.len();
+        let ptr = self.ptr.as_ptr().cast_const();
+        let len = self.len;
         let mut ghosts = 0usize;
         for offset in 0..len {
-            // SAFETY: `self.bytes` owns `len` initialized bytes.
+            // SAFETY: `self.ptr` owns `len` initialized bytes.
             let b = unsafe { read_volatile(ptr.add(offset)) };
             if b != 0 {
                 ghosts += 1;
@@ -268,7 +274,14 @@ impl Drop for CanarySlab {
         if let Some((arenas, slot)) = self.armed.take() {
             arenas.unregister(slot);
         }
-        self.bytes.zeroize();
+        if self.len > 0 {
+            // SAFETY: `self.ptr` owns `self.len` writable bytes and `unregister` completed above.
+            unsafe { volatile_zero_range(self.ptr.as_ptr(), self.len) };
+            compiler_fence(Ordering::SeqCst);
+        }
+        let raw = slice_from_raw_parts_mut(self.ptr.as_ptr(), self.len);
+        // SAFETY: `raw` reconstructs the exact `Box<[u8]>` turned into raw parts in `Self::new`.
+        unsafe { drop(Box::from_raw(raw)) };
     }
 }
 
@@ -318,7 +331,7 @@ impl CanarySet {
         let mut ghost_canaries = 0usize;
         let mut ghost_bytes = 0usize;
         for slab in &self.slabs {
-            bytes_sampled = bytes_sampled.saturating_add(slab.bytes.len());
+            bytes_sampled = bytes_sampled.saturating_add(slab.len);
             let ghosts = slab.ghost_bytes();
             if ghosts > 0 {
                 ghost_canaries += 1;
@@ -407,13 +420,15 @@ impl Tripwire {
     /// Fires an immediate tripwire (`Manual`, `Suspend`, or `UmbilicalDisconnect`).
     pub fn fire(&self, reason: TripReason) {
         let now = self.now_ns().max(1);
-        if self
+        // Publish `tripped_at_ns` *before* `explicit_reason` so a concurrent `evaluate()` that
+        // `Acquire`-loads `explicit_reason != 0` always observes the real trip timestamp rather
+        // than a zero sentinel clamped to `1`.
+        let _ = self
+            .tripped_at_ns
+            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self
             .explicit_reason
-            .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            self.tripped_at_ns.store(now, Ordering::Release);
-        }
+            .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
     }
 
     /// Evaluates whether the tripwire has fired at the current monotonic instant.
@@ -612,5 +627,28 @@ mod tests {
         assert_eq!(outcome.wipe.bytes_wiped, 8 * 512);
         assert_eq!(outcome.canaries.ghost_canaries, 0);
         assert_eq!(outcome.canaries.ghost_bytes, 0);
+    }
+
+    #[test]
+    fn tripwire_fire_publishes_real_timestamp_to_concurrent_evaluator() {
+        for _ in 0..64 {
+            let tripwire = Tripwire::new(None);
+            thread::sleep(Duration::from_micros(50));
+            let min_expected = tripwire.now_ns();
+            let worker_tripwire = Arc::clone(&tripwire);
+            let evaluator = thread::spawn(move || loop {
+                if let Some((reason, at)) = worker_tripwire.evaluate() {
+                    return (reason, at);
+                }
+                spin_loop();
+            });
+            tripwire.fire(TripReason::Suspend);
+            let (reason, at) = evaluator.join().expect("evaluator joined");
+            assert_eq!(reason, TripReason::Suspend);
+            assert!(
+                at >= min_expected,
+                "observed clamped timestamp {at} < {min_expected}"
+            );
+        }
     }
 }

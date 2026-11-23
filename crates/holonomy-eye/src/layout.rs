@@ -22,7 +22,7 @@
 //! bijectively onto the line's visual boundary positions so L-8 holds across LTR, RTL, and mixed
 //! bidirectional text (AUDIT OQ-11). Word-level break opportunities remain a separate concern.
 
-use crate::bidi::{reorder_line, BidiClass, ResolvedParagraph, WindowBidi};
+use crate::bidi::{reorder_line, BidiClass, ParagraphContext, ResolvedParagraph, WindowBidi};
 use crate::cluster::{ClusterContext, Clusters};
 use crate::geom::{Fixed, Point};
 use crate::shaper::Shaper;
@@ -228,6 +228,7 @@ pub struct Layout<'a> {
     width: Fixed,
     height: Fixed,
     carry: ClusterContext,
+    paragraph: ParagraphContext,
 }
 
 impl<'a> Layout<'a> {
@@ -258,6 +259,14 @@ impl<'a> Layout<'a> {
     #[must_use]
     pub fn carry(&self) -> ClusterContext {
         self.carry
+    }
+
+    /// The UAX #9 paragraph-direction state (`P2–P3`) at the end of the window's text, carried
+    /// beside [`Self::carry`] so a scrolled viewport starting inside a multi-leaf paragraph
+    /// inherits the open paragraph's base direction.
+    #[must_use]
+    pub fn paragraph_carry(&self) -> ParagraphContext {
+        self.paragraph
     }
 
     /// The caret at document byte `byte`, if `byte` is a caret position in this window.
@@ -401,6 +410,34 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
     width: Fixed,
     shaper: &S,
 ) -> Layout<'a> {
+    layout_styled_in_paragraph(
+        styled,
+        origin,
+        start_x,
+        context,
+        ParagraphContext::START,
+        width,
+        shaper,
+    )
+}
+
+/// Lays styled text out as the continuation of a line, a grapheme cluster, and a UAX #9
+/// paragraph's base direction (`P2–P3`).
+///
+/// When a hard-break-delimited RTL paragraph spans multiple 4 KiB leaves and the viewport starts
+/// at a soft-wrapped line inside a later leaf, `paragraph` carries the open paragraph's direction
+/// into the window so pure-ASCII or neutral continuation lines keep the paragraph's RTL base
+/// direction rather than resetting to LTR.
+#[must_use]
+pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
+    styled: StyledText<'a>,
+    origin: u64,
+    start_x: Fixed,
+    context: ClusterContext,
+    paragraph: ParagraphContext,
+    width: Fixed,
+    shaper: &S,
+) -> Layout<'a> {
     let text = styled.text();
     let opens_inside_a_cluster = text
         .chars()
@@ -493,7 +530,7 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
     if let Some(first) = lines.first_mut() {
         first.continues_cluster = opens_inside_a_cluster;
     }
-    if let Some(bidi) = WindowBidi::resolve(text) {
+    if let Some(bidi) = WindowBidi::resolve_with_context(text, paragraph) {
         for line in &mut lines {
             if line.clusters.is_empty() {
                 continue;
@@ -510,6 +547,7 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
         width,
         height: total,
         carry: segments.carry(),
+        paragraph: paragraph.advanced(text),
     }
 }
 
@@ -989,6 +1027,44 @@ mod tests {
             fresh.clusters()[0].x,
             Fixed::ZERO,
             "the cluster starts the line"
+        );
+    }
+
+    #[test]
+    fn carried_rtl_paragraph_context_reorders_ascii_continuation_and_selections() {
+        let carried = ParagraphContext::START.advanced("שלום ");
+        let laid = layout_styled_in_paragraph(
+            StyledText::plain("ab!"),
+            10,
+            Fixed::ZERO,
+            ClusterContext::START,
+            carried,
+            Fixed::units(80),
+            &Fake::new(),
+        );
+        let line = &laid.lines()[0];
+        let visual: String = line.clusters().iter().map(|c| c.text).collect();
+        assert_eq!(visual, "!ab");
+        for (_, byte) in line.boundaries() {
+            let caret = laid.paint_point(byte).expect("caret exists");
+            let back = laid
+                .hit_test(Point::new(caret.x, caret.top))
+                .expect("hit exists");
+            assert_eq!(back.byte, byte);
+        }
+
+        let mixed = layout_styled(
+            StyledText::plain("ab של cd"),
+            0,
+            Fixed::units(80),
+            &Fake::new(),
+        );
+        let picture = mixed.picture(None, Some((1, 5)));
+        let boxes: Vec<_> = picture.selections_on(0).collect();
+        assert_eq!(
+            boxes.len(),
+            2,
+            "logical selection across LTR/RTL seam emits two visual selection spans"
         );
     }
 }

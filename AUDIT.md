@@ -68,6 +68,34 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-80 — Cross-crate bug hunt closed split-BiDi selection rendering, multi-leaf
+  `ParagraphContext` and `Carry` invariants, UAX #9 `P2`/`L1.4` edge cases, reaper provenance and
+  timestamp ordering, and residual plaintext buffers.**
+  Auditing `holonomy-eye`, `holonomy-shell`, `holonomy-gui`, `holonomy-text`, and `holonomy-seal`
+  together with differential multi-leaf fuzzing uncovered and closed six defects:
+  (1) `Picture::selection_on` and `App::draw` took `.find(...)` per line and dropped subsequent
+  disjoint visual `SelectionSpan`s on mixed-BiDi lines; `Picture::selections_on` and `App::draw`
+  now render every span (`picture.rs`, `holonomy-gui/tests/terminal.rs`).
+  (2) `ResolvedParagraph::cluster_info` classified `" \u{0301}"` (`WS` + `NSM`) from its leading
+  `WS` alone so `L1.4` reset the cluster across a non-resettable `NSM`, and `first_strong_level`
+  stopped `P2` early on an unmatched leading `PDI`; both now follow UAX #9 (`bidi.rs`).
+  (3) Multi-leaf `holonomy-shell` lost an open RTL paragraph's base direction when scrolled to a
+  pure-ASCII soft-wrap continuation in a later leaf, undercounted a final 1-byte `"\n"` leaf
+  completing a split `"\r\n"`, checked `spans[index + 1].len()` instead of `span.len()` for
+  straddling-cluster `skip`, and clobbered `Carry.x` in `measure_window` when a leaf opened on
+  `'\n'` or a wrapped wide cluster (`'中'`); fixed via `ParagraphContext`, `layout_styled_in_paragraph`,
+  `window_opening`, and predecessor-end `Carry.x` (`frame_stability.rs`).
+  (4) `Tripwire::fire` published `explicit_reason` before `tripped_at_ns`, allowing a concurrent
+  `evaluate()` to observe a zero sentinel clamped to `1`; `tripped_at_ns` is now won with `AcqRel`
+  before `explicit_reason` (`reaper.rs`).
+  (5) `LockedSecret<N>` and `CanarySlab` held `Box` (`Unique`/non-`UnsafeCell`) while armed in
+  `SecretArenas`, risking pointer-provenance invalidation when moved by value; both now hold raw
+  `NonNull` over `UnsafeCell` (`secret.rs`, `reaper.rs`).
+  (6) `Typing`'s `Step::Root.held` undo/redo copies, `WindowText`, and `App::draw`'s temporary
+  frame `String` freed plaintext without scrubbing; `Step::Root.held` and `App::draw` now use
+  `Zeroizing`, `Typing::wipe_in_place` scrubs both open and historical buffers, and `WindowText`
+  volatile-zeroes its backing capacity on `Drop` (`typing.rs`, `window.rs`).
+
 - **2026-11-22 — D-79 — Block 9 re-audit caught an unwiped `realloc` in `SlabText::from_plaintext`,
   and `L-7` wipes a full 4 MiB viewport + live keys + 32 canaries in under 1 ms with zero
   allocations.**

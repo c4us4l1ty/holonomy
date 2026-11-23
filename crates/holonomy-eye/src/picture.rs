@@ -116,13 +116,25 @@ impl Picture {
             .unwrap_or(&[])
     }
 
-    /// The selection run on line `index`, if any.
-    #[must_use]
-    pub fn selection_on(&self, index: usize) -> Option<SelectionSpan> {
+    /// Every visual selection box on line `index`, in left-to-right order.
+    ///
+    /// A single logical selection across an LTR/RTL transition on a mixed-direction line splits
+    /// into two or more disjoint visual spans (`AUDIT OQ-11`), so renderers iterate this rather
+    /// than assuming one box per line.
+    pub fn selections_on(&self, index: usize) -> impl Iterator<Item = SelectionSpan> + '_ {
         self.selection
             .iter()
             .copied()
-            .find(|span| span.line == index)
+            .filter(move |span| span.line == index)
+    }
+
+    /// The first visual selection run on line `index`, if any.
+    ///
+    /// Prefer [`Self::selections_on`] when rendering: mixed bidirectional lines can carry more
+    /// than one disjoint visual selection box on the same line.
+    #[must_use]
+    pub fn selection_on(&self, index: usize) -> Option<SelectionSpan> {
+        self.selections_on(index).next()
     }
 }
 

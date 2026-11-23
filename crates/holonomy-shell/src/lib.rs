@@ -53,9 +53,9 @@ mod intent;
 pub use crate::intent::{Effect, Intent, Move};
 
 use holonomy_eye::{
-    byte_window, layout_styled, layout_styled_continuing, window_text, Caret, ClusterContext,
-    Clusters, Fixed, HeightModel, Layout, Picture, Point, ShapedWindow, Shaper, StyledText, View,
-    Window, WindowText, WindowTextError,
+    byte_window, layout_styled_in_paragraph, window_text, Caret, ClusterContext, Clusters, Fixed,
+    HeightModel, Layout, ParagraphContext, Picture, Point, ShapedWindow, Shaper, Style, StyledText,
+    View, Window, WindowText, WindowTextError,
 };
 use holonomy_text::{
     LiveSpan, ResidentSet, SegmentSink, SegmentSource, Selection, Typing, TypingError,
@@ -731,11 +731,12 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let carried = self.carry_of(leaf)?;
             let read = self.read(start, end)?;
             let (text, from) = leaf_text(read.text(), start, carried);
-            let layout = layout_styled_continuing(
+            let layout = layout_styled_in_paragraph(
                 StyledText::plain(text),
                 from,
                 carried.x,
                 carried.cluster,
+                carried.paragraph,
                 self.width,
                 &self.shaper,
             );
@@ -821,11 +822,12 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         // `let` in the block would drop the window while the text still pointed into it.
         let read = self.read(sealed, len)?;
         let (text, from) = leaf_text(read.text(), sealed, carry);
-        let layout = layout_styled_continuing(
+        let layout = layout_styled_in_paragraph(
             StyledText::plain(text),
             from,
             carry.x,
             carry.cluster,
+            carry.paragraph,
             self.width,
             &self.shaper,
         );
@@ -899,14 +901,16 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
                 x: carried.x,
                 after_cr: false,
                 cluster: carried.cluster,
+                paragraph: carried.paragraph,
                 skip: 0,
             });
         }
-        let layout = layout_styled_continuing(
+        let layout = layout_styled_in_paragraph(
             StyledText::plain(text),
             start,
             carried.x,
             carried.cluster,
+            carried.paragraph,
             self.width,
             &self.shaper,
         );
@@ -918,6 +922,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             },
             after_cr: text.ends_with('\r'),
             cluster: layout.carry(),
+            paragraph: layout.paragraph_carry(),
             // The tail a leaf places for the next one is the look it took past its own end; a
             // reveal has no such look, so the next leaf trims nothing.
             skip: 0,
@@ -1012,17 +1017,26 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             return Ok((Fixed::ZERO, carried));
         };
         let (start, end) = (span.offset(), span.offset() + span.len());
+        let last = leaf + 1 == self.typing.spine().slab_count();
         let read = self.read(start, end)?;
         let (text, from) = leaf_text(read.text(), start, carried);
         if text.is_empty() {
-            // Every byte of this leaf was the tail of a cluster the leaf before it placed. There is
-            // nothing here to shape and nothing to hand on but the position it ends at.
+            // Either every byte of this leaf was the tail of a cluster the leaf before it placed
+            // (`!carried.x.is_zero()`), or this leaf held only the `\n` completing a split `\r\n`
+            // (`carried.x.is_zero()`): in the latter case, if this is the document's last leaf,
+            // nobody follows to claim the trailing empty line after the break.
+            let trailing = if last && carried.x.is_zero() {
+                self.shaper.line_height(Style::DEFAULT)
+            } else {
+                Fixed::ZERO
+            };
             return Ok((
-                Fixed::ZERO,
+                trailing,
                 Carry {
                     x: carried.x,
                     after_cr: false,
                     cluster: carried.cluster,
+                    paragraph: carried.paragraph,
                     skip: 0,
                 },
             ));
@@ -1040,11 +1054,12 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             padded = format!("{text}{tail}");
             padded.as_str()
         };
-        let layout = layout_styled_continuing(
+        let layout = layout_styled_in_paragraph(
             StyledText::plain(text),
             from,
             carried.x,
             carried.cluster,
+            carried.paragraph,
             self.width,
             &self.shaper,
         );
@@ -1052,7 +1067,6 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         // The first line is the tail of a line that began in an earlier leaf: it was charged there,
         // and it is not a line of this one.
         let inherited = usize::from(!carried.x.is_zero());
-        let last = leaf + 1 == self.typing.spine().slab_count();
         let mut height = Fixed::ZERO;
         for (index, line) in lines.iter().enumerate() {
             if index < inherited {
@@ -1073,6 +1087,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             },
             after_cr: text.ends_with('\r'),
             cluster: layout.carry(),
+            paragraph: layout.paragraph_carry(),
             skip: tail.len(),
         };
         Ok((height, next))
@@ -1107,6 +1122,13 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             provisional = true;
         }
 
+        let first = if start < document_end {
+            self.leaf_of(start).unwrap_or_else(|| leaves.first())
+        } else {
+            leaves.first()
+        };
+        let (head_carry, start_cluster, start_paragraph) = self.window_opening(first, start)?;
+
         // The window ends at a leaf, and a leaf cut is a byte count, so the window can end inside
         // a cluster. A frame draws *and* hit tests, so it has to end where the document has a
         // position: the cluster's tail comes with the window and is painted with it, and the eye
@@ -1118,10 +1140,18 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         self.window = Some(read);
         let full: &str = self.window.as_ref().map_or("", |text| text.text());
         let cut = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
-        let end = end + tail_bytes(full, cut, ClusterContext::START) as u64;
+        let end = end + tail_bytes(full, cut, start_cluster) as u64;
         let len = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
         let text: &str = full.get(..len).unwrap_or(full);
-        let layout = layout_styled(StyledText::plain(text), start, self.width, &self.shaper);
+        let layout = layout_styled_in_paragraph(
+            StyledText::plain(text),
+            start,
+            Fixed::ZERO,
+            start_cluster,
+            start_paragraph,
+            self.width,
+            &self.shaper,
+        );
 
         let spans = self
             .typing
@@ -1146,13 +1176,15 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
                 .draft()
                 .locate(self.typing.spine(), end)
                 .is_some_and(|hit| hit.within() == 0);
-        let first = leaves.first();
         let bounds = WindowBounds {
             start,
             end,
             document_end,
             head_whole,
             tail_whole,
+            head_carry,
+            start_cluster,
+            start_paragraph,
         };
         let measured = measure_window(&layout, text, &spans, bounds);
         for (index, height, carry) in measured {
@@ -1345,11 +1377,12 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let carried = self.carry_of(leaf)?;
         let read = self.read(start, end)?;
         let (text, from) = leaf_text(read.text(), start, carried);
-        let layout = layout_styled_continuing(
+        let layout = layout_styled_in_paragraph(
             StyledText::plain(text),
             from,
             carried.x,
             carried.cluster,
+            carried.paragraph,
             self.width,
             &self.shaper,
         );
@@ -1372,6 +1405,54 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             }
         }
         Ok(at)
+    }
+
+    /// Resolves the head leaf's [`Carry`] alongside the [`ClusterContext`] and [`ParagraphContext`]
+    /// at the scrolled window's opening byte `start`, advancing across at most one leaf prefix.
+    fn window_opening(
+        &mut self,
+        first_leaf: usize,
+        start: u64,
+    ) -> Result<(Carry, ClusterContext, ParagraphContext), ShellError> {
+        if start == 0 {
+            return Ok((
+                Carry::default(),
+                ClusterContext::START,
+                ParagraphContext::START,
+            ));
+        }
+        let head_carry = if first_leaf < self.measured.len() {
+            self.carry_of(first_leaf)?
+        } else {
+            Carry::default()
+        };
+        let Some(open_leaf) = self.leaf_of(start) else {
+            return Ok((head_carry, ClusterContext::START, ParagraphContext::START));
+        };
+        let open_carry = if open_leaf == first_leaf {
+            head_carry
+        } else {
+            self.carry_of(open_leaf)?
+        };
+        let Some((leaf_start, leaf_end)) = self.leaf_bounds(open_leaf) else {
+            return Ok((head_carry, open_carry.cluster, open_carry.paragraph));
+        };
+        if start <= leaf_start {
+            return Ok((head_carry, open_carry.cluster, open_carry.paragraph));
+        }
+        let read = self.read(leaf_start, leaf_end)?;
+        let (leaf_body, body_from) = leaf_text(read.text(), leaf_start, open_carry);
+        let prefix_len = usize::try_from(start.saturating_sub(body_from))
+            .unwrap_or(0)
+            .min(leaf_body.len());
+        let Some(prefix) = leaf_body.get(..prefix_len) else {
+            return Ok((head_carry, open_carry.cluster, open_carry.paragraph));
+        };
+        let mut clusters = Clusters::continuing(prefix, open_carry.cluster);
+        while clusters.next().is_some() {}
+        let start_cluster = clusters.carry();
+        let start_paragraph = open_carry.paragraph.advanced(prefix);
+        Ok((head_carry, start_cluster, start_paragraph))
     }
 
     /// Reads `start..end` out of the session, through the document's own reader.
@@ -1599,6 +1680,10 @@ struct Carry {
     /// The UAX #29 state where this leaf's geometry begins — after `skip` bytes, so a leaf that
     /// begins inside a cluster is told the state the document had there (AUDIT OQ-17, D-25).
     cluster: ClusterContext,
+    /// The UAX #9 paragraph base-direction state (`P2–P3`) where this leaf's geometry begins,
+    /// carried across leaves so scrolled continuations of a multi-leaf paragraph preserve its
+    /// RTL/LTR base direction (AUDIT OQ-11).
+    paragraph: ParagraphContext,
     /// Bytes at the leaf's start the predecessor already placed, because they were the tail of a
     /// cluster that began there. One cluster, one advance, at the leaf that starts it (AUDIT D-25).
     skip: usize,
@@ -1721,6 +1806,9 @@ struct WindowBounds {
     document_end: u64,
     head_whole: bool,
     tail_whole: bool,
+    head_carry: Carry,
+    start_cluster: ClusterContext,
+    start_paragraph: ParagraphContext,
 }
 
 /// What one window measured, for the leaves it measured **in full**: their heights and the carry
@@ -1745,23 +1833,38 @@ fn measure_window(
     let document_end = bounds.document_end;
     let mut heights = vec![Fixed::ZERO; spans.len()];
     let mut offsets: Vec<Option<Fixed>> = vec![None; spans.len()];
-    // The segmentation state each leaf hands the next. The window is already text, so this is one
-    // pass over it with no read and no shaping: a leaf that begins inside a cluster is recorded
-    // with the state that says so, which is what keeps a later leaf-by-leaf layout of it segmenting
-    // as the document does (AUDIT OQ-17).
-    let mut context = ClusterContext::default();
+    // The segmentation and paragraph-direction states each leaf hands the next. The window is
+    // already text, so this is one pass over it with no read and no shaping: a leaf that begins
+    // inside a cluster or a multi-leaf paragraph is recorded with the state that says so, keeping
+    // later leaf-by-leaf layout identical to the document's (AUDIT OQ-11, OQ-17).
+    let mut context = bounds.start_cluster;
+    let mut paragraph = bounds.start_paragraph;
     let mut contexts: Vec<ClusterContext> = Vec::with_capacity(spans.len());
+    let mut paragraphs: Vec<ParagraphContext> = Vec::with_capacity(spans.len());
     let mut skips: Vec<usize> = Vec::with_capacity(spans.len());
     for (index, span) in spans.iter().enumerate() {
         let low = usize::try_from(span.offset().saturating_sub(start)).unwrap_or(0);
         let high = usize::try_from((span.offset() + span.len()).saturating_sub(start))
             .unwrap_or(0)
             .min(text.len());
+        if index == 0 {
+            contexts.push(bounds.head_carry.cluster);
+            paragraphs.push(bounds.head_carry.paragraph);
+            skips.push(bounds.head_carry.skip);
+            if let Some(slice) = text.get(low..high) {
+                let mut clusters = Clusters::continuing(slice, context);
+                while clusters.next().is_some() {}
+                context = clusters.carry();
+                paragraph.advance(slice);
+            }
+            continue;
+        }
         // The carry is the one a leaf is **measured with**: the state where its own geometry
         // begins — after any bytes its predecessor placed — and the count of those bytes. A leaf
         // begins inside a cluster only when the cut opened one, and then the leaf before it placed
         // the tail unless the tail was longer than the look it takes (AUDIT D-24, D-25).
         let mut opens = context;
+        let mut para_opens = paragraph;
         let mut skip = 0usize;
         if let Some(slice) = text.get(low..high) {
             let mut clusters = Clusters::continuing(slice, context);
@@ -1771,22 +1874,24 @@ fn measure_window(
                         .chars()
                         .next()
                         .is_some_and(|first| context.joins(first));
-                // The predecessor can only have placed the tail if it fitted inside the look it
-                // takes — the leaf after it, whole — or if the cluster ends at the document's end
-                // (AUDIT D-25).
-                let look = spans
-                    .get(index + 1)
-                    .map_or(0, |next| usize::try_from(next.len()).unwrap_or(0));
+                // The predecessor (`spans[index - 1]`) looked into *this* leaf (`slice`), whole,
+                // or to the document's end (AUDIT D-25).
+                let look = high - low;
                 let reaches_end = span.offset() + span.len() >= document_end;
                 if joins_before && (cluster.len() < look || reaches_end) {
-                    skip = cluster.len().min(high - low);
+                    skip = cluster.len().min(look);
                     opens = clusters.carry();
+                    if let Some(skipped) = slice.get(..skip) {
+                        para_opens.advance(skipped);
+                    }
                 }
             }
             while clusters.next().is_some() {}
             context = clusters.carry();
+            paragraph.advance(slice);
         }
         contexts.push(opens);
+        paragraphs.push(para_opens);
         skips.push(skip);
     }
     for line in layout.lines() {
@@ -1803,11 +1908,12 @@ fn measure_window(
             heights[index] += line.height();
         }
     }
-    // The logical line fill (`start_x`) where each leaf's geometry begins: the accumulated
-    // advance on that line before the first cluster at or after the byte the leaf starts its own
-    // layout at. Accumulating in logical byte order keeps multi-leaf wrapping invariant even when
-    // UAX #9 reorders a line's visual cluster `x` coordinates (AUDIT D-25, OQ-11).
-    let mut clusters: Vec<(u64, Fixed)> = Vec::new();
+    // The logical line fill (`start_x`) where each leaf's geometry begins: zero when the byte
+    // immediately before `at` is a hard break (`\r` or `\n`), otherwise the logical `end_x` of the
+    // last cluster ending before `at`. Accumulating in logical byte order keeps multi-leaf
+    // wrapping invariant across soft wraps, leading breaks, and UAX #9 reordering (AUDIT D-25,
+    // OQ-11).
+    let mut cluster_ends: Vec<(u64, Fixed)> = Vec::new();
     for line in layout.lines() {
         let base_x = line
             .clusters()
@@ -1817,21 +1923,30 @@ fn measure_window(
         by_byte.sort_unstable_by_key(|cluster| cluster.byte);
         let mut cursor = base_x;
         for cluster in by_byte {
-            clusters.push((cluster.byte, cursor));
             cursor += cluster.advance;
+            cluster_ends.push((cluster.byte, cursor));
         }
     }
-    let end_x = layout
-        .lines()
-        .last()
-        .map_or(Fixed::ZERO, |line| line.end_x());
     for (index, span) in spans.iter().enumerate() {
+        if index == 0 {
+            offsets[index] = Some(bounds.head_carry.x);
+            continue;
+        }
         let at = span.offset() + skips[index] as u64;
-        offsets[index] = clusters
-            .iter()
-            .find(|(byte, _)| *byte >= at)
-            .map(|(_, x)| *x)
-            .or_else(|| (at >= end).then_some(end_x));
+        let prev_byte = usize::try_from(at.saturating_sub(start))
+            .ok()
+            .and_then(|rel| rel.checked_sub(1))
+            .and_then(|rel| text.as_bytes().get(rel))
+            .copied();
+        offsets[index] = if matches!(prev_byte, None | Some(b'\r' | b'\n')) {
+            Some(Fixed::ZERO)
+        } else {
+            let pos = cluster_ends.partition_point(|&(byte, _)| byte < at);
+            Some(
+                pos.checked_sub(1)
+                    .map_or(bounds.head_carry.x, |last| cluster_ends[last].1),
+            )
+        };
     }
     let last = spans.len() - 1;
     spans
@@ -1848,6 +1963,9 @@ fn measure_window(
                 && span.offset() + span.len() <= end
         })
         .map(|(index, span)| {
+            if index == 0 {
+                return (0, heights[0], bounds.head_carry);
+            }
             // The **predecessor's** last byte, read out of the window the frame already holds: a CR
             // there is what the leaf before this one hands it, so it is the byte before the leaf's
             // start — the window's own start has none, and it is a line start, so it needs none.
@@ -1862,6 +1980,7 @@ fn measure_window(
                     x: offsets[index].unwrap_or(Fixed::ZERO),
                     after_cr: before == Some(&b'\r'),
                     cluster: contexts[index],
+                    paragraph: paragraphs[index],
                     skip: skips[index],
                 },
             )

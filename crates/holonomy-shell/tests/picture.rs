@@ -327,11 +327,13 @@ fn a_selection_covers_exactly_the_clusters_between_its_ends() {
     let mut painted = 0u64;
     let mut absent = 0u64;
     for (index, line) in picture.lines.iter().enumerate() {
-        let span = picture.selection_on(index);
+        let spans: Vec<_> = picture.selections_on(index).collect();
         for cluster in picture.clusters_on(index) {
             let bytes = cluster.byte..cluster.byte + cluster.len as u64;
             let selected = bytes.start < end && bytes.end > start;
-            let covered = span.is_some_and(|span| span.x <= cluster.x && cluster.end() <= span.end);
+            let covered = spans
+                .iter()
+                .any(|span| span.x <= cluster.x && cluster.end() <= span.end);
             let says = if covered { "painted" } else { "unpainted" };
             let wanted = if selected { "painted" } else { "unpainted" };
             assert_eq!(
@@ -341,7 +343,9 @@ fn a_selection_covers_exactly_the_clusters_between_its_ends() {
             );
             // Whole clusters only: a painted cluster is inside its line's box.
             if covered {
-                assert!(span.expect("a span").end <= line.end_x);
+                for span in &spans {
+                    assert!(span.end <= line.end_x);
+                }
                 painted += 1;
             } else {
                 absent += 1;
@@ -376,5 +380,40 @@ fn a_selection_covers_exactly_the_clusters_between_its_ends() {
                 "line {index}: a cluster past the span"
             );
         }
+    }
+}
+
+#[test]
+fn mixed_bidi_selection_emits_and_covers_disjoint_visual_spans() {
+    let mut shell = editor();
+    shell.type_text("ab של cd").expect("typed mixed BiDi");
+    // Logical bytes `1..5` select `'b'`, `' '`, and `'ש'` (`'ל'` sits visually between `' '` and
+    // `'ש'`), splitting the highlight on line 0 into two disjoint visual boxes.
+    let b_point = {
+        let frame = shell.frame().expect("initial frame");
+        frame.layout().paint_point(1).expect("caret at 1")
+    };
+    let after_shin = {
+        let frame = shell.frame().expect("initial frame");
+        frame.layout().paint_point(5).expect("caret at 5")
+    };
+    shell
+        .click(Point::new(b_point.x, b_point.top))
+        .expect("clicked 1");
+    shell
+        .drag_to(Point::new(after_shin.x, after_shin.top))
+        .expect("dragged to 5");
+    let frame = shell.frame().expect("selected frame");
+    assert_eq!(frame.selection(), Some((1, 5)));
+    let picture = frame.picture();
+    let spans: Vec<_> = picture.selections_on(0).collect();
+    assert_eq!(spans.len(), 2, "expected two disjoint selection boxes");
+    for cluster in picture.clusters_on(0) {
+        let bytes = cluster.byte..cluster.byte + cluster.len as u64;
+        let selected = bytes.start < 5 && bytes.end > 1;
+        let covered = spans
+            .iter()
+            .any(|span| span.x <= cluster.x && cluster.end() <= span.end);
+        assert_eq!(covered, selected, "cluster {bytes:?}");
     }
 }
