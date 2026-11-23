@@ -81,11 +81,6 @@ fn reaper_wipes_full_viewport_keys_and_canaries_under_fifty_ms_with_zero_ghosts(
     );
     let after_ctrl_alloc = AllocStats::snapshot();
     assert!(
-        after_ctrl_alloc.delta(&before_ctrl).allocations == 0
-            || before_ctrl.delta(&after_ctrl_alloc).allocations > 0,
-        "counting allocator must observe setup allocations"
-    );
-    assert!(
         before_ctrl.delta(&after_ctrl_alloc).allocations >= CANARY_COUNT as u64,
         "counting allocator must count canary allocations"
     );
