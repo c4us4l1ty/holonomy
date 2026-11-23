@@ -540,7 +540,7 @@ where
             Heading::H2 => "H2".to_owned(),
             Heading::H3 => "H3".to_owned(),
         });
-        let flag = |st: &TriState<bool>, on: &str| match st {
+        let flag = |st: &TriState<bool>, on: &'static str| match st {
             TriState::Uniform(true) => on,
             TriState::Uniform(false) => "",
             TriState::Mixed => "\u{2014}",

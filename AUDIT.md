@@ -86,7 +86,9 @@ Listed so they stay dead.
   Block 7 gate is claimed by this draft. Local Rust tools are unavailable. CI run `45218714739`
   failed formatting and compilation (including the shell's style-run lifetime and stale test APIs);
   the independent million-keystroke rehearsal and gates contract did pass. Subsequent fixes require
-  another full CI run, and passing CI alone will not resolve the two release blockers above.
+  another full CI run. Run `45220066975` passed formatting, gates, rsync and ext4 qualification
+  but still failed compilation on a GUI lifetime error; that error was corrected afterward.
+  Passing CI alone will not resolve the two release blockers above.
 
 - **2026-11-22 — D-80 — Cross-crate bug hunt closed split-BiDi selection rendering, multi-leaf
   `ParagraphContext` and `Carry` invariants, UAX #9 `P2`/`L1.4` edge cases, reaper provenance and
