@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use holonomy_line::{LineHeader, LineManifest, LineSlab, WorldLine};
 use holonomy_seal::{
-    create_capsule_for, generate_container_id, KdfParamsRecord, MasterKeys, ParamsClass,
+    create_capsule_for, generate_container_id, KdfParamsRecord, MasterKeys, CALIBRATION_P,
+    CALIBRATION_T, FENCE_MIN_KIB,
 };
 use holonomy_text::{
     Appended, ReplacementBuilder, ResidentSet, SegmentId, SegmentSink, SegmentSource, Slab, Spine,
@@ -141,15 +142,12 @@ fn encrypted_30m_word_search_and_replace_heap_measurement() {
     let path =
         Temp(std::env::temp_dir().join(format!("holonomy-search-memory-{name}.wavefunction")));
     let salt = [0x71; 64];
-    let (m_kib, t, p) = ParamsClass::Legacy.costs();
-    let params = KdfParamsRecord { m_kib, t, p };
-    let keys = MasterKeys::derive(
-        b"encrypted-search-fixture",
-        &salt,
-        None,
-        ParamsClass::Legacy,
-    )
-    .unwrap();
+    let params = KdfParamsRecord {
+        m_kib: FENCE_MIN_KIB,
+        t: CALIBRATION_T,
+        p: CALIBRATION_P,
+    };
+    let keys = MasterKeys::derive_with(b"encrypted-search-fixture", &salt, None, &params).unwrap();
     let (capsule, dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
     let header = LineHeader::new(params, salt, capsule).unwrap();
     let mut line = WorldLine::create(&path.0, header, dem.duplicate()).unwrap();
