@@ -40,6 +40,10 @@ without a measurement in CI.
 
 ## What works today
 
+**Experimental, not production-ready.** Do not rely on the current build for sensitive or
+irreplaceable work. Security and durability gates remain open; see
+[`docs/BOUNDED_SEARCH_AND_WIPE.md`](docs/BOUNDED_SEARCH_AND_WIPE.md) and `AUDIT.md`.
+
 You can open a document and write in it, and what you write survives closing the app and opening
 it again.
 
@@ -50,7 +54,8 @@ cargo run -p holonomy-gui --bin holonomy -- notes.wavefunction
 The file is created if it does not exist and opened if it does; either way it asks for a
 passphrase. Then: printable text types, arrows and Home/End/PageUp/PageDown move the caret
 (`Shift` extends), backspace and delete remove, `Ctrl+Z` undoes a burst and `Ctrl+Y` redoes one,
-`Ctrl+A` selects all, `Ctrl+S` writes through, `Ctrl+G` shows what the process can honestly claim
+`Ctrl+A` selects all, `Ctrl+S` writes through, `Ctrl+F` opens find (Tab switches to replace-all),
+`Ctrl+L` requests a cooperative emergency wipe, and `Ctrl+G` shows what the process can claim
 about its own memory, `Esc` dismisses that panel, and `Ctrl+Q` or `Ctrl+C` quits after sealing what
 is open — if that last save is refused, the window says so and exits non-zero rather than claiming
 success (D-49).
@@ -85,19 +90,19 @@ detail lives.
 | GPU backend, font shaping, IME | **Not built** — the window is a grid of cells (`GSUB`/`GPOS` glyph shaping is OQ-24) | `docs/TO-APP.md` M4b-ii |
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
 | Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection** (`displaced = 0`, split selection spans); contextual glyph joining (`GSUB`/`GPOS`) is not built | OQ-11 (D-77), OQ-24 |
-| Emergency wipe & zeroize canaries (`L-7`) | **Real, measured in CI** — 4 MiB `ResidentSet` + live `DEMKey` + 32 canaries volatile-wiped in `< 1 ms` with `ghosts = 0` and `0` allocations | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs` (D-79) |
-| Crash before a save | **Loses up to 16 KiB** of the most recent typing; nothing older | D-64 |
-| Documents open at once | **One**, one window, one caret. No panes, search, or settings | — |
+| Emergency wipe & zeroize canaries (`L-7`) | **Not qualified.** Historical headless tests wipe selected buffers and canaries; the live reaper is cooperative and can stall with the UI. Complete plaintext coverage and a 50 ms deadline are unproven. A Linux isolated-supervisor test is not wired into the editor. | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-82–D-87) |
+| Crash before a save | **Unsaved edits can be lost.** The open typing buffer and unsaved structural changes are not durable until a successful commit; physical power-loss behavior remains unqualified. | D-64, OQ-29/OQ-30 |
+| Search and replace | **Available with limits.** Find streams matches; replace-all refuses more than 16,384 matches when the needle and replacement differ. Total-process-memory and dense-replacement gates remain open. | `holonomy-text::search`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-85) |
+| Documents open at once | **One**, one window, one caret. No panes or settings | — |
 | DEM key & passphrase buffers | **Owned and zeroized on drop** — `WorldLine` owns `DEMKey` (`OQ-27`), and prompt input is pre-allocated + NFC-normalized in `PassphraseInput` (`OQ-28`) | `holonomy-seal`, `holonomy-line`, `holonomy-gui` |
 | Height index | Exact for measured leaves; a reveal measures the run to the caret | D-62 |
 | Mid-document edits & deletions | **Durable across reopen** via sealed sub-segment spine manifests (`RECORD_MANIFEST`), with zero segment rewrites on deletion | OQ-29, OQ-30 |
 | Deleted bytes on disk before compaction | **Retained as ciphertext** in the append-only log until explicit `holonomy compact <src> <dst>` writes a fresh re-keyed world-line | OQ-14 |
 | Power-loss safety | **Not qualified** — L-6 is an ENOSPC rehearsal and says so in its job name | Block 10 |
 
-Nothing in this table is aspirational. Every **real** row is exercised by a CI job on every push;
-every **not built** or **wrong** row names an `AUDIT.md` entry, except the one that is a scope
-decision rather than a defect — one document per window — which is the shape of the app and not
-owed to anyone.
+CI exercises the implemented paths under the scopes stated in the linked tests and audit entries.
+A passing test is not qualification for every workload, platform, security property or failure mode.
+One document per window is a scope decision, not a defect.
 
 ## Status
 

@@ -43,14 +43,15 @@ process or discarding pages is not proof that all plaintext was zeroed or that c
 
 A Linux-only test prototype now lives in `crates/holonomy-seal/tests/supervisor_probe.rs`. It
 executes a separate controlled worker with a 4 MiB shared memfd, confirms a group stop and then
-process exit, and only then wipes and verifies that shared mapping. After setup, signals and waits
-use a Linux pidfd to avoid targeting a recycled numeric PID, with a regression for an externally
-reaped child. The prototype requires Linux pidfd and `waitid(P_PIDFD)` support; acquiring the pidfd
-is not atomic with process creation, so a production design must still close that setup race. The
-platform-specific tests are ignored by default and explicitly run in the Linux CI measurement, so
-ordinary tests do not require those kernel facilities. The worker is tested in socket read,
-lock-holding spin, and multithreaded cases; an unconfirmed stop
-refuses to wipe and a surviving canary is an error. The measured
+process exit, and only then wipes and verifies that shared mapping. It creates the worker and pidfd
+atomically using Linux `clone3(CLONE_PIDFD)`, then signals and waits through the pidfd, including
+cleanup. Unsupported or denied clone3 fails without a numeric-PID fallback. Regressions model an
+external reaper both immediately after creation and after readiness, and a failed exec. This closes
+the earlier pidfd-acquisition window in the test fixture, not the broader production lifecycle
+problem. The raw post-fork/exec code needs independent review; the fixture needs clone3, pidfds,
+`waitid(P_PIDFD)` and procfs. Platform-specific tests are ignored by default and explicitly run in
+the Linux CI measurement. The worker is tested in socket read, lock-holding spin, and multithreaded
+cases; an unconfirmed stop refuses to wipe and a surviving canary is an error. The measured
 trip-to-verification time includes a pre-wipe negative-control read. The worker is terminated, not
 resumed. The prototype is not wired to the editor, and its known shared mapping is neither all
 plaintext nor an audited protected arena. It does not verify private heap, stack, registers, keys,
@@ -71,3 +72,6 @@ in I/O and in a critical section, concurrent trips, shutdown/EOF and register/un
 measure trip-to-confirmed-stop-to-wipe-to-canary verification on reference hardware under load;
 and audit every plaintext path. A timeout must be reported as an unmet security guarantee, not as
 success. Until then, the existing cooperative mode is a mitigation, not the required deadline.
+
+See [`WIPE_SUPERVISOR_REVIEW.md`](WIPE_SUPERVISOR_REVIEW.md) for the current source-level
+plaintext/key inventory, prototype failure model, and outstanding integration review.
