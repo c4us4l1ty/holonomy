@@ -121,6 +121,15 @@ Listed so they stay dead.
   naming the file. That negative control matters more than the positive one: it is the only evidence
   that the empty-state assertion can fail at all, and a check that cannot fail is not a check.
 
+  **Measured 2026-11-24, CI run `45415761926` on `db22eb7`** (green, all eight jobs):
+  `HOLONOMY_PORTABILITY L-9=partial same_kernel=yes same_libc=yes same_fs=yes second_machine=no`
+  `inherited_state=none dependency_state_after_import=empty copied_bytes=5622 resumed_bytes=6010`
+  `verify_near=ok verify_far=ok continuation=durable`. A 5,622-byte document crossed the boundary,
+  verified under the passphrase alone in a process that could not have had any prior state, was
+  continued to 6,010 bytes, and re-verified; the importer's dependency tree was empty afterwards.
+  The negative control in the same design (a stand-in that writes `$HOME/.config/holonomy/session.key`)
+  fails the drill and names the file.
+
 - **2026-11-24 — D-91 — The viewport gate's absolute number was quoted as a property of the code;
   it is a property of the runner.** Harness bookkeeping, not a product defect, but the class this
   audit exists to catch: a measurement cited in a form the measurement does not support.
