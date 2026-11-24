@@ -68,6 +68,19 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-88 — Wipe inventory and atomic-identity prototype.** Corrected the README's
+  overstated live-wipe and obsolete no-search claims. `docs/WIPE_SUPERVISOR_REVIEW.md` inventories
+  current plaintext/key sources and their known coverage gaps, and specifies failure and review
+  obligations; it is not a completeness audit. The isolated Linux test now uses fork-like
+  `clone3(CLONE_PIDFD)` and a pidfd for all subsequent signals/waits, without numeric-PID fallback,
+  eliminating the D-87 acquisition window in this test fixture. Regressions exercise early external
+  reaping and failed exec. Unsupported or denied clone3 fails startup. Raw post-fork code and
+  inherited state need independent review; this is not a production spawn implementation.
+  An optimized local Rust 1.99 manual build passed all eight ignored probe tests: 12 shared-arena
+  trials, p50 3,283 µs, max 7,056 µs, zero ghosts. CI on the pinned toolchain is still required.
+  The editor is unchanged; complete coverage, locked memory, failure policy and L-7 remain open.
+
+
 - **2026-11-22 — D-87 — Supervisor probe bug hunt.** A worker externally reaped before a
   signal could make numeric-PID cleanup target a reused PID. After setup, the Linux prototype now
   signals and waits through a pidfd, with a stale-pidfd/external-reaper regression; its initial
@@ -75,7 +88,9 @@ Listed so they stay dead.
   Added a nonzero-canary negative control and made a verification ghost an error rather than a
   successful report. The probe requires Linux pidfd and `waitid(P_PIDFD)` support; its tests are
   ignored in ordinary workspace runs and explicitly exercised by the Linux CI measurement.
-  Pinned CI is pending. This does not establish L-7 or complete live-editor wipe coverage.
+  Pinned push CI [45343917300](https://github.com/c4us4l1ty/holonomy/actions/runs/45343917300)
+  passed for that revision. D-88 supersedes the non-atomic setup in the test fixture. Neither
+  establishes L-7 or complete live-editor wipe coverage.
 
 - **2026-11-22 — D-86 — Linux isolated supervisor experiment, not L-7.** Added a test-only
   subprocess probe: a controlled worker owns a 4 MiB memfd mapping while blocked in an observed

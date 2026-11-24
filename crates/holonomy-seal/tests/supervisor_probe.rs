@@ -9,10 +9,11 @@
 //! this host only; this is not a real-time guarantee.
 #![cfg(target_os = "linux")]
 
+use std::ffi::CString;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{fence, Ordering};
 use std::time::{Duration, Instant};
 
@@ -115,11 +116,29 @@ fn map(fd: libc::c_int) -> io::Result<*mut u8> {
 
 // Owns child lifecycle on success, error, and panic. Killing the worker is not a verified wipe.
 struct Worker {
-    child: Child,
+    pid: libc::pid_t,
     pidfd: OwnedFd,
     control: UnixStream,
     arena: SharedArena,
     reaped: bool,
+}
+
+// Linux's version-zero clone3 ABI. Fixed-width layout is the kernel contract on every
+// architecture; zeroed trailing fields avoid depending on libc exposing struct clone_args.
+#[repr(C)]
+#[derive(Default)]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
 }
 
 // A pidfd refers to the original process even if its numeric PID is recycled. This prototype
@@ -160,56 +179,108 @@ fn pidfd_event(fd: RawFd, options: libc::c_int) -> io::Result<Option<(libc::c_in
     Ok(Some((info.si_code, unsafe { info.si_status() })))
 }
 
+// Only this test fixture uses this raw fork/exec path; it is not production process creation.
+fn spawn_worker(
+    arena_fd: RawFd,
+    socket: RawFd,
+    mode: &str,
+    executable_path: &std::path::Path,
+) -> io::Result<(libc::pid_t, OwnedFd)> {
+    // Everything used by the child is prepared before clone3. The fork-like child must not
+    // allocate, lock, unwind, or run destructors before exec, because other threads may exist.
+    let executable = CString::new(executable_path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in executable path"))?;
+    let arguments = [
+        executable.as_ptr(),
+        c"--exact".as_ptr(),
+        c"supervisor_worker".as_ptr(),
+        c"--ignored".as_ptr(),
+        c"--test-threads=1".as_ptr(),
+        std::ptr::null(),
+    ];
+    let environment = [
+        CString::new(format!("HOLONOMY_PROBE_ARENA_FD={arena_fd}")).unwrap(),
+        CString::new(format!("HOLONOMY_PROBE_CONTROL_FD={socket}")).unwrap(),
+        CString::new(format!("HOLONOMY_PROBE_MODE={mode}"))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in worker mode"))?,
+    ];
+    let environment_ptrs = [
+        environment[0].as_ptr(),
+        environment[1].as_ptr(),
+        environment[2].as_ptr(),
+        std::ptr::null(),
+    ];
+    let null = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")?;
+    let null_fd = null.as_raw_fd();
+    if [arena_fd, socket, null_fd].iter().any(|fd| *fd <= 2) {
+        return Err(io::Error::other("probe requires open standard descriptors"));
+    }
+    let mut raw_pidfd = -1;
+    let args = CloneArgs {
+        flags: libc::CLONE_PIDFD as u64,
+        pidfd: (&mut raw_pidfd as *mut libc::c_int) as u64,
+        exit_signal: libc::SIGCHLD as u64,
+        ..CloneArgs::default()
+    };
+    // SAFETY: clone3 with only CLONE_PIDFD and SIGCHLD is fork-like: separate memory and
+    // descriptor tables, no shared Rust objects. The child executes only async-signal-safe
+    // syscalls with prebuilt pointers, then execve or _exit. No Rust cleanup runs in child.
+    let result =
+        unsafe { libc::syscall(libc::SYS_clone3, &args, std::mem::size_of::<CloneArgs>()) };
+    if result < 0 {
+        // No child exists and there is deliberately no numeric-PID fallback on unsupported
+        // kernels or seccomp denial.
+        return Err(io::Error::last_os_error());
+    }
+    if result == 0 {
+        // SAFETY: all descriptors and C strings were prepared in the parent; only fcntl,
+        // dup2, execve and _exit are called here. The kernel copied the address space.
+        unsafe {
+            for fd in [arena_fd, socket] {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    libc::_exit(127);
+                }
+            }
+            for fd in 0..=2 {
+                if libc::dup2(null_fd, fd) < 0 {
+                    libc::_exit(127);
+                }
+            }
+            libc::execve(
+                executable.as_ptr(),
+                arguments.as_ptr(),
+                environment_ptrs.as_ptr(),
+            );
+            libc::_exit(127);
+        }
+    }
+    // SAFETY: successful clone3 with CLONE_PIDFD atomically returns a new pidfd in raw_pidfd,
+    // even if another reaper consumes the child immediately. It is owned exactly once here.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
+    Ok((result as libc::pid_t, pidfd))
+}
+
 impl Worker {
     fn start(arena: SharedArena, mode: &str) -> io::Result<Self> {
+        Self::start_with_executable(arena, mode, &std::env::current_exe()?)
+    }
+
+    fn start_with_executable(
+        arena: SharedArena,
+        mode: &str,
+        executable_path: &std::path::Path,
+    ) -> io::Result<Self> {
         let (parent, child_socket) = UnixStream::pair()?;
         let socket = child_socket.as_raw_fd();
         let arena_fd = arena.fd.as_raw_fd();
-        let mut command = Command::new(std::env::current_exe()?);
-        command
-            .args([
-                "--exact",
-                "supervisor_worker",
-                "--ignored",
-                "--test-threads=1",
-            ])
-            .env("HOLONOMY_PROBE_ARENA_FD", arena_fd.to_string())
-            .env("HOLONOMY_PROBE_CONTROL_FD", socket.to_string())
-            .env("HOLONOMY_PROBE_MODE", mode)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        use std::os::unix::process::CommandExt;
-        // SAFETY: after fork and before exec, the closure invokes only async-signal-safe fcntl
-        // operations on descriptors held open by this function. Parent flags remain CLOEXEC.
-        unsafe {
-            command.pre_exec(move || {
-                for fd in [arena_fd, socket] {
-                    let flags = libc::fcntl(fd, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
-        }
-        let mut child = command.spawn()?;
-        // SAFETY: pid comes from the newly spawned child; flags zero is required by pidfd_open.
-        let raw_pidfd =
-            unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0u32) };
-        if raw_pidfd < 0 {
-            let error = io::Error::last_os_error();
-            // Setup failed before acquiring a pidfd. This controlled test owns and must reap the
-            // freshly spawned child. Atomic pidfd creation is still needed in a production design.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        // SAFETY: a successful pidfd_open returns a fresh owned descriptor fitting in c_int.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd as RawFd) };
+        let (pid, pidfd) = spawn_worker(arena_fd, socket, mode, executable_path)?;
         drop(child_socket);
         let mut worker = Self {
-            child,
+            pid,
             pidfd,
             control: parent,
             arena,
@@ -234,7 +305,7 @@ impl Worker {
     // reached its socket read, rather than merely signaling immediately before it.
     fn wait_for_socket_read(&mut self) -> io::Result<()> {
         let deadline = Instant::now() + STOP_TIMEOUT;
-        let path = format!("/proc/{}/task", self.child.id());
+        let path = format!("/proc/{}/task", self.pid);
         loop {
             for task in std::fs::read_dir(&path)? {
                 let wait_channel = std::fs::read_to_string(task?.path().join("wchan"))?;
@@ -484,8 +555,8 @@ fn externally_reaped_child_cannot_be_signaled_through_its_stale_pidfd() {
     send_pidfd_signal(worker.pidfd.as_raw_fd(), libc::SIGKILL).unwrap();
     let mut status = 0;
     // SAFETY: this deliberately models another child reaper consuming our direct child's status.
-    let waited = unsafe { libc::waitpid(worker.child.id() as libc::pid_t, &mut status, 0) };
-    assert_eq!(waited, worker.child.id() as libc::pid_t);
+    let waited = unsafe { libc::waitpid(worker.pid, &mut status, 0) };
+    assert_eq!(waited, worker.pid);
     assert!(libc::WIFSIGNALED(status));
     let error = supervise(&mut worker, STOP_TIMEOUT).unwrap_err();
     assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
@@ -494,6 +565,64 @@ fn externally_reaped_child_cannot_be_signaled_through_its_stale_pidfd() {
         "stale pidfd must not authorize a wipe"
     );
     // Leave reaped false: Drop must also be harmless with a stale pidfd and ECHILD.
+}
+
+#[test]
+#[ignore = "Linux clone3 and pidfd prototype; run the dedicated CI measurement"]
+fn failed_exec_is_reported_without_authorizing_a_wipe() {
+    let arena = SharedArena::create().unwrap();
+    let result = Worker::start_with_executable(
+        arena,
+        "locked_spin",
+        std::path::Path::new("/proc/self/this-probe-executable-does-not-exist"),
+    );
+    let error = match result {
+        Ok(_) => panic!("nonexistent executable unexpectedly started"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+#[ignore = "Linux clone3 and pidfd prototype; run the dedicated CI measurement"]
+fn reaping_immediately_after_spawn_keeps_the_atomic_pidfd_stale() {
+    let arena = SharedArena::create().unwrap();
+    let (_parent, child_socket) = UnixStream::pair().unwrap();
+    let (pid, pidfd) = spawn_worker(
+        arena.fd.as_raw_fd(),
+        child_socket.as_raw_fd(),
+        "locked_spin",
+        &std::env::current_exe().unwrap(),
+    )
+    .unwrap();
+    // Model an external reaper before the parent has observed readiness. The only signal is
+    // through the newly returned pidfd, even if the child has not exec'd yet.
+    send_pidfd_signal(pidfd.as_raw_fd(), libc::SIGKILL).unwrap();
+    let mut status = 0;
+    loop {
+        // SAFETY: this regression intentionally consumes our child's status as an outside reaper.
+        let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if result == pid {
+            break;
+        }
+        assert_eq!(
+            io::Error::last_os_error().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+    assert!(libc::WIFSIGNALED(status));
+    assert_eq!(
+        send_pidfd_signal(pidfd.as_raw_fd(), libc::SIGKILL)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    assert_eq!(
+        pidfd_event(pidfd.as_raw_fd(), libc::WEXITED)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ECHILD)
+    );
 }
 
 #[test]
