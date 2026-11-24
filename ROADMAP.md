@@ -293,8 +293,11 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
 - A Fenwick height model over leaf heights exists, and its cost is *counted* rather than asserted
   (a viewport over 2^18 leaves costs < 160 index reads; 16× the leaves costs < 2× the reads).
 - The Spine wiring and wall-clock invariance are measured end to end: `byte_window`, `window_text`,
-  and `layout_styled` with the real `Face` run in ~697 µs p50 (~735 µs p99) identically at 180 KB
-  offset 0, 180 MB (30 M words, 43,946 leaves) offset 0, and 180 MB near the end (`D-78`).
+  and `layout_styled` with the real `Face` are *indistinguishable* at 180 KB offset 0, 180 MB
+  (30 M words, 43,946 leaves) offset 0, and 180 MB near the end (`D-78`). Their absolute latency is
+  a property of the runner and is quoted as a measured range rather than a constant — two runs
+  sixteen minutes apart on 2026-11-24 gave `p50 = 696,731 ns` and `1,045,075 ns` for the identical
+  workload (`D-91`), against a control `76–90×` slower in all three runs.
 - Residual, stated rather than hidden: `Face` reads `cmap`/`hmtx` advances without `GSUB`/`GPOS`
   complex-script glyph joining or ligatures (`OQ-24`), and `L-8` stays `spec` in `docs/GATES.md`
   until Block 6's GPU renderer draws from `Picture` alongside the terminal cell surface. The
@@ -311,11 +314,14 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
 - [x] Layout cost on a 30 M-word doc is invariant in document length (viewport-shape cost only).
       **Measured 2026-11-22 by `crates/holonomy-eye/tests/viewport_latency.rs` (AUDIT D-78, OQ-12)**
       using the real OpenType `Face` (`Inter-Regular.ttf`), interleaved across 256 samples each at
-      180 KB offset 0 (`p50 = 697,961 ns`, `p99 = 732,505 ns`), 180 MB / 30 M words / 43,946 leaves
-      at offset 0 (`p50 = 697,047 ns`, `p99 = 735,296 ns`), and 180 MB near the end
-      (`p50 = 697,753 ns`, `p99 = 727,547 ns`), with a 128-leaf control (`< 0.3%` of the document)
-      costing `53,041,922 ns` (`76×` the viewport cost). **Claimed on CI run `45106234334`
-      (`3b54969`).**
+      three offsets in one process: 180 KB offset 0, 180 MB / 30 M words / 43,946 leaves at offset
+      0, and 180 MB near the end — with a 128-leaf control (`< 0.3%` of the document) costing
+      `53,041,922 ns` (`76×` the viewport cost) in the claiming run `45106234334` (`3b54969`).
+      **What is claimed is the invariance and the ratio, not the absolute number.** The gate is
+      re-run on every push and lands anywhere in a measured range — `p50 = 696,731 ns` and
+      `p50 = 1,045,075 ns` sixteen minutes apart on 2026-11-24 for identical inputs (AUDIT `D-91`),
+      with the three offsets and the control ratio (`76–90×`) reproducing every time. A single run's
+      `p50` would be a runner benchmark wearing a gate's clothes.
 - [x] Bi-directional and multi-script text handle cluster boundaries correctly (no caret
       grapheme-splitting). **Both halves met and measured 2026-11-22 (AUDIT D-77, OQ-11 closed):**
       `crates/holonomy-eye/src/bidi.rs` + generated UCD 18.0.0 `bidi/tables.rs` implement full O(N)

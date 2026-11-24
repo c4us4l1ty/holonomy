@@ -281,8 +281,11 @@ Block 5 gates 2 & 3 (`OQ-12` viewport latency & `OQ-11` BiDi): **closed 2026-11-
 UCD 18.0.0 tables with bijective primary-caret boundaries (`displaced = 0` and `L-8` `27,680`
 boundaries / `0` disagreements in `tests/script_gate.rs`, plus split `SelectionSpan`s and
 multi-leaf logical `Carry.x` in `holonomy-shell`), and `tests/viewport_latency.rs` measures the
-real OpenType `Face` (`Inter-Regular.ttf`) at ~697 µs p50 identically across 180 KB offset 0,
-180 MB (30 M words) offset 0, and 180 MB near the end (`76×` faster than a 128-leaf control).
+real OpenType `Face` (`Inter-Regular.ttf`) identically across 180 KB offset 0, 180 MB (30 M words)
+offset 0, and 180 MB near the end (`76–90×` faster than a 128-leaf control). The absolute figure is
+quoted as a range rather than a constant since D-91: two runs sixteen minutes apart measured
+`p50` of 696,731 ns and 1,045,075 ns for identical inputs, while the invariance and the ratio
+reproduced both times.
 OpenType `GSUB`/`GPOS` contextual glyph shaping remains `OQ-24`.
 
 Zero-CPU-repaint-while-idle: **the defect is fixed and the harness enforces it (D-68, D-69).** An
