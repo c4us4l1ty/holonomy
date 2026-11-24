@@ -68,6 +68,7 @@ jobs:
               "cargo test --locked -p holonomy-text --release --test keystroke_fuzz -- --exact --ignored --nocapture a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement" \
               "cargo run --locked -p xtask -- gates --check" \
               "cargo test --locked -p holonomy-line --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored --nocapture" \
+              "cargo build --locked --release -p holonomy-gui --bin holonomy && HOLONOMY_BINARY=$(pwd)/target/release/holonomy scripts/qualify-l9-portability.sh" \
               "scripts/qualify-ext4-enospc.sh"; do
               echo "== $cmd"
               output_file="$(mktemp)"
