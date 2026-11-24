@@ -43,8 +43,14 @@ process or discarding pages is not proof that all plaintext was zeroed or that c
 
 A Linux-only test prototype now lives in `crates/holonomy-seal/tests/supervisor_probe.rs`. It
 executes a separate controlled worker with a 4 MiB shared memfd, confirms a group stop and then
-process exit, and only then wipes and verifies that shared mapping. The worker is tested in socket
-read, lock-holding spin, and multithreaded cases; an unconfirmed stop refuses to wipe. The measured
+process exit, and only then wipes and verifies that shared mapping. After setup, signals and waits
+use a Linux pidfd to avoid targeting a recycled numeric PID, with a regression for an externally
+reaped child. The prototype requires Linux pidfd and `waitid(P_PIDFD)` support; acquiring the pidfd
+is not atomic with process creation, so a production design must still close that setup race. The
+platform-specific tests are ignored by default and explicitly run in the Linux CI measurement, so
+ordinary tests do not require those kernel facilities. The worker is tested in socket read,
+lock-holding spin, and multithreaded cases; an unconfirmed stop
+refuses to wipe and a surviving canary is an error. The measured
 trip-to-verification time includes a pre-wipe negative-control read. The worker is terminated, not
 resumed. The prototype is not wired to the editor, and its known shared mapping is neither all
 plaintext nor an audited protected arena. It does not verify private heap, stack, registers, keys,

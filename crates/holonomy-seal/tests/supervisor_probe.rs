@@ -10,7 +10,7 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{fence, Ordering};
@@ -69,6 +69,12 @@ impl SharedArena {
         }
         fence(Ordering::SeqCst);
         let wipe_elapsed = start.elapsed();
+        let ghost_bytes = self.count_ghosts();
+        (wipe_elapsed, start.elapsed(), ghost_bytes)
+    }
+
+    // Only call after confirmed child exit, while the shared arena is quiescent.
+    fn count_ghosts(&self) -> usize {
         let mut ghost_bytes = 0usize;
         for index in 0..ARENA_BYTES {
             // SAFETY: child exited; this is an in-bounds volatile read of initialized bytes.
@@ -76,7 +82,7 @@ impl SharedArena {
                 ghost_bytes += 1;
             }
         }
-        (wipe_elapsed, start.elapsed(), ghost_bytes)
+        ghost_bytes
     }
 }
 
@@ -110,9 +116,48 @@ fn map(fd: libc::c_int) -> io::Result<*mut u8> {
 // Owns child lifecycle on success, error, and panic. Killing the worker is not a verified wipe.
 struct Worker {
     child: Child,
+    pidfd: OwnedFd,
     control: UnixStream,
     arena: SharedArena,
     reaped: bool,
+}
+
+// A pidfd refers to the original process even if its numeric PID is recycled. This prototype
+// requires Linux pidfd support; it does not fall back to signaling a numeric PID after setup.
+fn send_pidfd_signal(fd: RawFd, signal: libc::c_int) -> io::Result<()> {
+    // SAFETY: fd is an open pidfd, no siginfo is supplied, and flags must be zero.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd,
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0u32,
+        )
+    };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+// Observe a child event through its pidfd, never a potentially recycled numeric PID. With
+// WNOHANG, a zero pid means no event. The caller chooses whether WNOWAIT retains the event.
+fn pidfd_event(fd: RawFd, options: libc::c_int) -> io::Result<Option<(libc::c_int, libc::c_int)>> {
+    // SAFETY: all-zero is a valid initial siginfo_t; waitid writes it before any fields are read.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: the pidfd identifies our child, and info points to valid writable storage.
+    let result = unsafe { libc::waitid(libc::P_PIDFD, fd as libc::id_t, &mut info, options) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: waitid initialized siginfo; si_pid is zero when WNOHANG found no event.
+    if unsafe { info.si_pid() } == 0 {
+        return Ok(None);
+    }
+    // SAFETY: this is a child-status event returned by waitid.
+    Ok(Some((info.si_code, unsafe { info.si_status() })))
 }
 
 impl Worker {
@@ -148,10 +193,24 @@ impl Worker {
                 Ok(())
             });
         }
-        let child = command.spawn()?;
+        let mut child = command.spawn()?;
+        // SAFETY: pid comes from the newly spawned child; flags zero is required by pidfd_open.
+        let raw_pidfd =
+            unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0u32) };
+        if raw_pidfd < 0 {
+            let error = io::Error::last_os_error();
+            // Setup failed before acquiring a pidfd. This controlled test owns and must reap the
+            // freshly spawned child. Atomic pidfd creation is still needed in a production design.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        // SAFETY: a successful pidfd_open returns a fresh owned descriptor fitting in c_int.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd as RawFd) };
         drop(child_socket);
         let mut worker = Self {
             child,
+            pidfd,
             control: parent,
             arena,
             reaped: false,
@@ -183,8 +242,12 @@ impl Worker {
                     return Ok(());
                 }
             }
-            if self.child.try_wait()?.is_some() {
-                self.reaped = true;
+            if pidfd_event(
+                self.pidfd.as_raw_fd(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )?
+            .is_some()
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "worker exited before blocking",
@@ -208,11 +271,8 @@ impl Worker {
             ));
         }
         let deadline = Instant::now() + timeout;
-        let pid = self.child.id() as libc::pid_t;
-        // SAFETY: pid is the live child spawned and owned by this object, not an arbitrary pid.
-        if unsafe { libc::kill(pid, libc::SIGSTOP) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let fd = self.pidfd.as_raw_fd();
+        send_pidfd_signal(fd, libc::SIGSTOP)?;
         loop {
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
@@ -220,38 +280,33 @@ impl Worker {
                     "child stop was not confirmed",
                 ));
             }
-            let mut status = 0;
-            // SAFETY: `status` is valid writable memory; waitpid only observes this direct child.
-            let result =
-                unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::WUNTRACED) };
-            if result == pid {
-                if libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGSTOP {
-                    break;
+            match pidfd_event(
+                fd,
+                libc::WSTOPPED | libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            ) {
+                Ok(Some((libc::CLD_STOPPED, libc::SIGSTOP))) => break,
+                Ok(Some(_)) => {
+                    return Err(io::Error::other("worker exited or stopped unexpectedly"))
                 }
-                // waitpid has already reaped a terminal status; do not signal this PID again,
-                // since it may be reused by the kernel before cleanup runs.
-                if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
-                    self.reaped = true;
-                }
-                return Err(io::Error::other("worker exited or stopped unexpectedly"));
-            }
-            if result < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted {
-                    return Err(error);
-                }
+                Ok(None) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
             }
             std::thread::yield_now();
         }
-        self.child.kill()?;
+        send_pidfd_signal(fd, libc::SIGKILL)?;
         loop {
-            if let Some(status) = self.child.try_wait()? {
-                self.reaped = true;
-                use std::os::unix::process::ExitStatusExt;
-                if status.signal() != Some(libc::SIGKILL) {
-                    return Err(io::Error::other("worker did not exit by SIGKILL"));
+            match pidfd_event(fd, libc::WEXITED | libc::WNOHANG) {
+                Ok(Some((code, signal))) => {
+                    self.reaped = true;
+                    if code != libc::CLD_KILLED || signal != libc::SIGKILL {
+                        return Err(io::Error::other("worker did not exit by SIGKILL"));
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                Ok(None) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
@@ -268,8 +323,13 @@ impl Drop for Worker {
     fn drop(&mut self) {
         // Best-effort cleanup for failed tests; does not authorize the caller to wipe concurrently.
         if !self.reaped {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            let _ = send_pidfd_signal(self.pidfd.as_raw_fd(), libc::SIGKILL);
+            loop {
+                match pidfd_event(self.pidfd.as_raw_fd(), libc::WEXITED) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    _ => break,
+                }
+            }
         }
     }
 }
@@ -357,6 +417,11 @@ fn supervise(worker: &mut Worker, timeout: Duration) -> io::Result<Report> {
         ));
     }
     let (_, _, ghost_bytes) = worker.arena.wipe_and_verify();
+    if ghost_bytes != 0 {
+        return Err(io::Error::other(format!(
+            "shared arena has {ghost_bytes} ghost bytes"
+        )));
+    }
     Ok(Report {
         stop_and_exit,
         trip_to_verified: start.elapsed(),
@@ -365,6 +430,7 @@ fn supervise(worker: &mut Worker, timeout: Duration) -> io::Result<Report> {
 }
 
 #[test]
+#[ignore = "Linux pidfd and procfs prototype; run the dedicated CI measurement"]
 fn isolated_supervisor_stops_terminates_wipes_and_checks_the_shared_arena() {
     let mut timings = Vec::new();
     for mode in MODES {
@@ -386,6 +452,7 @@ fn isolated_supervisor_stops_terminates_wipes_and_checks_the_shared_arena() {
 }
 
 #[test]
+#[ignore = "Linux pidfd and procfs prototype; run the dedicated CI measurement"]
 fn repeated_trip_never_signals_a_reaped_pid() {
     let arena = SharedArena::create().unwrap();
     let mut worker = Worker::start(arena, "locked_spin").unwrap();
@@ -395,14 +462,51 @@ fn repeated_trip_never_signals_a_reaped_pid() {
 }
 
 #[test]
+#[ignore = "Linux pidfd and procfs prototype; run the dedicated CI measurement"]
+fn ghost_control_detects_a_byte_left_in_the_canary() {
+    let arena = SharedArena::create().unwrap();
+    let mut worker = Worker::start(arena, "locked_spin").unwrap();
+    worker.stop_and_terminate(STOP_TIMEOUT).unwrap();
+    let (_, _, ghosts) = worker.arena.wipe_and_verify();
+    assert_eq!(ghosts, 0);
+    // SAFETY: the child is reaped and the first byte belongs to the valid shared mapping.
+    unsafe { worker.arena.ptr.write_volatile(0xa5) };
+    assert_eq!(worker.arena.count_ghosts(), 1);
+    let (_, _, ghosts) = worker.arena.wipe_and_verify();
+    assert_eq!(ghosts, 0);
+}
+
+#[test]
+#[ignore = "Linux pidfd and procfs prototype; run the dedicated CI measurement"]
+fn externally_reaped_child_cannot_be_signaled_through_its_stale_pidfd() {
+    let arena = SharedArena::create().unwrap();
+    let mut worker = Worker::start(arena, "locked_spin").unwrap();
+    send_pidfd_signal(worker.pidfd.as_raw_fd(), libc::SIGKILL).unwrap();
+    let mut status = 0;
+    // SAFETY: this deliberately models another child reaper consuming our direct child's status.
+    let waited = unsafe { libc::waitpid(worker.child.id() as libc::pid_t, &mut status, 0) };
+    assert_eq!(waited, worker.child.id() as libc::pid_t);
+    assert!(libc::WIFSIGNALED(status));
+    let error = supervise(&mut worker, STOP_TIMEOUT).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
+    assert!(
+        worker.arena.all_nonzero(),
+        "stale pidfd must not authorize a wipe"
+    );
+    // Leave reaped false: Drop must also be harmless with a stale pidfd and ECHILD.
+}
+
+#[test]
+#[ignore = "Linux pidfd and procfs prototype; run the dedicated CI measurement"]
 fn unconfirmed_stop_does_not_authorize_a_wipe() {
     let arena = SharedArena::create().unwrap();
     let mut worker = Worker::start(arena, "locked_spin").unwrap();
     let error = supervise(&mut worker, Duration::ZERO).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     // Confirm exit first, then inspect: never touch the mapping while the child may access it.
-    worker.child.kill().unwrap();
-    let _ = worker.child.wait().unwrap();
+    send_pidfd_signal(worker.pidfd.as_raw_fd(), libc::SIGKILL).unwrap();
+    let event = pidfd_event(worker.pidfd.as_raw_fd(), libc::WEXITED).unwrap();
+    assert_eq!(event, Some((libc::CLD_KILLED, libc::SIGKILL)));
     worker.reaped = true;
     assert!(
         worker.arena.all_nonzero(),

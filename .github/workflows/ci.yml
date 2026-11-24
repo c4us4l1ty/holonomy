@@ -62,7 +62,7 @@ jobs:
               "cargo fmt --all -- --check" \
               "cargo tree -e features -p holonomy-seal >/tmp/holonomy-seal-feature-tree.txt && { grep -F zeroize /tmp/holonomy-seal-feature-tree.txt; git diff -- Cargo.lock; }" \
               "cargo test --locked -p holonomy-text --release --test encrypted_search_memory -- --ignored --nocapture" \
-              "cargo test --locked -p holonomy-seal --release --test supervisor_probe -- --test-threads=1 --nocapture" \
+              "cargo test --locked -p holonomy-seal --release --test supervisor_probe -- --ignored --test-threads=1 --nocapture" \
               "cargo clippy --locked --workspace --all-targets -- -D warnings" \
               "cargo test --locked --workspace" \
               "cargo test --locked -p holonomy-text --release --test keystroke_fuzz -- --exact --ignored --nocapture a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement" \
@@ -183,7 +183,7 @@ jobs:
         run: |
           set -o pipefail
           if cargo test --locked -p holonomy-seal --release --test supervisor_probe -- \
-            --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/supervisor-probe.log"; then
+            --ignored --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/supervisor-probe.log"; then
             result=0
           else
             result=$?

@@ -68,6 +68,15 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-87 — Supervisor probe bug hunt.** A worker externally reaped before a
+  signal could make numeric-PID cleanup target a reused PID. After setup, the Linux prototype now
+  signals and waits through a pidfd, with a stale-pidfd/external-reaper regression; its initial
+  `pidfd_open` still is not atomic with child creation and is not a production-safe spawn design.
+  Added a nonzero-canary negative control and made a verification ghost an error rather than a
+  successful report. The probe requires Linux pidfd and `waitid(P_PIDFD)` support; its tests are
+  ignored in ordinary workspace runs and explicitly exercised by the Linux CI measurement.
+  Pinned CI is pending. This does not establish L-7 or complete live-editor wipe coverage.
+
 - **2026-11-22 — D-86 — Linux isolated supervisor experiment, not L-7.** Added a test-only
   subprocess probe: a controlled worker owns a 4 MiB memfd mapping while blocked in an observed
   socket read, spinning while holding a lock, or running a concurrent writer. The supervisor
