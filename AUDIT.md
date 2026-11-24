@@ -71,8 +71,11 @@ Listed so they stay dead.
 - **2026-11-22 — D-84 — Dead-man and no-op replacement follow-up.** A heartbeat arriving
   after a dead-man deadline could previously erase an expiry before the watcher saw it, leaving
   a cooperative wipe waiting indefinitely; expiry and heartbeat now compete on one atomic
-  heartbeat state, and expiry latches the reason and wakes the watcher. Regression tests cover
-  an observed expiry followed by a late heartbeat and a late heartbeat without a prior observer.
+  heartbeat state, and expiry latches the reason and wakes the watcher. Concurrent trip producers
+  also previously could pair one producer's reason with another's timestamp; those values now
+  publish as a single atomic word, saturating the timestamp after roughly 73 years. Regression
+  tests cover concurrent producers, an observed expiry followed by a late heartbeat, and a late
+  heartbeat without a prior observer.
   The terminal checks for a trip before treating EOF/read errors, input batches, or quit as normal
   exit. These checks do not prove that every trip racing shutdown is handled, nor do they meet
   L-7's 50 ms deadline when the UI is blocked. A no-match or identical replace now searches the

@@ -448,8 +448,9 @@ pub enum SchedClass {
 pub struct Tripwire {
     origin: Instant,
     last_beat_ns: AtomicU64,
-    tripped_at_ns: AtomicU64,
-    explicit_reason: AtomicU8,
+    // Timestamp in the upper bits, reason in the low three bits. One atomic publication keeps
+    // concurrent producers from pairing one reason with another producer's timestamp.
+    trip: AtomicU64,
     deadman_timeout_ns: u64,
     reaper_thread: OnceLock<Thread>,
 }
@@ -464,8 +465,7 @@ impl Tripwire {
         Arc::new(Self {
             origin: Instant::now(),
             last_beat_ns: AtomicU64::new(0),
-            tripped_at_ns: AtomicU64::new(0),
-            explicit_reason: AtomicU8::new(0),
+            trip: AtomicU64::new(0),
             deadman_timeout_ns: timeout_ns,
             reaper_thread: OnceLock::new(),
         })
@@ -496,7 +496,7 @@ impl Tripwire {
     /// Refreshes the dead-man heartbeat timestamp, unless the deadline has already expired.
     pub fn beat(&self) {
         loop {
-            if self.explicit_reason.load(Ordering::Acquire) != 0 {
+            if self.trip.load(Ordering::Acquire) != 0 {
                 return;
             }
             let last = self.last_beat_ns.load(Ordering::Acquire);
@@ -527,16 +527,11 @@ impl Tripwire {
     }
 
     fn fire_at(&self, reason: TripReason, at: u64) {
-        // Publish the timestamp before the reason, so an acquiring reader sees both.
+        // Three low bits hold the reason. A timestamp beyond roughly 73 years saturates.
+        let packed = (at.clamp(1, u64::MAX >> 3) << 3) | u64::from(reason as u8);
         let _ = self
-            .tripped_at_ns
-            .compare_exchange(0, at, Ordering::AcqRel, Ordering::Acquire);
-        let _ = self.explicit_reason.compare_exchange(
-            0,
-            reason as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+            .trip
+            .compare_exchange(0, packed, Ordering::AcqRel, Ordering::Acquire);
         if let Some(watcher) = self.reaper_thread.get() {
             watcher.unpark();
         }
@@ -547,10 +542,9 @@ impl Tripwire {
     #[must_use]
     pub fn evaluate(&self) -> Option<(TripReason, u64)> {
         loop {
-            let code = self.explicit_reason.load(Ordering::Acquire);
-            if let Some(reason) = TripReason::from_code(code) {
-                let at = self.tripped_at_ns.load(Ordering::Acquire).max(1);
-                return Some((reason, at));
+            let trip = self.trip.load(Ordering::Acquire);
+            if let Some(reason) = TripReason::from_code((trip & 7) as u8) {
+                return Some((reason, trip >> 3));
             }
             let last = self.last_beat_ns.load(Ordering::Acquire);
             if last == u64::MAX {
@@ -922,6 +916,33 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
         tripwire.beat();
         assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+    }
+
+    #[test]
+    fn concurrent_trip_producers_publish_a_matching_reason_and_timestamp() {
+        for _ in 0..128 {
+            let tripwire = Tripwire::new(None);
+            let start = Arc::new(std::sync::Barrier::new(3));
+            let a = Arc::clone(&tripwire);
+            let a_start = Arc::clone(&start);
+            let first = thread::spawn(move || {
+                a_start.wait();
+                a.fire_at(TripReason::Manual, 11);
+            });
+            let b = Arc::clone(&tripwire);
+            let b_start = Arc::clone(&start);
+            let second = thread::spawn(move || {
+                b_start.wait();
+                b.fire_at(TripReason::Suspend, 22);
+            });
+            start.wait();
+            first.join().unwrap();
+            second.join().unwrap();
+            assert!(matches!(
+                tripwire.evaluate(),
+                Some((TripReason::Manual, 11) | (TripReason::Suspend, 22))
+            ));
+        }
     }
 
     #[test]
