@@ -28,15 +28,35 @@ import sys
 import time
 
 
-def drive(argv, keys, timeout):
+def drive(argv, keys, timeout, size=None):
     """Run `argv` on a pty, feed `keys` (a list of (delay_seconds, text)), return (output, code).
 
     `code` is the child's exit status, or `None` if it had to be killed at the deadline. `None`
     is distinct from a non-zero status on purpose: a program that hung is a different bug from a
     program that failed, and the caller reports them differently.
+
+    `size` is an optional `(columns, rows)` applied to the pty's window before the program starts.
+    A pty otherwise inherits the *caller's* terminal size, so a test run under a narrow terminal
+    (or a pipe whose ioctl fails) renders a wrapped screen and an assertion about visible text
+    fails for a reason unrelated to the program. A caller that greps the screen should declare the
+    window it expects.
     """
     pid, fd = pty.fork()
     if pid == 0:  # child
+        if size is not None:
+            columns, rows = size
+            try:
+                import fcntl
+                import struct
+                import termios
+
+                fcntl.ioctl(
+                    sys.stdout.fileno(),
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", rows, columns, 0, 0),
+                )
+            except OSError:
+                pass
         try:
             os.execv(argv[0], argv)
         except OSError as error:
@@ -111,6 +131,12 @@ def main():
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--out", default=None, help="write the session output here")
     parser.add_argument("--keys", default=None, help="JSON file of [[delay, text], ...]")
+    parser.add_argument(
+        "--cols", type=int, default=None, help="pty width in columns (default: inherited)"
+    )
+    parser.add_argument(
+        "--rows", type=int, default=None, help="pty height in rows (default: inherited)"
+    )
     parser.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -121,7 +147,10 @@ def main():
         parser.error("no program to run after --")
 
     keys = json.load(open(args.keys)) if args.keys else []
-    output, code = drive(argv, [(float(d), t) for d, t in keys], args.timeout)
+    size = None
+    if args.cols is not None and args.rows is not None:
+        size = (args.cols, args.rows)
+    output, code = drive(argv, [(float(d), t) for d, t in keys], args.timeout, size)
 
     if args.out:
         with open(args.out, "wb") as handle:

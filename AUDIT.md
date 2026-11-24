@@ -49,7 +49,7 @@ Listed so they stay dead.
 | OQ-10 | A full resident slab has **no continuation policy** — solved by D-7 and built as D-8/D-9: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; a seal appends the bytes once, renames the source, and corrects one leaf's length in the current root — **no history entry**, so undo never steps through a seal; each byte is written once. `Typing::insert_at` handles mid-document typing by cutting the leaf the caret lands in (pure geometry — the halves name adjacent ranges of one segment, so nothing moves). Deletion is D-11 (a pointer operation; the bytes stay in the log — OQ-14). Not yet: selection. | **closed 2026-11-17 — `typing.rs`** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. **Narrowed again 2026-11-19 by D-29:** the load-time half is built. `Spine::from_slabs` merges neighbours that name contiguous bytes of one segment, so a document rebuilt from a log carries the document's shape rather than its edit history; merging cannot overflow, because the second slab's range bounds the merged one. What is left is the live session: a structural insert cuts a leaf and nothing rejoins it until the document is written and read back. The seam-healing variant is not just unbuilt, it is the wrong half to build first: healing inside `join` renumbers leaves under `holonomy-shell`'s cached height model, which is a two-crate change and not this row's. | **open — narrowed again 2026-11-19: load-time coalescing done (D-29); a live session still fragments** |
 | OQ-11 | **Cluster segmentation and UAX #9 bidirectional reordering: both halves are UCD 18.0.0 data + specification rules, and L-8 holds across LTR, RTL, and mixed text.** Segmentation classifies each code point into a property and applies **GB3–GB13** (including Unicode 15.1's GB9c conjuncts, `D-27`, `D-28`) over generated UCD 18.0.0 range tables. **Closed 2026-11-22 (D-77):** `crates/holonomy-eye/src/bidi.rs` and generated `bidi/tables.rs` (`scripts/gen-bidi-tables.py`: `766` `Bidi_Class` ranges + `130` `Bidi_Paired_Bracket` entries) implement O(N) UAX #9 resolution (`P2`–`P3`, `X1`–`X10`, `W1`–`W7`, `N0`–`N2` with stack-based `BD9` and canonical angle-bracket pairing, `I1`–`I2`, `L1`–`L2`), verified offline against all `91,707 / 91,707` `BidiCharacterTest-18.0.0` vectors. Wrapped lines reorder visually and pair every logical boundary bijectively onto the line's `(m + 1)` visual boundary slots so `hit_test(paint_point(g)) == g` holds without duplicate `x` ties; logical selections that cross direction runs split into disjoint visual `SelectionSpan`s, and `holonomy-shell` accumulates multi-leaf `Carry.x` in logical byte order. Enforced on every push in `crates/holonomy-eye/tests/script_gate.rs` (`carets_inside_a_grapheme = 0`, `displaced = 0`, `L-8` `27,680` boundaries / `0` disagreements; CI run `45106234334` on `3b54969`). Residual: OpenType `GSUB`/`GPOS` contextual glyph joining remains `OQ-24`. | **closed 2026-11-22 (D-77) — UAX #9 visual order (`displaced = 0`), split selection, and L-8 bijection enforced in CI; OpenType `GSUB`/`GPOS` shaping remains OQ-24** |
-| OQ-12 | **The window is viewport-sized, and both its structural counts and wall-clock latency with a real OpenType face are invariant in document length.** `HeightModel`, `Spine::slab_span`, `byte_window`, `window_text`, and `holonomy-shell` bound layout inputs to one screen plus two leaves across 44,000 leaves (`D-18`, `D-19`). **Closed 2026-11-22 (D-78):** `crates/holonomy-eye/tests/viewport_latency.rs` times the full viewport pipeline (`HeightModel::window` → `byte_window` → `window_text` → `layout_styled` with the real `Face` over `Inter-Regular.ttf`) interleaved across 256 samples each at 180 KB offset 0 (`p50 = 697,961 ns`, `p99 = 732,505 ns`), 180 MB / 30 M words / 43,946 leaves at offset 0 (`p50 = 697,047 ns`, `p99 = 735,296 ns`), and 180 MB near the end (`p50 = 697,753 ns`, `p99 = 727,547 ns`), alongside a 128-leaf control (`53,041,922 ns`, `76×` slower) in the same process (CI run `45106234334` on `3b54969`). | **closed 2026-11-22 (D-78) — real-`Face` wall-clock invariance at 30 M words enforced in CI** |
+| OQ-12 | **The window is viewport-sized, and both its structural counts and wall-clock latency with a real OpenType face are invariant in document length.** `HeightModel`, `Spine::slab_span`, `byte_window`, `window_text`, and `holonomy-shell` bound layout inputs to one screen plus two leaves across 44,000 leaves (`D-18`, `D-19`). **Closed 2026-11-22 (D-78):** `crates/holonomy-eye/tests/viewport_latency.rs` times the full viewport pipeline (`HeightModel::window` → `byte_window` → `window_text` → `layout_styled` with the real `Face` over `Inter-Regular.ttf`) interleaved across 256 samples each at 180 KB offset 0, 180 MB / 30 M words / 43,946 leaves at offset 0, and 180 MB near the end, alongside a 128-leaf control in the same process (first measurement CI run `45106234334` on `3b54969`: `p50 ≈ 697 µs` at all three offsets, control `53,041,922 ns`, `76×` slower). **The absolute number is the runner's, not the code's** — two runs sixteen minutes apart on 2026-11-24 measured `p50 = 696,731 ns` and `1,045,075 ns` for the identical workload (D-91) — so the claim rests on the invariance across the three offsets and on the control ratio (`76–90×`), both of which reproduce on every run. | **closed 2026-11-22 (D-78) — real-`Face` wall-clock invariance at 30 M words enforced in CI; absolute latency restated as a range 2026-11-24 (D-91)** |
 | OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
 | OQ-14 | **Deletion does not erase on an ordinary save; explicit compaction rewrites the active spine.** `Typing::delete` removes a range from the tree and, on save, commits a sub-segment `RECORD_MANIFEST` (`OQ-29`, `OQ-30`) so deleted text never reappears on reopen, while the old ciphertext stays in the append-only `.wavefunction` by design (Vision III). **Closed for user-reachable compaction 2026-11-22:** `WorldLine::compact_active_to`, `Document::compact_to`, and CLI `holonomy compact <src> <dst>` re-confirm the passphrase via `confirm_compaction` and write a fresh, re-keyed world-line containing only the active `document_slabs()` with at most one segment plaintext resident at a time (`smoke-install.sh` + `persist.rs`). Residual by constitutional design: until the user runs `holonomy compact` (and prunes any external cloud mirror copies, `OQ-2`), deleted spans remain encrypted in the pre-compaction log. | **closed 2026-11-22 — `compact_active_to` + `holonomy compact`; pre-compaction ciphertext retention is disclosed design** |
 | OQ-15 | **Character boundaries are a precondition the storage layer cannot check.** `Typing::insert_at` and `Typing::delete` take *document* offsets, and a cut or a split that lands inside a multi-byte character leaves a leaf whose bytes are not valid UTF-8. The asymmetry was the finding: offsets inside the open buffer are checked (`SlabText` returns `NotACharBoundary`), and offsets in sealed text are not, because the session holds a `SegmentSink`, which appends and never reads. **Narrowed by D-18:** the reader refuses a window whose edge falls inside a character, naming the offset. **Closed for the session by D-19:** the check OQ-15 asked for exists — `holonomy-shell` holds the reader and the edit in one place, and its test asserts over every caret every frame offers that the byte is a character boundary of the frame's text and hit-tests back to itself. What remains is not a missing check but a missing *type*: the offset is still a `u64` a caller can get wrong, and a caller that bypasses the Eye still asks for a mid-character cut — which is now refused at read time instead of silently rendered. Making it impossible would need an offset type the Eye alone can mint, which is a Block 6 API decision, not a hole in this one. | **closed 2026-11-18 — the caret check passes; a bypassing caller is refused at read** |
@@ -67,6 +67,99 @@ Listed so they stay dead.
 | OQ-30 | **Deletions and post-seal undos persist across reopen with zero segment rewrites.** Closed 2026-11-22: `Typing` tracks `structure_dirty` across `delete` on sealed text and `restore_root`, and flushes the exact `Slab` spine via `SegmentSink::{append_segment_with_spine, commit_spine}` without reading or rewriting surviving segments (preserving L-2 and L-6). Emptying an entire document (`Select All` + `Backspace`) commits an explicit zero-slab manifest so reopen yields `""` instead of falling back to append order, and `App::has_pending()` includes `has_uncommitted_structure()`. Pinned in `typing.rs` and `holonomy-gui/tests/persist.rs`. | **closed 2026-11-22 — zero-rewrite spine manifest commits** |
 
 ## Audit trail
+
+- **2026-11-24 — D-92 — L-9's drill now measures the half a single host can carry, and says so in
+  its own output.** `docs/GATES.md`'s L-9 row read **nothing yet**: the law is "a copied
+  `.wavefunction` opens on a fresh machine with a passphrase alone; no account, token, or device
+  required", and the project had no harness that touched it. The existing `a_copy_taken_mid_session_opens_where_it_was_copied`
+  test in `holonomy-gui/tests/persist.rs` copies a file within one process family, which proves the
+  commit boundary and nothing about portability.
+  Added `scripts/qualify-l9-portability.sh` and a `portability` CI job. It authors a document with
+  the release binary through a pty, copies **only the file** into a separate delivered tree, and
+  then imports it under `env -i` with `HOME`, all four `XDG_*` directories, `XDG_RUNTIME_DIR` and
+  `TMPDIR` pointed at a directory that is **asserted empty immediately before the import**. No
+  environment variable crosses from the authoring side except `PATH`. The import must `verify`
+  under the passphrase alone, show the sentence the near side typed, accept a continuation that is
+  durable, and re-verify on a third open.
+  The falsifiable half is asserted after the fact: the importer's dependency-state tree must
+  **still be empty**. If a future change taught the app to keep a session, a wrapped key, a keyring
+  entry or a cache, this drill fails instead of passing on a host that happened to share state.
+  The marker says `L-9=partial` with `same_kernel=yes same_libc=yes same_fs=yes second_machine=no`,
+  and the script's header spells out that a different kernel, libc, filesystem, architecture and OS
+  are exactly what it does **not** prove. **L-9 stays `spec`**: the machine half needs the release
+  tarball opened on a second machine, which is the drill this one is the prerequisite for.
+  Three defects were found and fixed, and the last two only by running the thing:
+
+  1. **Read, not run (fixed before the first push):** a process substitution passed to `env -i`
+     (which cannot see the replaced path), and the driver's key schedule fed through a fifo rather
+     than a file in the delivered tree.
+  2. **Found by CI, not by me (fixed after the first red push):** `env -i PATH=/usr/bin:/bin` then
+     `python3` — the confined environment cannot resolve the driver's interpreter wherever it is not
+     in those two directories, so the import died at `execv` with 127. The pty driver is scaffolding,
+     not the importer; it is now resolved with `command -v` *outside* the confinement and passed in
+     as an absolute path.
+  3. **Found while reproducing (2) locally:** a pty inherits the caller's window size, and in CI that
+     is whatever `tee` had. A narrow window wraps the rendered sentence and makes the "did the far
+     side see what the near side wrote" assertion fail for a reason that is about the terminal, not
+     about portability. `scripts/drive-pty.py` now takes `--cols`/`--rows` and applies `TIOCSWINSZ`
+     in the child before exec — verified by reading the size back in a child at two different
+     requested sizes — and the drill declares a 120×30 window and keeps its asserted sentence short
+     enough not to wrap at it.
+
+  4. **Found only by the diag bridge (fixed after the second red push):** the drill's own `drive()`
+     helper forwarded its three capture arguments to the binary — it was missing the `shift 3` that
+     `scripts/smoke-install.sh` has, so `holonomy` received `author.session "correct horse…" "a
+     document…"` as positional arguments, printed its usage text and exited 2. Two CI cycles went
+     to a one-line omission in test scaffolding; the product was never involved.
+
+  The lesson is worth recording because it is the same one D-73 recorded about `script(1)`: a pty
+  harness has failure modes of its own, and from a distance they look like product failures. After
+  fix (4) the whole script was run end to end outside CI against a stand-in binary — author, copy,
+  confined import, verify near and far, growth check, state-leftover check — and it printed
+  `HOLONOMY_PORTABILITY L-9=partial …` and `l9: PASS`. The same run was then repeated against a
+  stand-in that deliberately writes `$HOME/.config/holonomy/session.key`, and the drill **failed**,
+  naming the file. That negative control matters more than the positive one: it is the only evidence
+  that the empty-state assertion can fail at all, and a check that cannot fail is not a check.
+
+  **Measured 2026-11-24, CI run `45415761926` on `db22eb7`** (green, all eight jobs):
+  `HOLONOMY_PORTABILITY L-9=partial same_kernel=yes same_libc=yes same_fs=yes second_machine=no`
+  `inherited_state=none dependency_state_after_import=empty copied_bytes=5622 resumed_bytes=6010`
+  `verify_near=ok verify_far=ok continuation=durable`. A 5,622-byte document crossed the boundary,
+  verified under the passphrase alone in a process that could not have had any prior state, was
+  continued to 6,010 bytes, and re-verified; the importer's dependency tree was empty afterwards.
+  The negative control in the same design (a stand-in that writes `$HOME/.config/holonomy/session.key`)
+  fails the drill and names the file.
+
+- **2026-11-24 — D-91 — The viewport gate's absolute number was quoted as a property of the code;
+  it is a property of the runner.** Harness bookkeeping, not a product defect, but the class this
+  audit exists to catch: a measurement cited in a form the measurement does not support.
+  `OQ-12`/`D-78` and Block 5's second gate read
+  `p50 = 697,961 ns / 697,047 ns / 697,753 ns` at three offsets — the numbers from run
+  `45106234334` — and `ROADMAP.md` and `docs/TO-APP.md` repeated "~697 µs p50" as though the
+  software had a latency. It does not have one; the runner does. The unmodified gate was re-run
+  twice on 2026-11-24, sixteen minutes apart on the same runner class:
+
+  | run | 180 MB @ 0 | 180 KB @ 0 | 180 MB @ end | control | ratio |
+  | --- | --- | --- | --- | --- | --- |
+  | 13:34 | 696,731 ns | 697,311 ns | 693,836 ns | 62,947,880 ns | 90× |
+  | 13:50 | 1,045,075 ns | 1,044,182 ns | 1,043,401 ns | 92,377,254 ns | 88× |
+
+  The `p50` for byte-identical inputs moves `1.5×` between runs. Within each run the three offsets
+  agree to `< 0.1%`, and the control ratio is `76×`, `88×`, `90×` across three runs. So the gate
+  establishes exactly two things — cross-offset invariance and the ratio against a
+  document-proportional control — and neither is the absolute figure the documents were quoting.
+  Fixed by restating the claim where it is made: `AUDIT.md`'s `OQ-12` row, `ROADMAP.md`'s Block 5
+  summary and gate, and `docs/TO-APP.md`'s M7 note now quote the **measured range** across runs,
+  say that the absolute number belongs to the runner, and keep the original run's figures only as
+  the historical record of that run (annotated in `D-78`).
+  The test itself needed no change and deliberately did not get one: `P50_FACTOR = 2` and
+  `P99_FACTOR = 4` bound cross-offset agreement, `FRAME_CEILING = 50 ms` sits ~50× above the
+  measured value, and `CONTROL_FACTOR = 25` sits ~3× below the smallest observed ratio — margins
+  wide enough that runner variance cannot flake them, which is why the spread surfaced as a
+  documentation error rather than a red build. Loosening or tightening them to "fit" this table
+  would have been the mistake. `L-4`'s `BUDGETS` row is unaffected: it is about
+  keystroke-to-*paint*, measured by `holonomy-text`'s `tests::keystroke_latency`, and still owes
+  the p99 on reference hardware and the paint half.
 
 - **2026-11-24 — D-90 — The first packaged artifact, and the gate that stops it being a zip.**
   README's table said "A packaged release or installer — **None.**" and `docs/TO-APP.md` M8 listed
@@ -327,7 +420,14 @@ Listed so they stay dead.
   offset 0 (`p50 = 697,961 ns`, `p99 = 732,505 ns`), 180 MB / 30 M words / 43,946 leaves at offset
   0 (`p50 = 697,047 ns`, `p99 = 735,296 ns`), and 180 MB near the end (`p50 = 697,753 ns`,
   `p99 = 727,547 ns`), with a 128-leaf control (`53,041,922 ns`, `76×` slower) in **CI run
-  `45106234334` on `3b54969`**. Writing the multi-leaf narrow-viewport BiDi test in
+  `45106234334` on `3b54969`**.
+  *Amended 2026-11-24 (D-91): those absolute numbers are one run, not a property of the code.* Two
+  runs of the unmodified gate sixteen minutes apart on the same runner class measured
+  `p50 = 696,731 ns` (control `90×`) and `p50 = 1,045,075 ns` (control `88×`) for the same
+  180 MB-at-offset-0 workload — a `1.5×` spread with byte-identical inputs and identical
+  intra-run spread (`< 0.1%`). What the gate establishes is therefore the **invariance and the
+  ratio**, which reproduce on every run, not the absolute latency, which belongs to the runner.
+  The citations in this file and in `ROADMAP.md` now quote the measured range and say so. Writing the multi-leaf narrow-viewport BiDi test in
   `crates/holonomy-shell/tests/editing.rs` uncovered three pre-existing leaf-seam bugs in
   `crates/holonomy-shell/src/lib.rs`: (1) `tail_bytes` returned `cluster.len()` instead of `0`
   whenever a cluster started cleanly on `at`, extending every non-EOF frame by one cluster into the
