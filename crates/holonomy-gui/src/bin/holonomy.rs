@@ -1131,7 +1131,10 @@ mod tests {
         assert_eq!(receipt.canaries, 8);
         // Nanoseconds are reported in microseconds, so a sub-millisecond wipe is not rounded to 0.
         assert_eq!(receipt.trip_to_verified_us, 880);
-        assert!(!receipt.real_time, "a fallback-scheduled reaper must say so");
+        assert!(
+            !receipt.real_time,
+            "a fallback-scheduled reaper must say so"
+        );
         let described = receipt.describe();
         assert!(described.contains("confirmed"), "{described}");
         assert!(described.contains("1041 arenas"), "{described}");
@@ -1149,11 +1152,9 @@ mod tests {
             WipeReceipt::from_outcome(&outcome(0, 0, 0, 0)),
             Err(WipeUnconfirmed::NothingArmed)
         );
-        assert!(
-            WipeUnconfirmed::NothingArmed
-                .describe()
-                .contains("could not be confirmed")
-        );
+        assert!(WipeUnconfirmed::NothingArmed
+            .describe()
+            .contains("could not be confirmed"));
     }
 
     #[test]
@@ -1184,11 +1185,9 @@ mod tests {
 
     #[test]
     fn an_outcome_that_never_arrived_is_not_a_wipe() {
-        assert!(
-            WipeUnconfirmed::NoOutcome
-                .describe()
-                .contains("could not be confirmed")
-        );
+        assert!(WipeUnconfirmed::NoOutcome
+            .describe()
+            .contains("could not be confirmed"));
     }
 
     #[test]
