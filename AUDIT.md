@@ -106,10 +106,20 @@ Listed so they stay dead.
      requested sizes — and the drill declares a 120×30 window and keeps its asserted sentence short
      enough not to wrap at it.
 
+  4. **Found only by the diag bridge (fixed after the second red push):** the drill's own `drive()`
+     helper forwarded its three capture arguments to the binary — it was missing the `shift 3` that
+     `scripts/smoke-install.sh` has, so `holonomy` received `author.session "correct horse…" "a
+     document…"` as positional arguments, printed its usage text and exited 2. Two CI cycles went
+     to a one-line omission in test scaffolding; the product was never involved.
+
   The lesson is worth recording because it is the same one D-73 recorded about `script(1)`: a pty
-  harness has failure modes of its own, and they look like product failures from a distance. Every
-  step of this script that can be run outside CI now has been; the parts that cannot (the real
-  binary in the real release build) are what the CI job is for.
+  harness has failure modes of its own, and from a distance they look like product failures. After
+  fix (4) the whole script was run end to end outside CI against a stand-in binary — author, copy,
+  confined import, verify near and far, growth check, state-leftover check — and it printed
+  `HOLONOMY_PORTABILITY L-9=partial …` and `l9: PASS`. The same run was then repeated against a
+  stand-in that deliberately writes `$HOME/.config/holonomy/session.key`, and the drill **failed**,
+  naming the file. That negative control matters more than the positive one: it is the only evidence
+  that the empty-state assertion can fail at all, and a check that cannot fail is not a check.
 
 - **2026-11-24 — D-91 — The viewport gate's absolute number was quoted as a property of the code;
   it is a property of the runner.** Harness bookkeeping, not a product defect, but the class this

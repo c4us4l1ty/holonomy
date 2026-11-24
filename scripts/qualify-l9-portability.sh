@@ -69,8 +69,14 @@ mkdir -p "$authored/bin" "$delivered/bin/import" "$importer_home"
 L9_COLS=120
 L9_ROWS=30
 
-drive() { # out, phrase, text, path
-  local out="$1" phrase="$2" text="$3" path="$4"
+drive() { # out, phrase, text, then the binary's own arguments
+  local out="$1"
+  local phrase="$2"
+  local text="$3"
+  # Consume the three capture arguments, exactly as `scripts/smoke-install.sh` does. Without this
+  # the function's own parameters are forwarded to the binary and it prints its usage and exits 2 —
+  # which is how this drill failed the first two times it ran in CI.
+  shift 3
   local spec="$work_dir/keys.json"
   python3 -c '
 import json, sys
@@ -107,6 +113,7 @@ cp "$original" "$delivered/notes.wavefunction"
 authored_sum="$(sha256sum "$original" | cut -d' ' -f1)"
 delivered_sum="$(sha256sum "$delivered/notes.wavefunction" | cut -d' ' -f1)"
 [[ "$authored_sum" == "$delivered_sum" ]] || { echo "l9: FAIL — the copy is not byte-identical" >&2; exit 1; }
+copied_bytes="$(stat -c %s "$delivered/notes.wavefunction")"
 
 # --- 3. Import in a fresh process with no inherited state ----------------------------------------
 # `env -i` drops the entire environment, then a minimal one is set: PATH (to find nothing but the
@@ -203,11 +210,14 @@ if [[ -n "$left" ]]; then
   exit 1
 fi
 
-# The delivered file grew (the continuation was appended), proving a real edit landed on the copy
-# rather than the check passing on an untouched file.
+# The delivered file grew *since it was delivered*, proving a real edit landed on the copy rather
+# than the check passing on an untouched file. The baseline is the delivered copy, not the original:
+# they are byte-identical by construction, and comparing against the original leaves the assertion
+# vacuous the moment the copy is one byte larger.
 delivered_after="$(stat -c %s "$continued")"
-if [[ "$delivered_after" -le "$(stat -c %s "$original")" ]]; then
-  echo "l9: FAIL — the continuation did not grow the document ($delivered_after bytes)" >&2
+if [[ "$delivered_after" -le "$copied_bytes" ]]; then
+  echo "l9: FAIL — the continuation did not grow the delivered copy" \
+    "($copied_bytes bytes before, $delivered_after after)" >&2
   exit 1
 fi
 
@@ -215,7 +225,7 @@ fi
 # `L-9=partial` is the honest token: the process half is proven here, the machine half is not.
 echo "HOLONOMY_PORTABILITY L-9=partial same_kernel=yes same_libc=yes same_fs=yes" \
   "second_machine=no inherited_state=none dependency_state_after_import=empty" \
-  "copied_bytes=$(stat -c %s "$original") resumed_bytes=$delivered_after" \
+  "copied_bytes=$copied_bytes resumed_bytes=$delivered_after" \
   "verify_near=ok verify_far=ok continuation=durable" \
   "note=\"needs a second machine for the full law\""
 echo "l9: PASS (process-level: no account, token, device or inherited state required)"
