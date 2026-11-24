@@ -74,11 +74,15 @@ Listed so they stay dead.
   find operation uses the count/index API. The collecting API and actual replace-all now refuse
   more than 16,384 matches before modifying the document; identical no-op replacement can count
   densely without collecting. This is a visible functional limitation, not dense replace-all
-  support. The encrypted 30-million-word fixture now exercises dense find and records Rust heap
-  and sampled Linux process RSS; sampled RSS cannot prove a peak or measure kernel page cache.
-  Final results and pinned CI are pending. The architecture and qualification paths for streaming
-  transactional dense replacement and a stalled-UI wipe are in `docs/BOUNDED_SEARCH_AND_WIPE.md`.
-  No 50 ms guarantee, full wipe coverage, total-memory bound, or Block 7/9 gate is claimed.
+  support. Push run [45321900958](https://github.com/c4us4l1ty/holonomy/actions/runs/45321900958)
+  scanned 30,013,649 dense matches in the encrypted fixture: peak Rust live heap 1,310,741 bytes,
+  1,174,991 bytes over the pre-open baseline, and 4,415,488 bytes peak sampled Linux process RSS.
+  RSS was sampled every 64 segments, so it cannot prove an instantaneous peak or account for kernel
+  page cache. Workspace tests and the encrypted measurement passed; clippy found use of an API newer
+  than the declared MSRV, corrected afterward and awaiting CI. The architecture and qualification
+  paths for streaming transactional dense replacement and a stalled-UI wipe are in
+  `docs/BOUNDED_SEARCH_AND_WIPE.md`. No 50 ms guarantee, full wipe coverage, total-memory bound, or
+  Block 7/9 gate is claimed.
 
 - **2026-11-22 — D-84 — Dead-man and no-op replacement follow-up.** A heartbeat arriving
   after a dead-man deadline could previously erase an expiry before the watcher saw it, leaving

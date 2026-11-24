@@ -89,7 +89,7 @@ impl SegmentSource for Shared {
             self.in_word = word;
         }
         #[cfg(target_os = "linux")]
-        if self.loads.is_multiple_of(64) {
+        if self.loads & 63 == 0 {
             sample_rss();
         }
         Ok(bytes)

@@ -85,10 +85,9 @@ impl std::fmt::Display for SearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NeedleTooLong { limit } => write!(f, "search needle exceeds {limit} bytes"),
-            Self::MatchLimitExceeded { limit } => write!(
-                f,
-                "search has more than {limit} matches; use streaming search"
-            ),
+            Self::MatchLimitExceeded { limit } => {
+                write!(f, "more than {limit} matches exceed the collection limit")
+            }
             Self::MatchCountOverflow => write!(f, "search match count overflow"),
             Self::Source { segment, message } => {
                 write!(
@@ -388,6 +387,36 @@ mod tests {
                 limit: MAX_SEARCH_NEEDLE_BYTES
             })
         );
+    }
+
+    #[test]
+    fn visitor_walks_many_one_byte_slabs_without_missing_window_boundaries() {
+        let count = 10_000;
+        let mut entries = BTreeMap::new();
+        let mut slabs = Vec::new();
+        for index in 0..count {
+            let id = SegmentId::new(index);
+            entries.insert(id, vec![b'x']);
+            slabs.push(Slab::new(id, 0, 1));
+        }
+        let spine = Spine::from_slabs(slabs);
+        let mut store = MapSource(entries);
+        let mut seen = 0u64;
+        visit_streaming(
+            &spine,
+            &Draft::new(),
+            &OpenSources::new(),
+            &[],
+            b"x",
+            &mut store,
+            |hit| {
+                assert_eq!(hit.start, seen);
+                seen += 1;
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(seen, count);
     }
 
     #[test]
