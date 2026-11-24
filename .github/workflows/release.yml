@@ -1,0 +1,163 @@
+name: v6 release
+
+# `docs/TO-APP.md` M8's missing half, built honestly.
+#
+# The project has no packaged release, and the README says so in a table: "A packaged release or
+# installer — **None.** No artefact is published; you build from source." This workflow is the first
+# step off that line, and it is deliberately the *small* step:
+#
+#   * it builds **one** artifact for **one** platform (`x86_64-unknown-linux-gnu`) from the tree at
+#     the tag, with the pinned toolchain and a committed lockfile;
+#   * it runs the artifact through `scripts/smoke-install.sh` — the same pty-driven test CI runs —
+#     *before* publishing, so a tarball that cannot open a document is never uploaded;
+#   * it is unsigned and unpublished-by-default: a `v*` tag publishes, and
+#     `workflow_dispatch` builds and attests without publishing.
+#
+# What it still does not do, and must not be read as doing: macOS and Windows builds need runner
+# time, a second toolchain and code signing; L-9 ("opens on any machine") needs the same file
+# opened on a second machine and stays `spec` in `docs/GATES.md` until someone does that by hand.
+# A tarball is a prerequisite for that drill, not the drill.
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual runs build and attest without publishing. Publishing is deliberately *only* reachable
+  # by pushing a `v*` tag, so a release can never be named after a branch by accident.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  linux-tarball:
+    name: build, smoke and package (linux x86_64, unsigned)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # `contents: write` is needed only by the tag-triggered release step; a dispatch run never
+      # reaches it, so the elevated permission is inert there.
+      contents: write
+      # The evidence comment on the pinned diagnostics issue.
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The artifact's own name is derived from the tag (or the commit), never hand-written, so a
+      # tarball can always be traced back to the bytes it was built from.
+      - name: Name the artifact
+        id: name
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="$(git rev-parse --short=12 HEAD)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "stem=holonomy-${version}-${TARGET}" >> "$GITHUB_OUTPUT"
+          echo "artifact named holonomy-${version}-${TARGET}"
+
+      - name: Build the release binary from the lockfile
+        run: cargo build --locked --release -p holonomy-gui --bin holonomy
+
+      # The gate that makes this a release rather than a zip: the binary must open, seal, reopen,
+      # verify and compact a document through a real pty, and must refuse a wrong and an empty
+      # passphrase. `HOLONOMY_BINARY` reuses the build above instead of rebuilding it.
+      - name: Prove the binary works before packaging it
+        run: |
+          set -o pipefail
+          HOLONOMY_BINARY="$(pwd)/target/release/holonomy" \
+            scripts/smoke-install.sh 2>&1 | tee "$RUNNER_TEMP/smoke.log"
+          grep 'HOLONOMY_SMOKE' "$RUNNER_TEMP/smoke.log"
+
+      - name: Assemble the tarball
+        env:
+          STEM: ${{ steps.name.outputs.stem }}
+        run: |
+          set -euo pipefail
+          root="target/package/${STEM}"
+          mkdir -p "${root}/bin" "${root}/share/doc/holonomy"
+          install -m 755 target/release/holonomy "${root}/bin/holonomy"
+
+          # Attribution travels with the binary: the Unicode tables compiled into the Eye are
+          # Unicode-3.0, and `THIRD_PARTY.md` is the ledger that says so.
+          cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY.md README.md "${root}/share/doc/holonomy/"
+          mkdir -p "${root}/share/doc/holonomy/LICENSES"
+          cp LICENSES/*.txt "${root}/share/doc/holonomy/LICENSES/"
+
+          # A tarball a person can read before they trust it. The text lives in the tree
+          # (`packaging/README-RELEASE.txt`), not in a YAML block scalar — a heredoc terminator at
+          # column zero would end the whole `run:` scalar.
+          cp packaging/README-RELEASE.txt "${root}/README-RELEASE.txt"
+
+          tar --owner=0 --group=0 --numeric-owner --sort=name -C target/package \
+            -czf "target/package/${STEM}.tar.gz" "${STEM}"
+
+          # Provenance next to the artifact: what it was built from and how.
+          (
+            cd target/package
+            sha256sum "${STEM}.tar.gz" > "${STEM}.tar.gz.sha256"
+            {
+              echo "artifact: ${STEM}.tar.gz"
+              echo "commit:   ${GITHUB_SHA}"
+              echo "ref:      ${GITHUB_REF}"
+              echo "target:   ${TARGET}"
+              echo "toolchain: pinned by rust-toolchain.toml (channel 1.100.0)"
+              echo "built:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "smoke:    passed (scripts/smoke-install.sh before packaging)"
+              echo "signed:   no — there is no signing key; do not treat this as an attested binary"
+            } > "${STEM}.provenance.txt"
+          )
+
+      - name: Upload the tarball as a run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.stem }}
+          path: |
+            target/package/*.tar.gz
+            target/package/*.sha256
+            target/package/*.provenance.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      # Tag pushes publish; nothing else does. No `--latest`, no draft juggling: the release
+      # exists with the artifact attached and its body says exactly what it is.
+      - name: Publish to a GitHub release (tag pushes only, unsigned)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STEM: ${{ steps.name.outputs.stem }}
+          VERSION: ${{ steps.name.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "holonomy ${VERSION} (unsigned, experimental)" \
+              --notes "Unsigned x86_64 Linux tarball built from ${GITHUB_SHA}. Read README-RELEASE.txt inside the archive first: no gate in docs/GATES.md is claimed, and this build is not for irreplaceable work."
+          fi
+          gh release upload "${GITHUB_REF_NAME}" \
+            "target/package/${STEM}.tar.gz" \
+            "target/package/${STEM}.tar.gz.sha256" \
+            "target/package/${STEM}.provenance.txt" \
+            --clobber
+          echo "published ${STEM}.tar.gz to release ${GITHUB_REF_NAME}"
+
+      - name: Record the release evidence in the audit issue
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STEM: ${{ steps.name.outputs.stem }}
+        run: |
+          { echo "### M8 release — first packaged artifact"; echo '```text'; \
+            echo "artifact=${STEM}.tar.gz"; \
+            sha256sum "target/package/${STEM}.tar.gz"; \
+            grep -E 'HOLONOMY_SMOKE' "$RUNNER_TEMP/smoke.log"; \
+            echo "note=unsigned, linux x86_64 only; L-9 still spec (needs a second machine)"; \
+            echo '```'; } > "$RUNNER_TEMP/release-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/release-comment.md"

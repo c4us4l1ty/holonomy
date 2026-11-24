@@ -68,6 +68,35 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-24 — D-90 — The first packaged artifact, and the gate that stops it being a zip.**
+  README's table said "A packaged release or installer — **None.**" and `docs/TO-APP.md` M8 listed
+  "the workspace has no release workflow at all" as a known gap. Added
+  `.github/workflows/release.yml`, deliberately the smallest honest step: **one** target
+  (`x86_64-unknown-linux-gnu`), the pinned toolchain and `--locked` so the build is the one the
+  lockfile describes, and — the part that makes it a release rather than an archive —
+  `scripts/smoke-install.sh` runs against `target/release/holonomy` *before* anything is assembled.
+  A binary that cannot create, seal, reopen, `verify` and `compact` a document through a real pty,
+  or that accepts a wrong or empty passphrase, therefore cannot reach a tarball.
+  The artefact is `holonomy-<version>-<target>.tar.gz` containing `bin/holonomy`, `LICENSE-MIT`,
+  `LICENSE-APACHE`, `THIRD_PARTY.md`, `README.md`, the `LICENSES/` attribution set (the Eye compiles
+  Unicode-3.0 tables), and `packaging/README-RELEASE.txt`, whose first line names the build unsigned,
+  experimental and single-platform; beside it a `.sha256` and a `.provenance.txt` that record commit,
+  ref, target and that no signature exists. Publishing is reachable only through a `v*` tag — a
+  `workflow_dispatch` run builds and attests without publishing — so no manual run can name a release
+  after a branch. The release body repeats the scope rather than implying more.
+  `packaging/README-RELEASE.txt` is a file in the tree rather than a heredoc inside the workflow for a
+  found reason: a heredoc terminator at column zero ends the YAML `run:` block scalar, which the
+  first draft did, and which a structural check caught before any push.
+  Verified without a local toolchain (AUDIT OQ-1): the archive is assembled from the real tree in a
+  scratch directory and its contents and checksum inspected; the YAML is checked structurally (no
+  tabs, no column-zero lines inside blocks, every step named). **Not yet run by Actions as of this
+  entry** — the workflow only triggers on a tag or a manual dispatch, so the first real proof is the
+  first `workflow_dispatch`. Treat the pipeline as reviewed, not exercised.
+  **What does not move.** L-9 stays `spec` and its `BUDGETS` row still reads **nothing yet**: the law
+  is one file opened on a *second machine*, and an unsigned tarball for one platform is the
+  prerequisite for that drill, not the drill. Nothing is signed on any platform, macOS and Windows
+  have no build, and reproducibility is not claimed.
+
 - **2026-11-24 — D-89 — The window discarded its own wipe evidence; a confirmed wipe now exits 0
   and an unconfirmed one exits 1.** Found while writing an inventory of what the *live* editor can
   say about `L-7` rather than what the headless harness measures. `holonomy-gui`'s

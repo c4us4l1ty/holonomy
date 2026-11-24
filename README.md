@@ -93,7 +93,7 @@ detail lives.
 | Editor loop: intents in, measured frames out | **Real, measured in CI** | `holonomy-shell` |
 | Terminal window & CLI: open, type, save, unlock, panel, `verify`, `compact` | **Real — this is the app you run** | `holonomy-gui` |
 | That binary, driven end to end by CI | **Real** — created, sealed, reopened, verified, compacted, wrong and empty passphrases refused | `scripts/smoke-install.sh` (D-72) |
-| A packaged release or installer | **None.** No artefact is published; you build from source | `docs/TO-APP.md` M8 |
+| A packaged release or installer | **An unsigned Linux x86_64 tarball** per `v*` tag, built from the lockfile and smoke-tested before packaging (D-90). No installer, no signature, no macOS/Windows build | `docs/TO-APP.md` M8, `.github/workflows/release.yml` |
 | GPU backend, font shaping, IME | **Not built** — the window is a grid of cells (`GSUB`/`GPOS` glyph shaping is OQ-24) | `docs/TO-APP.md` M4b-ii |
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
 | Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection** (`displaced = 0`, split selection spans); contextual glyph joining (`GSUB`/`GPOS`) is not built | OQ-11 (D-77), OQ-24 |
@@ -126,8 +126,13 @@ shipped app on reference hardware. Block 6's deliverable — a GPUI window with 
 
 ## Installing it
 
-**There is no packaged release.** Nothing is published and there is no installer, so the only way to
-run the app today is from source with a Rust toolchain — clone the repository and run it from there:
+**There is no installer, and nothing is signed.** What exists is an unsigned, experimental tarball
+for one platform, published only on a `v*` tag by `.github/workflows/release.yml` (D-90). It is
+built from the committed lockfile, driven through `scripts/smoke-install.sh` *before* it is packaged,
+and it carries a `.sha256`, a `.provenance.txt`, and a `README-RELEASE.txt` whose first line says it
+is unsigned and not for irreplaceable work. There is no macOS or Windows build, so for anyone else
+the only way to run the app is from source with a Rust toolchain — clone the repository and run it
+from there:
 
 ```text
 cargo run --release -p holonomy-gui --bin holonomy -- notes.wavefunction
@@ -138,9 +143,10 @@ The binary is named `holonomy` if you want to install it yourself
 that command is **not exercised by CI**, so treat it as untested. The `cargo run` line above is the
 one the smoke test uses and the one this README can stand behind.
 
-That is a real gap rather than a stylistic one: a per-platform artifact needs signing and release
-infrastructure this project does not have yet, and L-9's "opens on any machine" claim cannot be
-measured until the same file has been opened on a second one.
+That is a real gap rather than a stylistic one: the remaining artifacts need signing and two more
+platforms this project does not have, and L-9's "opens on any machine" claim cannot be measured
+until the same file has been opened on a second machine — a tarball is the prerequisite for that
+drill, not the drill itself.
 
 ## Verifying it yourself
 
