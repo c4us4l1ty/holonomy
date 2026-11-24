@@ -94,6 +94,7 @@ detail lives.
 | Terminal window & CLI: open, type, save, unlock, panel, `verify`, `compact` | **Real — this is the app you run** | `holonomy-gui` |
 | That binary, driven end to end by CI | **Real** — created, sealed, reopened, verified, compacted, wrong and empty passphrases refused | `scripts/smoke-install.sh` (D-72) |
 | A packaged release or installer | **An unsigned Linux x86_64 tarball** per `v*` tag, built from the lockfile and smoke-tested before packaging (D-90). No installer, no signature, no macOS/Windows build | `docs/TO-APP.md` M8, `.github/workflows/release.yml` |
+| Opening a copied file on a fresh profile (`L-9`) | **The process half is measured**: a copy is imported in a second process with a scrubbed environment and an empty state tree that must stay empty, so no account, token, device or config is required (D-92). A second *machine* — different kernel, libc, filesystem — is still unmeasured | `scripts/qualify-l9-portability.sh`, CI job `portability` |
 | GPU backend, font shaping, IME | **Not built** — the window is a grid of cells (`GSUB`/`GPOS` glyph shaping is OQ-24) | `docs/TO-APP.md` M4b-ii |
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
 | Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection** (`displaced = 0`, split selection spans); contextual glyph joining (`GSUB`/`GPOS`) is not built | OQ-11 (D-77), OQ-24 |

@@ -68,6 +68,32 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-24 — D-92 — L-9's drill now measures the half a single host can carry, and says so in
+  its own output.** `docs/GATES.md`'s L-9 row read **nothing yet**: the law is "a copied
+  `.wavefunction` opens on a fresh machine with a passphrase alone; no account, token, or device
+  required", and the project had no harness that touched it. The existing `a_copy_taken_mid_session_opens_where_it_was_copied`
+  test in `holonomy-gui/tests/persist.rs` copies a file within one process family, which proves the
+  commit boundary and nothing about portability.
+  Added `scripts/qualify-l9-portability.sh` and a `portability` CI job. It authors a document with
+  the release binary through a pty, copies **only the file** into a separate delivered tree, and
+  then imports it under `env -i` with `HOME`, all four `XDG_*` directories, `XDG_RUNTIME_DIR` and
+  `TMPDIR` pointed at a directory that is **asserted empty immediately before the import**. No
+  environment variable crosses from the authoring side except `PATH`. The import must `verify`
+  under the passphrase alone, show the sentence the near side typed, accept a continuation that is
+  durable, and re-verify on a third open.
+  The falsifiable half is asserted after the fact: the importer's dependency-state tree must
+  **still be empty**. If a future change taught the app to keep a session, a wrapped key, a keyring
+  entry or a cache, this drill fails instead of passing on a host that happened to share state.
+  The marker says `L-9=partial` with `same_kernel=yes same_libc=yes same_fs=yes second_machine=no`,
+  and the script's header spells out that a different kernel, libc, filesystem, architecture and OS
+  are exactly what it does **not** prove. **L-9 stays `spec`**: the machine half needs the release
+  tarball opened on a second machine, which is the drill this one is the prerequisite for.
+  Two shell defects were found and fixed before pushing, both by executing the script's logic
+  outside CI rather than reading it: a process substitution passed to `env -i` (which cannot see
+  the replaced path), and the driver's key schedule being fed through a fifo rather than a file in
+  the delivered tree. The `env -i` verify dispatch was then exercised against a stub binary to
+  confirm the confinement and the `verified (` assertion work together.
+
 - **2026-11-24 — D-91 — The viewport gate's absolute number was quoted as a property of the code;
   it is a property of the runner.** Harness bookkeeping, not a product defect, but the class this
   audit exists to catch: a measurement cited in a form the measurement does not support.

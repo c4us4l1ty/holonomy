@@ -309,9 +309,11 @@ measures each row, `xtask gates` renders it into `GATES.md`, and `gates --check`
 the two disagree. Block 9's `L-7` wipe row is now measured on every push by
 `holonomy-text/tests/wipe_gate.rs` (`< 1 ms` trip-to-verified across a 4 MiB `ResidentSet`, live
 `DEMKey`, and 32 zeroize canaries with `ghosts = 0` and `0` allocations; `D-79`), leaving only one
-row — `L-9`'s cross-machine portability — reading **"nothing yet"**. No remaining M7 item is
-unaddressed: each one either prints its numbers green or moved to `AUDIT.md` with an owner and a
-reason.
+row — `L-9`'s cross-machine portability — read **"nothing yet"**; as of 2026-11-24 (D-92) its
+measured column names `scripts/qualify-l9-portability.sh`, which proves the process half of the law
+on one host and says `L-9=partial` in its own output, with the second-machine half owned by Block
+10's release matrix. No remaining M7 item is unaddressed: each one either prints its numbers green
+or moved to `AUDIT.md` with an owner and a reason.
 
 ### M8 — Packaging
 
@@ -351,7 +353,16 @@ from `scripts/drive-pty.py` because `script(1)` hangs (D-73).
 - **An install line that works.** `cargo install --path crates/holonomy-gui` would work for someone
   with the toolchain; a user without one has no path, and the README says so.
 - **L-9's portability claim.** It needs the same file opened on a second machine, which is the only
-  way that law can be measured. Until then L-9's row in `GATES.md` reads **nothing yet**.
+  way the whole law can be measured. **The half a single host can carry is now measured (D-92):**
+  `scripts/qualify-l9-portability.sh` and the `portability` CI job author a document, copy *only
+  the file* into a delivered tree, and import it in a second process under `env -i` with every
+  `HOME`/`XDG_*`/`TMPDIR` pointed at a directory that must be empty before the import and empty
+  after it — so nothing could have been carried in, and nothing was left behind. It prints
+  `HOLONOMY_PORTABILITY L-9=partial same_kernel=yes same_libc=yes second_machine=no`. That rules
+  out an account, a token, a device, a keyring entry and a config file; it cannot rule out a
+  different kernel, libc, filesystem or architecture, which is what the release tarball on a second
+  machine is for. L-9 stays `spec` in `GATES.md`, but its measured column now names this drill
+  instead of reading **nothing yet**.
 
 ## What could derail this, and the fallback
 

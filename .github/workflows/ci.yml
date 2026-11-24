@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    needs: [fmt, clippy, test, gates, sync, filesystem]
+    needs: [fmt, clippy, test, gates, sync, filesystem, portability]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -385,6 +385,42 @@ jobs:
             grep -E 'HOLONOMY_SMOKE|^smoke: ' "$RUNNER_TEMP/smoke.log"; echo '```'; } \
             > "$RUNNER_TEMP/smoke-comment.md"
           gh issue comment 51 --body-file "$RUNNER_TEMP/smoke-comment.md"
+
+  portability:
+    name: L-9 hand-off drill (process half, not the second machine)
+    runs-on: ubuntu-latest
+    # Same shape as the smoke job and for the same reason: a pty that hangs is worse than one that
+    # fails. Push-only, because the evidence is posted back to the diag issue.
+    timeout-minutes: 10
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the binary the release would ship
+        run: cargo build --locked --release -p holonomy-gui --bin holonomy
+      # The drill authors a document, copies only the file to a delivered tree, then imports it in a
+      # second process with a scrubbed environment and a state directory that must be empty before
+      # and after. It prints `L-9=partial`, and the script says why in its own header.
+      - name: Copy a document and import it with no inherited state
+        run: |
+          set -o pipefail
+          HOLONOMY_BINARY="$(pwd)/target/release/holonomy" \
+            scripts/qualify-l9-portability.sh 2>&1 | tee "$RUNNER_TEMP/l9.log"
+          grep 'HOLONOMY_PORTABILITY' "$RUNNER_TEMP/l9.log"
+      - name: Record the portability evidence in the audit issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { echo '### L-9 hand-off drill — the process half'; echo '```text'; \
+            grep -E 'HOLONOMY_PORTABILITY|^l9: ' "$RUNNER_TEMP/l9.log"; echo '```'; \
+            echo 'L-9 remains `spec`: this proves no account/token/device/inherited state is needed,'; \
+            echo 'not that a second machine can open the file. That is the release drill.'; } \
+            > "$RUNNER_TEMP/l9-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/l9-comment.md"
 
   gates:
     name: gates contract

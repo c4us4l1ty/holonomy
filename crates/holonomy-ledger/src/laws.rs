@@ -220,9 +220,15 @@ pub const BUDGETS: &[Budget] = &[
     Budget {
         vision: "Portability: one passphrase, one file, any machine, no account",
         law: "L-9",
-        measured_by: None,
-        owes: "a copied file opened on a second machine and platform, which needs a release \
-               build — Block 10",
+        measured_by: Some(
+            "`scripts/qualify-l9-portability.sh` (CI job `portability`) copies a document and \
+             imports it in a second process under `env -i` with every `HOME`/`XDG_*`/`TMPDIR` \
+             pointed at an empty directory that must stay empty — the process half of the law \
+             (`HOLONOMY_PORTABILITY L-9=partial`)",
+        ),
+        owes: "a copied file opened on a second machine and platform — the drill above carries the \
+               file, the passphrase and nothing else, but it is still one kernel and one libc, \
+               which is Block 10's release matrix",
     },
     Budget {
         vision: "Tail-only sync: backing up after a save transfers O(appended bytes)",
