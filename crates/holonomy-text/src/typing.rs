@@ -2532,6 +2532,34 @@ mod tests {
         assert_eq!(typing.pending(), b"hello world");
     }
 
+    // A desired invariant, kept executable while the pre-transaction flush issue is open (D-84).
+    #[test]
+    #[ignore = "known bug: a failed replace after flushing a live draft clears redo history"]
+    fn failed_replacement_preserves_live_draft_redo_history() {
+        struct NoSource;
+        impl SegmentSource for NoSource {
+            fn load(&mut self, _: SegmentId) -> Result<Vec<u8>, String> {
+                Err("unexpected sealed segment load".to_owned())
+            }
+        }
+        let sink = SpineRecorder {
+            fail_commit: true,
+            ..SpineRecorder::default()
+        };
+        let mut typing = Typing::new(sink, 64);
+        typing.mark();
+        typing.insert(b"one").unwrap();
+        typing.mark();
+        typing.insert(b" more").unwrap();
+        assert!(typing.undo().unwrap());
+        assert_eq!(typing.pending(), b"one");
+        assert_eq!(typing.redo_depth(), 1);
+        assert!(typing.replace_all(b"one", b"two", &mut NoSource).is_err());
+        assert_eq!(typing.redo_depth(), 1, "failed replace lost redo history");
+        assert!(typing.redo().unwrap());
+        assert_eq!(typing.pending(), b"one more");
+    }
+
     #[test]
     fn replacement_does_not_publish_a_root_or_segments_on_commit_failure() {
         struct Source;

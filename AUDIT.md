@@ -78,8 +78,10 @@ Listed so they stay dead.
   L-7's 50 ms deadline when the UI is blocked. A no-match or identical replace now searches the
   live draft without flushing, preserving its undo/redo history. A real replacement still flushes
   the draft before its atomic transaction; if the later replacement commit fails, that flush can
-  change undo/redo state even though the replacement was not published. This residual is not
-  covered by the clean-spine failure test and remains a blocker. Changes await full pinned CI.
+  change undo/redo state even though the replacement was not published. A targeted Rust 1.99
+  reproduction observed redo depth dropping from 1 to 0 on injected atomic-commit failure; the
+  desired invariant is retained as an explicitly ignored regression test until fixed. This remains
+  a blocker. Changes await full pinned CI.
 
 - **2026-11-22 — D-83 — Encrypted sparse search memory diagnostic.** Push CI run
   [45238499667](https://github.com/c4us4l1ty/holonomy/actions/runs/45238499667) on
