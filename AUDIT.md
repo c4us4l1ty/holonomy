@@ -68,6 +68,33 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-24 — D-93 — A failed verification skipped the wipe it was evidence against.**
+  The emergency trip scrubs two populations, and they fail differently. `SecretArenas` holds the
+  resident plaintext the reaper reaches through registered slots, and its canaries are what say the
+  scrub happened. The **editor** separately holds slabs, the typing buffer and its undo copies, and
+  the window holds viewport text; `Editor::wipe_all_in_place` is the product-level scrub of those.
+  D-89, added to make the closing line stop claiming a wipe it had not verified, folded that second
+  scrub *into* the confirmed branch: `WipeReceipt::from_outcome` gated on a clean canary read, and
+  the `wipe_all_in_place` call sat inside the `Ok` arm. On `Err(unconfirmed)` — ghosts survived the
+  reaper's scrub, or nothing was armed, or the join produced no outcome at all — and on `None`, the
+  editor's plaintext was therefore **never wiped**, and freed into the heap intact at process exit.
+  The reasoning that produced it was that a wipe nobody could verify should not be announced as if
+  it had happened, which is right about the *sentence* and wrong about the *scrub*: the sentence is
+  a report, `wipe_all_in_place` is the action, and the case where the reaper's canaries came back
+  dirty is the strongest reason to scrub the rest, not a reason to abstain from it. Found by
+  reading the change back rather than by any test, because no test reached the branch: the defect
+  is in a binary's shutdown path, and the path is only taken when a live reaper disagrees.
+  Fixed by hoisting the call above the `match`, so the scrub runs on every path and the verdict is
+  decided afterwards. To keep that from being a claim rather than a fact, the decision after the
+  join is now a pure function, `classify_trip(outcome, wiped_in_place) -> Ended`, which takes no
+  editor: the in-place scrub is unreachable from it **by construction**, so a future edit cannot
+  re-conditionalise it without changing the signature, and `every_trip_classifies_as_a_wipe_whatever_the_reaper_said`
+  drives all four shapes (clean, nothing armed, ghost, no outcome) through it.
+  The receipt reports the editor's bytes as its own field, `in_place_bytes`, distinct from
+  `bytes_wiped`: the first number is a return value from the editor and the second is measured by
+  canaries in the reaper, and summing them would let the unmeasured half ride on the measured one.
+  The closing line names them separately.
+
 - **2026-11-24 — D-92 — L-9's drill now measures the half a single host can carry, and says so in
   its own output.** `docs/GATES.md`'s L-9 row read **nothing yet**: the law is "a copied
   `.wavefunction` opens on a fresh machine with a passphrase alone; no account, token, or device
