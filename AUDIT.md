@@ -79,7 +79,10 @@ Listed so they stay dead.
   registers, terminal copies, descendants, page locking, external interference and uninterruptible
   waits are not covered. SIGKILL or process exit is not itself a verified wipe, and the cleanup
   path may block indefinitely. The L-7 deadline and production wipe coverage remain unproven.
-  Pinned full-workspace CI and the separate release-mode probe are pending.
+  Pinned push CI [45333626167](https://github.com/c4us4l1ty/holonomy/actions/runs/45333626167)
+  passed the workspace and release probe: 12 shared-arena trials, p50 2,768 µs, max 4,261 µs,
+  zero ghosts and zero trials over 50 ms. These CI timings include the negative-control scan and
+  are not reference-hardware certification or evidence of a live-editor deadline.
 
 - **2026-11-22 — D-85 — Bounded dense search work; gates remain open.** Added a visitor and
   count/index API that avoid accumulating match positions, limit needle size, and use small scan
