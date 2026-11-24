@@ -309,7 +309,7 @@ enum Ended {
     /// Emergency reaper wipe fired but could **not** be confirmed: the reaper join produced no
     /// outcome, it scrubbed no arenas, or a canary survived. The window must say this rather than
     /// claim a wipe (D-89) — an unconfirmed wipe is an *unmet protection*, not a success.
-    WipeUnconfirmed(WipeUnconfirmed),
+    WipeUnconfirmed(WipeUnconfirmed, usize)
 }
 
 /// The measured facts of a wipe that was confirmed, kept so the window can show them.
@@ -353,23 +353,35 @@ enum WipeUnconfirmed {
 
 impl WipeUnconfirmed {
     /// A sentence for the closing line, in voice with the window's other outcome words.
-    fn describe(self) -> String {
+    ///
+    /// `in_place_bytes` is what the editor scrubbed on its own account (`D-93`). It is reported
+    /// here for the same reason it is reported on a confirmed wipe: the scrub happens whatever the
+    /// verdict, and a line that stayed silent about it would leave a reader unable to tell a
+    /// scrub that ran from one that regressed.
+    fn describe(self, in_place_bytes: usize) -> String {
+        let scrubbed = if in_place_bytes == 0 {
+            "the editor had nothing left to scrub".to_owned()
+        } else {
+            format!(
+                "the editor still scrubbed {} in place",
+                panel::human(in_place_bytes)
+            )
+        };
         match self {
-            Self::NoOutcome => {
-                "emergency wipe fired but could not be confirmed — the reaper reported no outcome"
-                    .to_owned()
-            }
-            Self::NothingArmed => {
+            Self::NoOutcome => format!(
+                "emergency wipe fired but could not be confirmed — the reaper reported no outcome; \
+                 {scrubbed}"
+            ),
+            Self::NothingArmed => format!(
                 "emergency wipe fired but could not be confirmed — no resident arena was armed, \
-                 so nothing was proven wiped"
-                    .to_owned()
-            }
+                 so nothing was proven wiped; {scrubbed}"
+            ),
             Self::Ghosts {
                 ghost_canaries,
                 ghost_bytes,
             } => format!(
                 "emergency wipe FAILED verification — {ghost_canaries} canar{} still held \
-                 {ghost_bytes} bytes: the wipe invariant broke on this machine",
+                 {ghost_bytes} bytes: the wipe invariant broke on this machine; {scrubbed}",
                 if ghost_canaries == 1 { "y" } else { "ies" }
             ),
         }
@@ -559,9 +571,9 @@ fn classify_trip(outcome: Option<ReaperOutcome>, wiped_in_place: usize) -> Ended
     match outcome {
         Some(outcome) => match WipeReceipt::from_outcome(&outcome) {
             Ok(receipt) => Ended::Wiped(receipt.with_in_place(wiped_in_place)),
-            Err(unconfirmed) => Ended::WipeUnconfirmed(unconfirmed),
+            Err(unconfirmed) => Ended::WipeUnconfirmed(unconfirmed, wiped_in_place),
         },
-        None => Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome),
+        None => Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome, wiped_in_place),
     }
 }
 
@@ -1009,8 +1021,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}", receipt.describe());
                     outcome_words(false, None)
                 }
-                Ok(Ended::WipeUnconfirmed(reason)) => {
-                    println!("{}", reason.describe());
+                Ok(Ended::WipeUnconfirmed(reason, scrubbed)) => {
+                    println!("{}", reason.describe(scrubbed));
                     outcome_words(true, None)
                 }
                 Ok(Ended::SaveFailed) => outcome_words(false, Some(false)),
@@ -1019,7 +1031,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => outcome_words(true, None),
             };
             println!("{}", closing(&path, segments, witnesses, summary));
-            if matches!(outcome, Ok(Ended::SaveFailed | Ended::WipeUnconfirmed(_))) {
+            if matches!(outcome, Ok(Ended::SaveFailed | Ended::WipeUnconfirmed(..))) {
                 // A window that could not write, or could not verify its own wipe, must not exit as
                 // though it had.
                 std::process::exit(1);
@@ -1179,7 +1191,7 @@ mod tests {
             Err(WipeUnconfirmed::NothingArmed)
         );
         assert!(WipeUnconfirmed::NothingArmed
-            .describe()
+            .describe(0)
             .contains("could not be confirmed"));
     }
 
@@ -1196,7 +1208,7 @@ mod tests {
                 ghost_bytes: 4096
             }
         );
-        let described = reason.describe();
+        let described = reason.describe(4096);
         assert!(described.contains("FAILED verification"), "{described}");
         assert!(described.contains("1 canary"), "{described}");
         assert!(described.contains("4096 bytes"), "{described}");
@@ -1205,15 +1217,33 @@ mod tests {
             ghost_canaries: 3,
             ghost_bytes: 12,
         }
-        .describe();
+        .describe(0);
         assert!(plural.contains("3 canaries"), "{plural}");
     }
 
     #[test]
     fn an_outcome_that_never_arrived_is_not_a_wipe() {
         assert!(WipeUnconfirmed::NoOutcome
-            .describe()
+            .describe(0)
             .contains("could not be confirmed"));
+    }
+
+    #[test]
+    fn an_unconfirmed_trip_still_reports_the_scrub_it_performed() {
+        // D-93's reporting half. The scrub now runs on every path, so the closing line has to be
+        // able to show it on every path: a failure sentence that went quiet about the in-place
+        // bytes would make a working scrub and a regressed one read identically to a user.
+        let scrubbed = WipeUnconfirmed::NoOutcome.describe(8192);
+        assert!(scrubbed.contains("could not be confirmed"), "{scrubbed}");
+        // `panel::human` renders 8192 as "8 KiB" — the number a reader gets is the formatted one.
+        assert!(scrubbed.contains("scrubbed 8 KiB in place"), "{scrubbed}");
+        // And it says the other thing when there was nothing to scrub, rather than "0 bytes".
+        let nothing = WipeUnconfirmed::NothingArmed.describe(0);
+        assert!(
+            nothing.contains("had nothing left to scrub"),
+            "a zero-byte scrub must not read as a measurement: {nothing}"
+        );
+        assert!(!nothing.contains("0 bytes"), "{nothing}");
     }
 
     #[test]
@@ -1241,7 +1271,7 @@ mod tests {
             let ended = classify_trip(case, 64 * 1024);
             // Whatever the verdict, it is a wipe verdict: a trip can never read as "saved".
             assert!(
-                matches!(ended, Ended::Wiped(_) | Ended::WipeUnconfirmed(_)),
+                matches!(ended, Ended::Wiped(_) | Ended::WipeUnconfirmed(..)),
                 "a trip must never classify as a save: {ended:?}"
             );
             // And the confirmed variant is the only one that may claim a wipe.
@@ -1270,12 +1300,12 @@ mod tests {
             WipeReceipt::from_outcome(&outcome(2, 4096, 0, 0)).expect("clean wipe confirmed"),
         );
         assert!(
-            !matches!(ended, Ended::SaveFailed | Ended::WipeUnconfirmed(_)),
+            !matches!(ended, Ended::SaveFailed | Ended::WipeUnconfirmed(..)),
             "a confirmed wipe is not a failure"
         );
-        let unconfirmed: Ended = Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome);
+        let unconfirmed: Ended = Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome, 0);
         assert!(
-            matches!(unconfirmed, Ended::WipeUnconfirmed(_)),
+            matches!(unconfirmed, Ended::WipeUnconfirmed(..)),
             "an unconfirmed wipe must take the non-zero exit path"
         );
     }

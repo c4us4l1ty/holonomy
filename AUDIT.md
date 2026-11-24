@@ -94,6 +94,12 @@ Listed so they stay dead.
   `bytes_wiped`: the first number is a return value from the editor and the second is measured by
   canaries in the reaper, and summing them would let the unmeasured half ride on the measured one.
   The closing line names them separately.
+  Hoisting the call exposed a second, quieter half of the same defect, in the *reporting*:
+  `WipeUnconfirmed::describe` had no way to mention the scrub, so the new all-path scrub would have
+  been invisible on exactly the trips where it matters. The failure sentence now ends with what the
+  editor scrubbed ("still scrubbed 8 KiB in place"), and says "the editor had nothing left to
+  scrub" rather than "0 bytes" when the number is zero — a zero there is an absence, not a
+  measurement. `Ended::WipeUnconfirmed` carries the count so the two cannot drift apart.
 
 - **2026-11-24 — D-92 — L-9's drill now measures the half a single host can carry, and says so in
   its own output.** `docs/GATES.md`'s L-9 row read **nothing yet**: the law is "a copied
