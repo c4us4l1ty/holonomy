@@ -358,6 +358,57 @@ pub struct Typing<S> {
     buffer_slot: Option<usize>,
 }
 
+// A replacement may first need to seal a draft or commit dirty geometry. If the subsequent
+// atomic replacement is refused, restore the user's in-memory edit/undo state. The sink may still
+// need reopening after an uncertain I/O error, and the preliminary flush may have been durable.
+struct ReplaceCheckpoint {
+    spine: Spine,
+    draft: Draft,
+    sources: OpenSources,
+    buffer: SlabText,
+    open: Option<Open>,
+    next_at: Option<u64>,
+    sealed_bytes: u64,
+    steps: Vec<Step>,
+    undone: Vec<Step>,
+    structure_dirty: bool,
+}
+
+impl ReplaceCheckpoint {
+    fn capture<S>(typing: &Typing<S>) -> Self {
+        let bytes = typing.buffer.as_bytes().to_vec();
+        let slack = typing.capacity.saturating_sub(bytes.len());
+        Self {
+            spine: typing.spine.clone(),
+            draft: typing.draft.clone(),
+            sources: typing.sources.clone(),
+            buffer: SlabText::from_plaintext(bytes, slack)
+                .expect("the existing buffer is valid UTF-8"),
+            open: typing.open,
+            next_at: typing.next_at,
+            sealed_bytes: typing.sealed_bytes,
+            steps: typing.steps.clone(),
+            undone: typing.undone.clone(),
+            structure_dirty: typing.structure_dirty,
+        }
+    }
+
+    fn restore<S>(self, typing: &mut Typing<S>) {
+        typing.unarm_buffer();
+        typing.spine = self.spine;
+        typing.draft = self.draft;
+        typing.sources = self.sources;
+        typing.buffer = self.buffer;
+        typing.open = self.open;
+        typing.next_at = self.next_at;
+        typing.sealed_bytes = self.sealed_bytes;
+        typing.steps = self.steps;
+        typing.undone = self.undone;
+        typing.structure_dirty = self.structure_dirty;
+        typing.arm_buffer();
+    }
+}
+
 impl<S: SegmentSink> Typing<S> {
     /// A session that types into a `capacity`-byte buffer and seals through `sink`.
     ///
@@ -1255,7 +1306,14 @@ impl<S: SegmentSink> Typing<S> {
         if matches.is_empty() || needle == replacement {
             return Ok(matches.len());
         }
-        self.flush()?;
+        let checkpoint =
+            (self.open.is_some() || self.structure_dirty).then(|| ReplaceCheckpoint::capture(self));
+        if let Err(error) = self.flush() {
+            if let Some(checkpoint) = checkpoint {
+                checkpoint.restore(self);
+            }
+            return Err(error);
+        }
 
         let mut chunks = Vec::new();
         let mut rest = replacement;
@@ -1336,12 +1394,23 @@ impl<S: SegmentSink> Typing<S> {
             built = Some((next_spine, final_caret));
             Ok((slabs, styles))
         };
-        self.sink
-            .atomic_replace(&chunks, &mut build)
-            .map_err(|reason| TypingError::Append { reason })?;
-        let (next_spine, final_caret) = built.ok_or_else(|| TypingError::Append {
-            reason: "sink did not build the replacement manifest".to_owned(),
-        })?;
+        let result = self.sink.atomic_replace(&chunks, &mut build);
+        let next = result
+            .map_err(|reason| TypingError::Append { reason })
+            .and_then(|()| {
+                built.ok_or_else(|| TypingError::Append {
+                    reason: "sink did not build the replacement manifest".to_owned(),
+                })
+            });
+        let (next_spine, final_caret) = match next {
+            Ok(next) => next,
+            Err(error) => {
+                if let Some(checkpoint) = checkpoint {
+                    checkpoint.restore(self);
+                }
+                return Err(error);
+            }
+        };
         self.undone.clear();
         self.push_root(matches[0].start);
         self.spine = next_spine;
@@ -2442,10 +2511,14 @@ mod tests {
         segments: Vec<Vec<u8>>,
         spines: Vec<Vec<Slab>>,
         fail_commit: bool,
+        fail_append: bool,
     }
 
     impl SegmentSink for SpineRecorder {
         fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+            if self.fail_append {
+                return Err("injected append failure".to_owned());
+            }
             let segment = SegmentId::new(self.segments.len() as u64);
             self.segments.push(plaintext.to_vec());
             Ok(Appended {
@@ -2532,9 +2605,7 @@ mod tests {
         assert_eq!(typing.pending(), b"hello world");
     }
 
-    // A desired invariant, kept executable while the pre-transaction flush issue is open (D-84).
     #[test]
-    #[ignore = "known bug: a failed replace after flushing a live draft clears redo history"]
     fn failed_replacement_preserves_live_draft_redo_history() {
         struct NoSource;
         impl SegmentSource for NoSource {
@@ -2556,6 +2627,39 @@ mod tests {
         assert_eq!(typing.redo_depth(), 1);
         assert!(typing.replace_all(b"one", b"two", &mut NoSource).is_err());
         assert_eq!(typing.redo_depth(), 1, "failed replace lost redo history");
+        assert!(typing.redo().unwrap());
+        assert_eq!(typing.pending(), b"one more");
+        assert!(typing.undo().unwrap());
+        typing.sink.fail_commit = false;
+        assert_eq!(
+            typing.replace_all(b"one", b"two", &mut NoSource).unwrap(),
+            1
+        );
+        assert!(typing.undo().unwrap());
+        assert_eq!(typing.document_len(), 3);
+    }
+
+    #[test]
+    fn failed_replacement_flush_keeps_live_draft_and_redo() {
+        struct NoSource;
+        impl SegmentSource for NoSource {
+            fn load(&mut self, _: SegmentId) -> Result<Vec<u8>, String> {
+                Err("unexpected sealed segment load".to_owned())
+            }
+        }
+        let sink = SpineRecorder {
+            fail_append: true,
+            ..SpineRecorder::default()
+        };
+        let mut typing = Typing::new(sink, 64);
+        typing.mark();
+        typing.insert(b"one").unwrap();
+        typing.mark();
+        typing.insert(b" more").unwrap();
+        assert!(typing.undo().unwrap());
+        assert!(typing.replace_all(b"one", b"two", &mut NoSource).is_err());
+        assert_eq!(typing.pending(), b"one");
+        assert_eq!(typing.redo_depth(), 1);
         assert!(typing.redo().unwrap());
         assert_eq!(typing.pending(), b"one more");
     }

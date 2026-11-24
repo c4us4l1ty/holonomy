@@ -76,12 +76,13 @@ Listed so they stay dead.
   The terminal checks for a trip before treating EOF/read errors, input batches, or quit as normal
   exit. These checks do not prove that every trip racing shutdown is handled, nor do they meet
   L-7's 50 ms deadline when the UI is blocked. A no-match or identical replace now searches the
-  live draft without flushing, preserving its undo/redo history. A real replacement still flushes
-  the draft before its atomic transaction; if the later replacement commit fails, that flush can
-  change undo/redo state even though the replacement was not published. A targeted Rust 1.99
-  reproduction observed redo depth dropping from 1 to 0 on injected atomic-commit failure; the
-  desired invariant is retained as an explicitly ignored regression test until fixed. This remains
-  a blocker. Changes await full pinned CI.
+  live draft without flushing, preserving its undo/redo history. A Rust 1.99 reproduction found
+  redo depth dropping from 1 to 0 when a replacement's atomic commit failed after flushing a live
+  draft. Replacement now checkpoints the live editor state before a needed flush and restores it
+  on failure; the previously failing redo regression passes locally. A successful preliminary
+  flush may already be durable, and an uncertain I/O failure still requires reopening the poisoned
+  world-line. Checkpointing can copy undo-held plaintext and has not been included in the sparse
+  no-draft memory measurement. Full pinned CI and adversarial review remain necessary.
 
 - **2026-11-22 — D-83 — Encrypted sparse search memory diagnostic.** Push CI run
   [45238499667](https://github.com/c4us4l1ty/holonomy/actions/runs/45238499667) on
