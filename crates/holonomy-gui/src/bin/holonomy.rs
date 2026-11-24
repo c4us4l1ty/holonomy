@@ -309,7 +309,9 @@ enum Ended {
     /// Emergency reaper wipe fired but could **not** be confirmed: the reaper join produced no
     /// outcome, it scrubbed no arenas, or a canary survived. The window must say this rather than
     /// claim a wipe (D-89) — an unconfirmed wipe is an *unmet protection*, not a success.
-    WipeUnconfirmed(WipeUnconfirmed),
+    /// The count is what the editor scrubbed in place anyway (`D-93`), so the closing line can
+    /// report the scrub a reader cannot otherwise see happened.
+    WipeUnconfirmed(WipeUnconfirmed, usize),
 }
 
 /// The measured facts of a wipe that was confirmed, kept so the window can show them.
@@ -327,6 +329,10 @@ struct WipeReceipt {
     trip_to_verified_us: u64,
     /// Whether the reaper got real-time scheduling on this host, so the number is read honestly.
     real_time: bool,
+    /// Bytes the *editor* volatile-zeroed in place after the reaper joined (`D-93`). Separate from
+    /// `bytes_wiped` on purpose: one number is measured by canaries in the reaper, the other by a
+    /// return value from the editor, and merging them would let the unmeasured half hide.
+    in_place_bytes: usize,
 }
 
 /// Why a wipe could not be confirmed, in the reaper's own terms.
@@ -349,23 +355,35 @@ enum WipeUnconfirmed {
 
 impl WipeUnconfirmed {
     /// A sentence for the closing line, in voice with the window's other outcome words.
-    fn describe(self) -> String {
+    ///
+    /// `in_place_bytes` is what the editor scrubbed on its own account (`D-93`). It is reported
+    /// here for the same reason it is reported on a confirmed wipe: the scrub happens whatever the
+    /// verdict, and a line that stayed silent about it would leave a reader unable to tell a
+    /// scrub that ran from one that regressed.
+    fn describe(self, in_place_bytes: usize) -> String {
+        let scrubbed = if in_place_bytes == 0 {
+            "the editor had nothing left to scrub".to_owned()
+        } else {
+            format!(
+                "the editor still scrubbed {} in place",
+                panel::human(in_place_bytes)
+            )
+        };
         match self {
-            Self::NoOutcome => {
-                "emergency wipe fired but could not be confirmed — the reaper reported no outcome"
-                    .to_owned()
-            }
-            Self::NothingArmed => {
+            Self::NoOutcome => format!(
+                "emergency wipe fired but could not be confirmed — the reaper reported no outcome; \
+                 {scrubbed}"
+            ),
+            Self::NothingArmed => format!(
                 "emergency wipe fired but could not be confirmed — no resident arena was armed, \
-                 so nothing was proven wiped"
-                    .to_owned()
-            }
+                 so nothing was proven wiped; {scrubbed}"
+            ),
             Self::Ghosts {
                 ghost_canaries,
                 ghost_bytes,
             } => format!(
                 "emergency wipe FAILED verification — {ghost_canaries} canar{} still held \
-                 {ghost_bytes} bytes: the wipe invariant broke on this machine",
+                 {ghost_bytes} bytes: the wipe invariant broke on this machine; {scrubbed}",
                 if ghost_canaries == 1 { "y" } else { "ies" }
             ),
         }
@@ -395,16 +413,24 @@ impl WipeReceipt {
             canaries: outcome.canaries.canaries_sampled,
             trip_to_verified_us: outcome.trip_to_verified_ns / 1_000,
             real_time: outcome.sched_class == SchedClass::RealTime,
+            in_place_bytes: 0,
         })
+    }
+
+    /// Records the bytes the editor scrubbed in place, after the reaper joined (`D-93`).
+    fn with_in_place(mut self, bytes: usize) -> Self {
+        self.in_place_bytes = bytes;
+        self
     }
 
     /// What the window says on the way out after a confirmed wipe.
     fn describe(self) -> String {
         format!(
-            "emergency wipe confirmed — {} across {} arenas, {} canaries clean, {} µs to verified \
-             ({}; coverage is registered arenas only)",
+            "emergency wipe confirmed — {} in {} arenas, plus {} scrubbed in place, {} canaries \
+             clean, {} µs to verified ({}; coverage is registered arenas only)",
             panel::human(self.bytes_wiped),
             self.arenas_wiped,
+            panel::human(self.in_place_bytes),
             self.canaries,
             self.trip_to_verified_us,
             if self.real_time {
@@ -522,20 +548,34 @@ fn wipe_quiescent(
     // SAFETY: this thread holds the only app/document handles used by the editor, and it does not
     // access the registered buffers or canaries again until the worker has joined.
     unsafe { reaper.acknowledge_quiescence() };
-    match reaper.wait_outcome() {
+    let outcome = reaper.wait_outcome();
+
+    // D-93: the in-place scrub runs on **every** path, including the unconfirmed ones. D-89 moved
+    // it inside the confirmed branch, reasoning that "an unverified wipe gets no supporting
+    // gesture" — which confused a *report* with a *wipe*. `wipe_all_in_place` is the product-level
+    // scrub of the buffers the editor owns (resident slabs, the typing buffer and its undo copies,
+    // the window's viewport text); it is not the evidence the reaper's canaries provide. Skipping
+    // it meant that on exactly the trips where the reaper could not prove a wipe, the editor's
+    // plaintext was freed unwiped into the heap — the worst case of the state this function exists
+    // to prevent. A failed verification is the strongest reason to scrub, not a reason to abstain.
+    let wiped_in_place = app.editor().wipe_all_in_place();
+    classify_trip(outcome, wiped_in_place)
+}
+
+/// What a finished trip is allowed to claim, given the reaper's outcome and the bytes the editor
+/// scrubbed in place (`D-93`).
+///
+/// Pure on purpose: this is the *whole* decision `wipe_quiescent` makes after the join, so the
+/// classification can be driven exhaustively in a test without an editor, a document or a thread.
+/// The in-place scrub is deliberately **not** part of this function — it happens before it, on every
+/// path — because making it conditional on the outcome was exactly the bug D-93 fixed.
+fn classify_trip(outcome: Option<ReaperOutcome>, wiped_in_place: usize) -> Ended {
+    match outcome {
         Some(outcome) => match WipeReceipt::from_outcome(&outcome) {
-            Ok(receipt) => {
-                // The reaper has joined, so the editor's own viewport buffer can be scrubbed in
-                // place without racing it.
-                app.editor().wipe_all_in_place();
-                Ended::Wiped(receipt)
-            }
-            // The unconfirmed branch deliberately does *not* run the in-place scrub: an
-            // unverified wipe gets no supporting gesture, because a scrub the window cannot
-            // measure would be the decorative evidence this branch exists to refuse.
-            Err(unconfirmed) => Ended::WipeUnconfirmed(unconfirmed),
+            Ok(receipt) => Ended::Wiped(receipt.with_in_place(wiped_in_place)),
+            Err(unconfirmed) => Ended::WipeUnconfirmed(unconfirmed, wiped_in_place),
         },
-        None => Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome),
+        None => Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome, wiped_in_place),
     }
 }
 
@@ -983,8 +1023,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}", receipt.describe());
                     outcome_words(false, None)
                 }
-                Ok(Ended::WipeUnconfirmed(reason)) => {
-                    println!("{}", reason.describe());
+                Ok(Ended::WipeUnconfirmed(reason, scrubbed)) => {
+                    println!("{}", reason.describe(scrubbed));
                     outcome_words(true, None)
                 }
                 Ok(Ended::SaveFailed) => outcome_words(false, Some(false)),
@@ -993,7 +1033,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => outcome_words(true, None),
             };
             println!("{}", closing(&path, segments, witnesses, summary));
-            if matches!(outcome, Ok(Ended::SaveFailed | Ended::WipeUnconfirmed(_))) {
+            if matches!(outcome, Ok(Ended::SaveFailed | Ended::WipeUnconfirmed(..))) {
                 // A window that could not write, or could not verify its own wipe, must not exit as
                 // though it had.
                 std::process::exit(1);
@@ -1153,7 +1193,7 @@ mod tests {
             Err(WipeUnconfirmed::NothingArmed)
         );
         assert!(WipeUnconfirmed::NothingArmed
-            .describe()
+            .describe(0)
             .contains("could not be confirmed"));
     }
 
@@ -1170,7 +1210,7 @@ mod tests {
                 ghost_bytes: 4096
             }
         );
-        let described = reason.describe();
+        let described = reason.describe(4096);
         assert!(described.contains("FAILED verification"), "{described}");
         assert!(described.contains("1 canary"), "{described}");
         assert!(described.contains("4096 bytes"), "{described}");
@@ -1179,15 +1219,78 @@ mod tests {
             ghost_canaries: 3,
             ghost_bytes: 12,
         }
-        .describe();
+        .describe(0);
         assert!(plural.contains("3 canaries"), "{plural}");
     }
 
     #[test]
     fn an_outcome_that_never_arrived_is_not_a_wipe() {
         assert!(WipeUnconfirmed::NoOutcome
-            .describe()
+            .describe(0)
             .contains("could not be confirmed"));
+    }
+
+    #[test]
+    fn an_unconfirmed_trip_still_reports_the_scrub_it_performed() {
+        // D-93's reporting half. The scrub now runs on every path, so the closing line has to be
+        // able to show it on every path: a failure sentence that went quiet about the in-place
+        // bytes would make a working scrub and a regressed one read identically to a user.
+        let scrubbed = WipeUnconfirmed::NoOutcome.describe(8192);
+        assert!(scrubbed.contains("could not be confirmed"), "{scrubbed}");
+        // `panel::human` renders 8192 as "8 KiB" — the number a reader gets is the formatted one.
+        assert!(scrubbed.contains("scrubbed 8 KiB in place"), "{scrubbed}");
+        // And it says the other thing when there was nothing to scrub, rather than "0 bytes".
+        let nothing = WipeUnconfirmed::NothingArmed.describe(0);
+        assert!(
+            nothing.contains("had nothing left to scrub"),
+            "a zero-byte scrub must not read as a measurement: {nothing}"
+        );
+        assert!(!nothing.contains("0 bytes"), "{nothing}");
+    }
+
+    #[test]
+    fn every_trip_classifies_as_a_wipe_whatever_the_reaper_said() {
+        // D-93, pinned exhaustively rather than by shape. `classify_trip` is the whole decision
+        // `wipe_quiescent` makes once the reaper has joined, so every branch of it can be driven
+        // here without a live editor, a document or a thread.
+        //
+        // The scrub itself is *not* tested here, and cannot be: `classify_trip` takes no editor, so
+        // the in-place wipe is unreachable from this function by construction. That is the fix —
+        // D-89 had made the scrub a branch of the verdict, so an unprovable trip skipped it and the
+        // buffers the editor owns were freed unwiped. The scrub now precedes the call, on every
+        // input including `None`; this test pins the verdict side, the signature pins the other.
+        let cases: [Option<ReaperOutcome>; 4] = [
+            // clean: bytes scrubbed, arenas wiped, no surviving canary
+            Some(outcome(1041, 4_324_384, 0, 0)),
+            // the reaper ran but nothing was armed
+            Some(outcome(0, 0, 0, 0)),
+            // bytes scrubbed, but a canary still held non-zero data
+            Some(outcome(1041, 4_324_384, 1, 4096)),
+            // the join yielded nothing at all
+            None,
+        ];
+        for case in cases {
+            let ended = classify_trip(case, 64 * 1024);
+            // Whatever the verdict, it is a wipe verdict: a trip can never read as "saved".
+            assert!(
+                matches!(ended, Ended::Wiped(_) | Ended::WipeUnconfirmed(..)),
+                "a trip must never classify as a save: {ended:?}"
+            );
+            // And the confirmed variant is the only one that may claim a wipe.
+            let confirms = matches!(ended, Ended::Wiped(_));
+            let should_confirm = matches!(
+                case,
+                Some(o) if o.wipe.arenas_wiped > 0
+                    && o.wipe.bytes_wiped > 0
+                    && o.canaries.ghost_canaries == 0
+            );
+            assert_eq!(confirms, should_confirm, "{ended:?} for {case:?}");
+        }
+        // The in-place count travels with a confirmed receipt.
+        match classify_trip(Some(outcome(2, 4096, 0, 0)), 777) {
+            Ended::Wiped(receipt) => assert_eq!(receipt.in_place_bytes, 777),
+            other => panic!("expected a confirmed wipe, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1199,12 +1302,12 @@ mod tests {
             WipeReceipt::from_outcome(&outcome(2, 4096, 0, 0)).expect("clean wipe confirmed"),
         );
         assert!(
-            !matches!(ended, Ended::SaveFailed | Ended::WipeUnconfirmed(_)),
+            !matches!(ended, Ended::SaveFailed | Ended::WipeUnconfirmed(..)),
             "a confirmed wipe is not a failure"
         );
-        let unconfirmed: Ended = Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome);
+        let unconfirmed: Ended = Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome, 0);
         assert!(
-            matches!(unconfirmed, Ended::WipeUnconfirmed(_)),
+            matches!(unconfirmed, Ended::WipeUnconfirmed(..)),
             "an unconfirmed wipe must take the non-zero exit path"
         );
     }
