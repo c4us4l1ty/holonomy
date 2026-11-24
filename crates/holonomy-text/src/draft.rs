@@ -26,6 +26,7 @@
 //! A query costs O(drafted leaves), not O(document): the overlay only ever partitions the walk
 //! into a few regions, and each region is answered by the spine's own O(log N) descent.
 
+use crate::formatting::{DocStyleSpan, StyleMap, ToolbarState};
 use crate::slab::{Slab, SlabSpan};
 use crate::spine::Spine;
 
@@ -282,6 +283,45 @@ impl Draft {
             sealed_at += u64::from(edit.slab.len());
         }
         sealed_hit(spine, sealed_at, live_at, offset)
+    }
+
+    fn live_style_map(&self, spine: &Spine) -> StyleMap {
+        if self.edits.is_empty() || spine.styles().is_empty() {
+            return spine.styles().clone();
+        }
+        let mut map = spine.styles().clone();
+        let mut delta: i128 = 0;
+        for edit in &self.edits {
+            let sealed_len = u64::from(edit.slab.len());
+            let adj_start = u64::try_from((i128::from(edit.at) + delta).max(0)).unwrap_or(u64::MAX);
+            let adj_end = adj_start.saturating_add(sealed_len);
+            map = map.replace_range(adj_start, adj_end, edit.len);
+            delta += i128::from(edit.len) - i128::from(sealed_len);
+        }
+        map
+    }
+
+    /// Returns non-default [`DocStyleSpan`]s overlapping live byte range `[start, end)`, clipped
+    /// to `[start, end)`.
+    #[must_use]
+    pub fn live_style_spans(&self, spine: &Spine, start: u64, end: u64) -> Vec<DocStyleSpan> {
+        let doc_len = self.document_len(spine);
+        if self.edits.is_empty() {
+            return spine.style_spans_in(start, end.min(doc_len));
+        }
+        self.live_style_map(spine).spans_in(start, end.min(doc_len))
+    }
+
+    /// Computes [`ToolbarState`] for caret (`start == end`) or selection `[start, end)` in live
+    /// document coordinates.
+    #[must_use]
+    pub fn live_toolbar_state(&self, spine: &Spine, start: u64, end: u64) -> ToolbarState {
+        let doc_len = self.document_len(spine);
+        if self.edits.is_empty() {
+            return spine.toolbar_state(start, end);
+        }
+        self.live_style_map(spine)
+            .toolbar_state(doc_len, start, end)
     }
 }
 

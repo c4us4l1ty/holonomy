@@ -22,6 +22,8 @@
 //! bijectively onto the line's visual boundary positions so L-8 holds across LTR, RTL, and mixed
 //! bidirectional text (AUDIT OQ-11). Word-level break opportunities remain a separate concern.
 
+use holonomy_text::Alignment;
+
 use crate::bidi::{reorder_line, BidiClass, ParagraphContext, ResolvedParagraph, WindowBidi};
 use crate::cluster::{ClusterContext, Clusters};
 use crate::geom::{Fixed, Point};
@@ -68,6 +70,7 @@ pub struct Line<'a> {
     start_byte: u64,
     end_byte: u64,
     end_x: Fixed,
+    carry_x: Fixed,
     has_end: bool,
     /// The line's first cluster began **before** this window, in a window laid out as a
     /// continuation — so the window's first byte is inside a cluster and is not a caret position
@@ -131,11 +134,19 @@ impl<'a> Line<'a> {
     /// Where the line's text ends: the x after its last cluster, or `start_x` for a line this
     /// window only inherits the tail of.
     ///
-    /// A caller that lays a document out in pieces carries this value into
-    /// [`layout_styled_from`] for the next piece — it is the line's position, not the window's.
+    /// A caller that lays a document out in pieces carries [`Self::carry_x`] (equal to `end_x`
+    /// unless horizontal alignment shifted a completed line) into [`layout_styled_from`] for the
+    /// next piece.
     #[must_use]
     pub fn end_x(&self) -> Fixed {
         self.end_x
+    }
+
+    /// Unaligned wrapping advance at the end of this line, used to continue unfinished lines
+    /// across leaf boundaries without compounding horizontal alignment shifts.
+    #[must_use]
+    pub fn carry_x(&self) -> Fixed {
+        self.carry_x
     }
 
     /// Whether the line offers a caret at its end.
@@ -348,7 +359,7 @@ pub fn layout_window<'a, S: Shaper + ?Sized>(
 /// row, or the line after a trailing newline — takes the height of the style that reaches it.
 #[must_use]
 pub fn layout_styled<'a, S: Shaper + ?Sized>(
-    styled: StyledText<'a>,
+    styled: StyledText<'a, '_>,
     origin: u64,
     width: Fixed,
     shaper: &S,
@@ -374,7 +385,7 @@ pub fn layout_styled<'a, S: Shaper + ?Sized>(
 /// With `start_x == Fixed::ZERO` this is exactly [`layout_styled`], line for line.
 #[must_use]
 pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
-    styled: StyledText<'a>,
+    styled: StyledText<'a, '_>,
     origin: u64,
     start_x: Fixed,
     width: Fixed,
@@ -403,7 +414,7 @@ pub fn layout_styled_from<'a, S: Shaper + ?Sized>(
 /// belongs to, however much of it the shaper is given.
 #[must_use]
 pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
-    styled: StyledText<'a>,
+    styled: StyledText<'a, '_>,
     origin: u64,
     start_x: Fixed,
     context: ClusterContext,
@@ -421,6 +432,15 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
     )
 }
 
+fn indent_for(style: Style, width: Fixed) -> Fixed {
+    let units = style.indent_units();
+    if units <= 0 || width <= Fixed::ZERO {
+        return Fixed::ZERO;
+    }
+    let half = Fixed::from_64ths(width.sixtyfourths() / 2);
+    Fixed::units(units).min(half).max(Fixed::ZERO)
+}
+
 /// Lays styled text out as the continuation of a line, a grapheme cluster, and a UAX #9
 /// paragraph's base direction (`P2–P3`).
 ///
@@ -430,7 +450,7 @@ pub fn layout_styled_continuing<'a, S: Shaper + ?Sized>(
 /// direction rather than resetting to LTR.
 #[must_use]
 pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
-    styled: StyledText<'a>,
+    styled: StyledText<'a, '_>,
     origin: u64,
     start_x: Fixed,
     context: ClusterContext,
@@ -439,6 +459,7 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
     shaper: &S,
 ) -> Layout<'a> {
     let text = styled.text();
+    let has_styles = !styled.runs().is_empty();
     let opens_inside_a_cluster = text
         .chars()
         .next()
@@ -459,6 +480,9 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
         let byte = origin + offset as u64;
         if cluster == "\n" || cluster == "\r" || cluster == "\r\n" {
             // The line's content ends before the break; the next line starts after it.
+            if has_styles && !continued {
+                x = indent_for(styled.style_at(offset as u64), width);
+            }
             let height = filled_height(line_height, styled, offset, shaper);
             lines.push(Line {
                 top,
@@ -468,6 +492,7 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
                 start_byte,
                 end_byte: byte,
                 end_x: x,
+                carry_x: x,
                 has_end: true,
                 continues_cluster: false,
             });
@@ -480,6 +505,9 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
             continue;
         }
         let style = styled.style_at(offset as u64);
+        if has_styles && !continued {
+            x = indent_for(style, width);
+        }
         let advance = shaper.advance(cluster, style);
         if continued && x + advance > width {
             // The carried line is already full: it ends here, in this window, with no clusters of
@@ -493,11 +521,16 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
                 start_byte,
                 end_byte,
                 end_x: x,
+                carry_x: x,
                 has_end: false,
                 continues_cluster: false,
             });
             top += height;
-            x = Fixed::ZERO;
+            x = if has_styles {
+                indent_for(style, width)
+            } else {
+                Fixed::ZERO
+            };
             line_height = Fixed::ZERO;
             start_byte = byte;
         }
@@ -515,6 +548,9 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
         x += advance;
         end_byte = byte + cluster.len() as u64;
     }
+    if has_styles && !continued {
+        x = indent_for(styled.style_at(text.len() as u64), width);
+    }
     let height = filled_height(line_height, styled, text.len(), shaper);
     lines.push(Line {
         top,
@@ -524,6 +560,7 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
         start_byte,
         end_byte,
         end_x: x,
+        carry_x: x,
         has_end: true,
         continues_cluster: false,
     });
@@ -538,6 +575,31 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
             let rel = usize::try_from(line.start_byte.saturating_sub(origin)).unwrap_or(0);
             if let Some(para) = bidi.paragraph_at(rel) {
                 reorder_bidi_line(line, origin, para);
+            }
+        }
+    }
+    if has_styles {
+        for (idx, line) in lines.iter_mut().enumerate() {
+            if !line.has_end || (idx == 0 && !start_x.is_zero()) {
+                continue;
+            }
+            let line_style = styled.style_at(line.start_byte.saturating_sub(origin));
+            let slack = (width - line.end_x).max(Fixed::ZERO);
+            let shift = match line_style.alignment() {
+                Alignment::Center => Fixed::from_64ths(slack.sixtyfourths() / 2),
+                Alignment::End => slack,
+                Alignment::Start | Alignment::Justify => Fixed::ZERO,
+            };
+            if shift > Fixed::ZERO {
+                for cluster in &mut line.clusters {
+                    cluster.x += shift;
+                }
+                line.end_x += shift;
+                if let Some(bounds) = &mut line.bidi_boundaries {
+                    for (bx, _) in bounds {
+                        *bx += shift;
+                    }
+                }
             }
         }
     }
@@ -632,7 +694,7 @@ fn reorder_bidi_line(line: &mut Line<'_>, origin: u64, para: &ResolvedParagraph)
 /// inherit; the style at the line's own position is the only answer the window contains.
 fn filled_height<S: Shaper + ?Sized>(
     line_height: Fixed,
-    styled: StyledText<'_>,
+    styled: StyledText<'_, '_>,
     offset: usize,
     shaper: &S,
 ) -> Fixed {
@@ -1066,5 +1128,52 @@ mod tests {
             2,
             "logical selection across LTR/RTL seam emits two visual selection spans"
         );
+    }
+
+    #[test]
+    fn centered_end_and_indented_lines_preserve_l8_round_trip() {
+        use crate::style::StyledRun;
+        use holonomy_text::ListKind;
+
+        let text = "title\nitem one\nשלום right";
+        let runs = [
+            StyledRun {
+                start: 0,
+                style: Style::DEFAULT.with_alignment(Alignment::Center),
+            },
+            StyledRun {
+                start: 6,
+                style: Style::DEFAULT
+                    .with_list(ListKind::Bullet { depth: 2 })
+                    .with_blockquote(1),
+            },
+            StyledRun {
+                start: 15,
+                style: Style::DEFAULT.with_alignment(Alignment::End),
+            },
+        ];
+        let laid = layout_styled(
+            StyledText::new(text, &runs),
+            0,
+            Fixed::units(40),
+            &Fake::new(),
+        );
+        assert_eq!(laid.lines().len(), 3);
+        // Fake gives the i and l half-unit advances, so "title" is four units wide.
+        assert_eq!(laid.lines()[0].clusters()[0].x, Fixed::units(18));
+        // Bullet depth 2 + blockquote 1 = 2*(2+1) = 6 units indent.
+        assert_eq!(laid.lines()[1].clusters()[0].x, Fixed::units(6));
+        // End-aligned line ends flush at 40 units.
+        assert_eq!(laid.lines()[2].end_x(), Fixed::units(40));
+
+        for line in laid.lines() {
+            for (_, byte) in line.boundaries() {
+                let caret = laid.paint_point(byte).expect("caret exists");
+                let back = laid
+                    .hit_test(Point::new(caret.x, caret.top))
+                    .expect("hit exists");
+                assert_eq!(back.byte, byte);
+            }
+        }
     }
 }

@@ -59,7 +59,12 @@ impl DEMKey {
     }
 
     /// Arms this key cell in `arenas` for emergency reaper zeroization without exposing key bytes.
-    pub fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
+    ///
+    /// # Safety
+    ///
+    /// The key must not be read or written concurrently with an arena wipe; callers must also
+    /// preserve the registered pointer's validity until the wipe has completed or it is disarmed.
+    pub unsafe fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
         self.inner.arm_reaper(arenas)
     }
 
@@ -104,7 +109,12 @@ impl UnwrapKey {
     }
 
     /// Arms this key cell in `arenas` for emergency reaper zeroization without exposing key bytes.
-    pub fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
+    ///
+    /// # Safety
+    ///
+    /// The key must not be read or written concurrently with an arena wipe; callers must also
+    /// preserve the registered pointer's validity until the wipe has completed or it is disarmed.
+    pub unsafe fn arm_reaper(&mut self, arenas: &Arc<SecretArenas>) -> bool {
         self.inner.arm_reaper(arenas)
     }
 

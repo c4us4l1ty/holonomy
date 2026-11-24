@@ -24,6 +24,7 @@
 //! a counting allocator. The engine therefore does not claim that editing is allocation-free; it
 //! claims that *typing* is, and that the cost of sealing is paid in one place.
 
+use crate::formatting::StyleMap;
 use crate::slab::{SegmentId, Slab, SlabHit, SlabSpan};
 use crate::spine::{Spine, SpineError};
 use crate::text::SlabText;
@@ -40,6 +41,10 @@ pub struct Appended {
     /// Bytes physically written for the segment record and its witness.
     pub bytes_written: u64,
 }
+
+/// Builds the resolved final manifest for a set of freshly reserved replacement segment IDs.
+pub type ReplacementBuilder<'a> =
+    dyn FnMut(&[SegmentId]) -> Result<(Vec<Slab>, StyleMap), String> + 'a;
 
 /// The world-line, as the commit boundary needs it: append one sealed segment and commit it.
 ///
@@ -84,6 +89,56 @@ pub trait SegmentSink {
     /// A human-readable message when the sink cannot persist the spine geometry.
     fn commit_spine(&mut self, _slabs: &[Slab]) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Seals `plaintext` as one new segment alongside the resolved spine slabs around it and the
+    /// active rich-text [`StyleMap`].
+    ///
+    /// By default delegates to [`Self::append_segment_with_spine`]; world-line sinks override this
+    /// to write v2 styled manifests when `styles` is non-empty.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message when the sink refuses the append or its manifest.
+    fn append_segment_with_manifest(
+        &mut self,
+        plaintext: &[u8],
+        before: &[Slab],
+        after: &[Slab],
+        _styles: &StyleMap,
+    ) -> Result<Appended, String> {
+        self.append_segment_with_spine(plaintext, before, after)
+    }
+
+    /// Commits `slabs` and `styles` as the active document manifest without appending segment
+    /// bytes.
+    ///
+    /// By default delegates to [`Self::commit_spine`].
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message when the sink cannot persist the manifest.
+    fn commit_manifest(&mut self, slabs: &[Slab], _styles: &StyleMap) -> Result<(), String> {
+        self.commit_spine(slabs)
+    }
+
+    /// Atomically publishes replacement chunks and their final manifest under one commit point.
+    ///
+    /// The sink chooses fresh segment IDs, calls `build` once with those IDs before writing, and
+    /// publishes the returned manifest with all chunks in a single durable transaction. On error,
+    /// callers must reopen the sink if the result of an interrupted commit is uncertain. The
+    /// default refuses the operation rather than falling back to non-atomic individual appends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if atomic replacement is unsupported, validation fails, or the commit
+    /// cannot be completed.
+    fn atomic_replace(
+        &mut self,
+        _chunks: &[&[u8]],
+        _build: &mut ReplacementBuilder<'_>,
+    ) -> Result<(), String> {
+        Err("atomic replacement is not supported by this sink".to_owned())
     }
 }
 

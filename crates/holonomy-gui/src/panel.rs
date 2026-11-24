@@ -20,7 +20,7 @@
 //! What it must never say: that memory is locked when the probe says otherwise, or that a document
 //! is verified when no `verify` has run. `None` is rendered as "not verified", not as zero.
 
-use holonomy_seal::{describe_how, probe_capability, LockCapability};
+use holonomy_seal::{describe_how, probe_capability, CanarySet, LockCapability, SecretArenas};
 use holonomy_text::{ResidentSet, SegmentSource};
 
 use crate::store::Document;
@@ -46,6 +46,18 @@ pub struct Facts {
     pub recovered_bytes: u64,
     /// Segments the last full authentication verified, if one has run.
     pub verified_segments: Option<u64>,
+    /// Whether an emergency memory reaper is armed for this session.
+    pub reaper_armed: bool,
+    /// Number of secret/plaintext arenas currently registered with the reaper.
+    pub armed_arenas: usize,
+    /// Total canary buffers sampled by the reaper registry.
+    pub canaries_sampled: usize,
+    /// Canary buffers still carrying non-zero bytes (`canaries_sampled` before wipe; `0` after).
+    pub ghost_canaries: usize,
+    /// Whether the emergency reaper tripwire has fired.
+    pub reaper_tripped: bool,
+    /// Whether the watcher waits for the editor to stop before registering plaintext and wiping.
+    pub reaper_cooperative: bool,
 }
 
 impl Facts {
@@ -79,7 +91,44 @@ impl Facts {
             witnesses: document.witness_count(),
             recovered_bytes: document.trailing_bytes(),
             verified_segments,
+            reaper_armed: false,
+            armed_arenas: 0,
+            canaries_sampled: 0,
+            ghost_canaries: 0,
+            reaper_tripped: false,
+            reaper_cooperative: false,
         }
+    }
+
+    /// Enriches these facts with live [`SecretArenas`] and [`CanarySet`] observations (`L-7`,
+    /// `UI-SPEC.md` §6).
+    #[must_use]
+    pub fn with_reaper(
+        mut self,
+        arenas: &SecretArenas,
+        canaries: &CanarySet,
+        tripped: bool,
+    ) -> Self {
+        let report = canaries.sample_ghosts();
+        self.reaper_armed = true;
+        self.armed_arenas = arenas.armed_count();
+        self.canaries_sampled = report.canaries_sampled;
+        self.ghost_canaries = report.ghost_canaries;
+        self.reaper_tripped = tripped;
+        self
+    }
+
+    /// Reports a cooperative watcher that cannot wipe until the editor yields control.
+    #[must_use]
+    pub fn with_cooperative_reaper(
+        self,
+        arenas: &SecretArenas,
+        canaries: &CanarySet,
+        tripped: bool,
+    ) -> Self {
+        let mut facts = self.with_reaper(arenas, canaries, tripped);
+        facts.reaper_cooperative = true;
+        facts
     }
 
     /// `resident: 4 KiB in 3 leaves, 6.5 KiB allocated of 4 MiB budget`.
@@ -137,12 +186,39 @@ impl Facts {
         }
     }
 
+    /// Live emergency memory-reaper status (`UI-SPEC.md` §6, `L-7`).
+    #[must_use]
+    pub fn reaper_line(&self) -> String {
+        if !self.reaper_armed {
+            return "reaper: unarmed".to_owned();
+        }
+        if self.reaper_cooperative && !self.reaper_tripped {
+            return format!(
+                "reaper: cooperative ({} canaries; editor must yield before wipe)",
+                self.canaries_sampled
+            );
+        }
+        if self.reaper_tripped {
+            let zeroized = self.canaries_sampled.saturating_sub(self.ghost_canaries);
+            format!(
+                "reaper: TRIPPED ({} arenas, {zeroized}/{} canaries zeroized)",
+                self.armed_arenas, self.canaries_sampled
+            )
+        } else {
+            format!(
+                "reaper: armed ({} arenas, {}/{} canaries live)",
+                self.armed_arenas, self.ghost_canaries, self.canaries_sampled
+            )
+        }
+    }
+
     /// The panel, top to bottom.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
         vec![
             self.resident_line(),
             self.lock_line(),
+            self.reaper_line(),
             self.worldline_line(),
             self.recovery_line(),
         ]
@@ -189,6 +265,12 @@ mod tests {
             witnesses: 6,
             recovered_bytes: 0,
             verified_segments: Some(5),
+            reaper_armed: true,
+            armed_arenas: 6,
+            canaries_sampled: 4,
+            ghost_canaries: 4,
+            reaper_tripped: false,
+            reaper_cooperative: false,
         }
     }
 
@@ -238,6 +320,17 @@ mod tests {
         changed.recovered_bytes = 7;
         assert_ne!(base.recovery_line(), changed.recovery_line());
         assert!(changed.recovery_line().contains('7'));
+
+        let mut changed = base;
+        changed.armed_arenas = 11;
+        assert_ne!(base.reaper_line(), changed.reaper_line());
+        assert!(changed.reaper_line().contains("11 arenas"));
+
+        let mut changed = base;
+        changed.reaper_tripped = true;
+        changed.ghost_canaries = 0;
+        assert!(changed.reaper_line().contains("TRIPPED"));
+        assert!(changed.reaper_line().contains("4/4 canaries zeroized"));
     }
 
     #[test]

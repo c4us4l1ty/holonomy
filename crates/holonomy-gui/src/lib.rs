@@ -27,10 +27,33 @@ pub mod panel;
 pub mod store;
 pub mod term;
 
+use std::sync::Arc;
+
 use holonomy_eye::{Fixed, Picture, Style};
+use holonomy_seal::{ArenaSlot, SecretArenas};
 use holonomy_shell::{Editor, Effect, Intent, Move};
-use holonomy_text::{SegmentSink, SegmentSource};
+use holonomy_text::{
+    FontFamily, Heading, SegmentSink, SegmentSource, StylePatch, TriState, WipeRegistry,
+};
 use zeroize::Zeroizing;
+
+/// Bridges [`holonomy_text::WipeRegistry`] onto [`holonomy_seal::SecretArenas`] so every live
+/// plaintext allocation (`ResidentSet`, `Typing`, and `Editor` viewport `WindowText`) is armed for
+/// lock-free volatile zeroing by the emergency reaper (`L-7`).
+pub struct SealWipeBridge(pub Arc<SecretArenas>);
+
+impl WipeRegistry for SealWipeBridge {
+    unsafe fn register(&self, ptr: *mut u8, len: usize) -> Option<usize> {
+        // SAFETY: callers hold `[ptr, ptr + len)` live and unmoved until `unregister` returns.
+        unsafe { self.0.register(ptr, len) }.map(|slot| slot.index())
+    }
+
+    fn unregister(&self, slot: usize) {
+        if let Some(handle) = ArenaSlot::from_index(slot) {
+            self.0.unregister(handle);
+        }
+    }
+}
 
 /// The keyboard modifiers that change what a keystroke means.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -238,6 +261,7 @@ pub struct CellSurface {
     rows: usize,
     cells: Vec<Vec<char>>,
     spans: Vec<Vec<CellSpan>>,
+    styles: Vec<Vec<Style>>,
     caret: Option<(usize, usize)>,
     selections: Vec<(usize, usize, usize, usize)>,
     clusters: u64,
@@ -253,6 +277,7 @@ impl CellSurface {
             rows,
             cells: vec![vec![' '; columns]; rows],
             spans: vec![vec![None; columns]; rows],
+            styles: vec![vec![Style::DEFAULT; columns]; rows],
             caret: None,
             selections: Vec::new(),
             clusters: 0,
@@ -276,6 +301,7 @@ impl CellSurface {
     pub fn resize(&mut self, columns: usize, rows: usize) {
         let mut cells = vec![vec![' '; columns]; rows];
         let mut spans = vec![vec![None; columns]; rows];
+        let mut styles = vec![vec![Style::DEFAULT; columns]; rows];
         for (row, line) in self.cells.iter().take(rows).enumerate() {
             for (column, cell) in line.iter().take(columns).enumerate() {
                 cells[row][column] = *cell;
@@ -286,10 +312,16 @@ impl CellSurface {
                 spans[row][column].clone_from(span);
             }
         }
+        for (row, line) in self.styles.iter().take(rows).enumerate() {
+            for (column, style) in line.iter().take(columns).enumerate() {
+                styles[row][column] = *style;
+            }
+        }
         self.columns = columns;
         self.rows = rows;
         self.cells = cells;
         self.spans = spans;
+        self.styles = styles;
     }
 
     /// The cell a logical coordinate falls in.
@@ -344,6 +376,16 @@ impl CellSurface {
             .map(|(text, span)| (text.as_ref(), *span))
     }
 
+    /// The [`Style`] recorded for the cluster anchored at `(column, row)`.
+    #[must_use]
+    pub fn style_at(&self, column: usize, row: usize) -> Style {
+        self.styles
+            .get(row)
+            .and_then(|line| line.get(column))
+            .copied()
+            .unwrap_or(Style::DEFAULT)
+    }
+
     /// Whether a cell is inside a selection run.
     #[must_use]
     pub fn selected(&self, column: usize, row: usize) -> bool {
@@ -361,6 +403,9 @@ impl Surface for CellSurface {
         for line in &mut self.spans {
             line.fill(None);
         }
+        for line in &mut self.styles {
+            line.fill(Style::DEFAULT);
+        }
         self.caret = None;
         self.selections.clear();
         self.clusters = 0;
@@ -368,7 +413,7 @@ impl Surface for CellSurface {
 
     fn size(&mut self, _width: Fixed, _height: Fixed) {}
 
-    fn cluster(&mut self, x: Fixed, y: Fixed, text: &str, advance: Fixed, _style: Style) {
+    fn cluster(&mut self, x: Fixed, y: Fixed, text: &str, advance: Fixed, style: Style) {
         let column = self.cell(x);
         let row = self.cell(y);
         if column >= self.columns || row >= self.rows {
@@ -380,6 +425,7 @@ impl Surface for CellSurface {
         if let Some(character) = text.chars().next() {
             self.cells[row][column] = character;
             self.spans[row][column] = Some((text.into(), self.cell(advance).max(1)));
+            self.styles[row][column] = style;
             self.clusters += 1;
         }
     }
@@ -477,12 +523,132 @@ where
         self.dirty
     }
 
+    /// Renders a compact Ribbon readout (`UI-SPEC.md` §3, Law `U0`) for the current caret or
+    /// selection, using `—` (`\u{2014}`) whenever an attribute is mixed across the selection.
+    #[must_use]
+    pub fn toolbar_summary(&self) -> String {
+        let tb = self.editor.toolbar_state();
+        let fam = tb.family.display_or_dash(|f| match f {
+            FontFamily::Sans => "Sans".to_owned(),
+            FontFamily::Serif => "Serif".to_owned(),
+            FontFamily::Mono => "Mono".to_owned(),
+        });
+        let hdg = tb.heading.display_or_dash(|h| match h {
+            Heading::None => "Body".to_owned(),
+            Heading::Title => "Title".to_owned(),
+            Heading::H1 => "H1".to_owned(),
+            Heading::H2 => "H2".to_owned(),
+            Heading::H3 => "H3".to_owned(),
+        });
+        let flag = |st: &TriState<bool>, on: &'static str| match st {
+            TriState::Uniform(true) => on,
+            TriState::Uniform(false) => "",
+            TriState::Mixed => "\u{2014}",
+        };
+        let mut marks = Vec::new();
+        for (st, tag) in [
+            (&tb.bold, "B"),
+            (&tb.italic, "I"),
+            (&tb.underline, "U"),
+            (&tb.strikethrough, "S"),
+            (&tb.code_span, "`"),
+        ] {
+            let s = flag(st, tag);
+            if !s.is_empty() {
+                marks.push(s);
+            }
+        }
+        if marks.is_empty() {
+            format!("{fam} {hdg}")
+        } else {
+            format!("{fam} {hdg} [{}]", marks.join(""))
+        }
+    }
+
+    fn format_toggle(&mut self, patch: StylePatch) -> Result<Vec<Effect>, GuiError> {
+        self.typing = false;
+        let effects = self.editor.apply(Intent::Format(patch))?;
+        if !effects.is_empty() {
+            self.dirty = true;
+        }
+        Ok(effects)
+    }
+
+    /// Toggles bold across the active selection (`Ctrl+B`).
+    pub fn toggle_bold(&mut self) -> Result<Vec<Effect>, GuiError> {
+        let next = !matches!(self.editor.toolbar_state().bold, TriState::Uniform(true));
+        self.format_toggle(StylePatch {
+            bold: Some(next),
+            ..StylePatch::default()
+        })
+    }
+
+    /// Toggles italic across the active selection (`Ctrl+I` / `Ctrl+T`).
+    pub fn toggle_italic(&mut self) -> Result<Vec<Effect>, GuiError> {
+        let next = !matches!(self.editor.toolbar_state().italic, TriState::Uniform(true));
+        self.format_toggle(StylePatch {
+            italic: Some(next),
+            ..StylePatch::default()
+        })
+    }
+
+    /// Toggles underline across the active selection (`Ctrl+U`).
+    pub fn toggle_underline(&mut self) -> Result<Vec<Effect>, GuiError> {
+        let next = !matches!(
+            self.editor.toolbar_state().underline,
+            TriState::Uniform(true)
+        );
+        self.format_toggle(StylePatch {
+            underline: Some(next),
+            ..StylePatch::default()
+        })
+    }
+
+    /// Toggles inline code span across the active selection (`Ctrl+E`).
+    pub fn toggle_code_span(&mut self) -> Result<Vec<Effect>, GuiError> {
+        let next = !matches!(
+            self.editor.toolbar_state().code_span,
+            TriState::Uniform(true)
+        );
+        self.format_toggle(StylePatch {
+            code_span: Some(next),
+            ..StylePatch::default()
+        })
+    }
+
+    /// Toggles `heading` (`H1`..`H3`) across the active selection (`Ctrl+1`..`3`).
+    pub fn toggle_heading(&mut self, heading: Heading) -> Result<Vec<Effect>, GuiError> {
+        let next = if self.editor.toolbar_state().heading == TriState::Uniform(heading) {
+            Heading::None
+        } else {
+            heading
+        };
+        self.format_toggle(StylePatch {
+            heading: Some(next),
+            ..StylePatch::default()
+        })
+    }
+
     /// A key press. Returns the effects the window still owes the user.
     ///
     /// # Errors
     ///
     /// [`GuiError`] when the editor refuses the edit.
     pub fn press(&mut self, key: Key, modifiers: Modifiers) -> Result<Vec<Effect>, GuiError> {
+        if modifiers.control && !modifiers.alt {
+            if let Key::Character(ch) = key {
+                match ch.to_ascii_lowercase() {
+                    'b' => return self.toggle_bold(),
+                    'i' | 't' => return self.toggle_italic(),
+                    'u' => return self.toggle_underline(),
+                    'e' => return self.toggle_code_span(),
+                    '1' => return self.toggle_heading(Heading::H1),
+                    '2' => return self.toggle_heading(Heading::H2),
+                    '3' => return self.toggle_heading(Heading::H3),
+                    _ => {}
+                }
+            }
+        }
         let Some(intent) = self.keymap.intent(key, modifiers) else {
             return Ok(Vec::new());
         };

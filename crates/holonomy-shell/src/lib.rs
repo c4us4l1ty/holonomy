@@ -49,16 +49,21 @@
 //! over every caret a frame offers.
 
 mod intent;
+pub mod theme;
+
+use std::sync::Arc;
 
 pub use crate::intent::{Effect, Intent, Move};
+pub use crate::theme::{HeadingToken, PageTheme, Rgba8, QUIET_MD_THEME};
 
 use holonomy_eye::{
     byte_window, layout_styled_in_paragraph, window_text, Caret, ClusterContext, Clusters, Fixed,
-    HeightModel, Layout, ParagraphContext, Picture, Point, ShapedWindow, Shaper, Style, StyledText,
-    View, Window, WindowText, WindowTextError,
+    HeightModel, Layout, ParagraphContext, Picture, Point, ShapedWindow, Shaper, Style, StyledRun,
+    StyledText, View, Window, WindowText, WindowTextError,
 };
 use holonomy_text::{
-    LiveSpan, ResidentSet, SegmentSink, SegmentSource, Selection, Typing, TypingError,
+    LiveSpan, ResidentSet, SearchMatch, SearchSummary, SegmentSink, SegmentSource, Selection,
+    StylePatch, ToolbarState, Typing, TypingError, WipeRegistry,
 };
 
 /// Why an intent could not be carried out.
@@ -224,6 +229,8 @@ pub struct Editor<S, R: SegmentSource, H> {
     /// the index rather than appended to it because the index's leaf *i* must be the spine's leaf
     /// *i* — the window's own assertion — and this leaf has no spine entry.
     tail: Option<Tail>,
+    wipe_registry: Option<Arc<dyn WipeRegistry>>,
+    window_slot: Option<usize>,
 }
 
 /// The open tail leaf's measured height, and the length it described.
@@ -264,7 +271,132 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             selection: Selection::caret(0),
             len_synced: len,
             tail: None,
+            wipe_registry: None,
+            window_slot: None,
         }
+    }
+
+    fn styled_runs_for(&self, from: u64, byte_len: usize) -> Vec<StyledRun> {
+        if byte_len == 0 || self.typing.spine().styles().is_empty() {
+            return Vec::new();
+        }
+        let spans = self.typing.draft().live_style_spans(
+            self.typing.spine(),
+            from,
+            from.saturating_add(byte_len as u64),
+        );
+        StyledRun::from_doc_spans(&spans, from, byte_len as u64)
+    }
+
+    /// Attaches a [`WipeRegistry`] to the resident set, typing session, and live viewport window.
+    ///
+    /// # Safety
+    ///
+    /// The editor and its registered allocations must be quiescent during wiping, and later
+    /// accesses must not invalidate the registered pointers. Register immediately before wiping.
+    pub unsafe fn set_wipe_registry(&mut self, registry: Arc<dyn WipeRegistry>) {
+        self.unarm_window();
+        // SAFETY: the caller guarantees quiescence and pointer validity for both owned components.
+        unsafe { self.residency.set_wipe_registry(Arc::clone(&registry)) };
+        // SAFETY: the same guarantee applies to the typing buffers and their undo copies.
+        unsafe { self.typing.set_wipe_registry(Arc::clone(&registry)) };
+        self.wipe_registry = Some(registry);
+        self.arm_window();
+    }
+
+    /// Volatile-zeroes all resident plaintext (`ResidentSet`, `Typing`, and `WindowText`) in place.
+    pub fn wipe_all_in_place(&mut self) -> usize {
+        self.unarm_window();
+        let mut wiped = self.residency.wipe_all_in_place();
+        wiped = wiped.saturating_add(self.typing.wipe_in_place());
+        if let Some(mut win) = self.window.take() {
+            wiped = wiped.saturating_add(win.wipe_in_place());
+        }
+        wiped
+    }
+
+    /// Computes [`ToolbarState`] for the active caret or selection (`UI-SPEC.md` §3, Law `U0`).
+    #[must_use]
+    pub fn toolbar_state(&self) -> ToolbarState {
+        let (lo, hi) = self.selection.normalised();
+        self.typing.toolbar_state(lo, hi)
+    }
+
+    /// Applies `patch` over the active selection as one undoable Spine transaction.
+    pub fn format_selection(&mut self, patch: &StylePatch) -> Result<bool, ShellError> {
+        let (lo, hi) = self.selection.normalised();
+        if lo == hi {
+            return Ok(false);
+        }
+        let before = self.typing.spine().clone();
+        self.typing.apply_style(lo, hi, patch)?;
+        let changed = !self.typing.spine().ptr_eq(&before);
+        self.invalidate_after_cut_or_restore(&before);
+        if changed {
+            self.selection = Selection::new(lo, hi.min(self.typing.document_len()));
+        }
+        Ok(changed)
+    }
+
+    /// Sets or clears (`url = None`) a hyperlink target across the active selection.
+    pub fn set_selection_link(&mut self, url: Option<&str>) -> Result<bool, ShellError> {
+        let (lo, hi) = self.selection.normalised();
+        if lo == hi {
+            return Ok(false);
+        }
+        let before = self.typing.spine().clone();
+        self.typing.set_link(lo, hi, url)?;
+        let changed = !self.typing.spine().ptr_eq(&before);
+        self.invalidate_after_cut_or_restore(&before);
+        if changed {
+            self.selection = Selection::new(lo, hi.min(self.typing.document_len()));
+        }
+        Ok(changed)
+    }
+
+    /// Collects non-overlapping matches without widening [`ResidentSet`], refusing result sets
+    /// above [`holonomy_text::MAX_COLLECTED_MATCHES`]. Use [`Self::find_nth`] for dense searches.
+    pub fn find_all(&mut self, needle: &str) -> Result<Vec<SearchMatch>, ShellError> {
+        self.typing
+            .find_all(needle.as_bytes(), self.residency.source_mut())
+            .map_err(|err| ShellError::Typing(TypingError::Search(err)))
+    }
+
+    /// Counts matches and selects one by index without collecting all match positions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when scanning cannot complete or the needle exceeds the scan limit.
+    pub fn find_nth(&mut self, needle: &str, index: u64) -> Result<SearchSummary, ShellError> {
+        self.typing
+            .find_nth(needle.as_bytes(), index, self.residency.source_mut())
+            .map_err(|err| ShellError::Typing(TypingError::Search(err)))
+    }
+
+    /// Selects `[start, end)` (clamped to document bounds) and positions the caret at `end`.
+    pub fn select_range(&mut self, start: u64, end: u64) -> Result<(), ShellError> {
+        let doc_len = self.typing.document_len();
+        let lo = start.min(doc_len);
+        let hi = end.min(doc_len);
+        self.typing.insert_at(hi, &[])?;
+        self.selection = Selection::new(lo, hi);
+        Ok(())
+    }
+
+    /// Atomically replaces every non-overlapping occurrence of `needle` with `replacement` across
+    /// the entire document as one undoable transaction without widening [`ResidentSet`].
+    pub fn replace_all(&mut self, needle: &str, replacement: &str) -> Result<usize, ShellError> {
+        let before = self.typing.spine().clone();
+        let count = self.typing.replace_all(
+            needle.as_bytes(),
+            replacement.as_bytes(),
+            self.residency.source_mut(),
+        )?;
+        self.invalidate_after_cut_or_restore(&before);
+        if count > 0 {
+            self.selection = Selection::caret(self.typing.caret());
+        }
+        Ok(count)
     }
 
     /// The typing session — the document's live geometry and its history.
@@ -731,8 +863,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let carried = self.carry_of(leaf)?;
             let read = self.read(start, end)?;
             let (text, from) = leaf_text(read.text(), start, carried);
+            let runs = self.styled_runs_for(from, text.len());
             let layout = layout_styled_in_paragraph(
-                StyledText::plain(text),
+                StyledText::new(text, &runs),
                 from,
                 carried.x,
                 carried.cluster,
@@ -822,8 +955,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         // `let` in the block would drop the window while the text still pointed into it.
         let read = self.read(sealed, len)?;
         let (text, from) = leaf_text(read.text(), sealed, carry);
+        let runs = self.styled_runs_for(from, text.len());
         let layout = layout_styled_in_paragraph(
-            StyledText::plain(text),
+            StyledText::new(text, &runs),
             from,
             carry.x,
             carry.cluster,
@@ -895,7 +1029,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         };
         let carried = self.measured.carry(leaf);
         let read = self.read(start, end)?;
-        let (text, _) = leaf_text(read.text(), start, carried);
+        let (text, from) = leaf_text(read.text(), start, carried);
         if text.is_empty() {
             return Ok(Carry {
                 x: carried.x,
@@ -905,8 +1039,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
                 skip: 0,
             });
         }
+        let runs = self.styled_runs_for(from, text.len());
         let layout = layout_styled_in_paragraph(
-            StyledText::plain(text),
+            StyledText::new(text, &runs),
             start,
             carried.x,
             carried.cluster,
@@ -917,7 +1052,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let broken = text.ends_with('\n') || text.ends_with('\r');
         Ok(Carry {
             x: match layout.lines().last() {
-                Some(line) if !broken => line.end_x(),
+                Some(line) if !broken => line.carry_x(),
                 _ => Fixed::ZERO,
             },
             after_cr: text.ends_with('\r'),
@@ -1054,8 +1189,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             padded = format!("{text}{tail}");
             padded.as_str()
         };
+        let runs = self.styled_runs_for(from, text.len());
         let layout = layout_styled_in_paragraph(
-            StyledText::plain(text),
+            StyledText::new(text, &runs),
             from,
             carried.x,
             carried.cluster,
@@ -1082,7 +1218,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let broken = text.ends_with('\n') || text.ends_with('\r');
         let next = Carry {
             x: match lines.last() {
-                Some(line) if !broken => line.end_x(),
+                Some(line) if !broken => line.carry_x(),
                 _ => Fixed::ZERO,
             },
             after_cr: text.ends_with('\r'),
@@ -1137,14 +1273,16 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         // `legal_caret`'s, and D-25's residual.
         let look = self.leaf_range(end).map_or(end, |(_, next_end)| next_end);
         let read = self.read(start, look)?;
-        self.window = Some(read);
+        self.set_window(read);
         let full: &str = self.window.as_ref().map_or("", |text| text.text());
         let cut = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
         let end = end + tail_bytes(full, cut, start_cluster) as u64;
         let len = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
+        let runs = self.styled_runs_for(start, len);
+        let full: &str = self.window.as_ref().map_or("", |text| text.text());
         let text: &str = full.get(..len).unwrap_or(full);
         let layout = layout_styled_in_paragraph(
-            StyledText::plain(text),
+            StyledText::new(text, &runs),
             start,
             Fixed::ZERO,
             start_cluster,
@@ -1377,8 +1515,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let carried = self.carry_of(leaf)?;
         let read = self.read(start, end)?;
         let (text, from) = leaf_text(read.text(), start, carried);
+        let runs = self.styled_runs_for(from, text.len());
         let layout = layout_styled_in_paragraph(
-            StyledText::plain(text),
+            StyledText::new(text, &runs),
             from,
             carried.x,
             carried.cluster,
@@ -1664,6 +1803,41 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     }
 }
 
+impl<S, R: SegmentSource, H> Editor<S, R, H> {
+    fn set_window(&mut self, read: WindowText) {
+        self.unarm_window();
+        self.window = Some(read);
+        self.arm_window();
+    }
+
+    fn arm_window(&mut self) {
+        self.unarm_window();
+        let Some(reg) = &self.wipe_registry else {
+            return;
+        };
+        let Some(win) = &mut self.window else {
+            return;
+        };
+        let (ptr, cap) = win.allocation_range();
+        if cap > 0 {
+            // SAFETY: the window is unregistered before it is replaced or dropped.
+            self.window_slot = unsafe { reg.register(ptr, cap) };
+        }
+    }
+
+    fn unarm_window(&mut self) {
+        if let (Some(reg), Some(slot)) = (&self.wipe_registry, self.window_slot.take()) {
+            reg.unregister(slot);
+        }
+    }
+}
+
+impl<S, R: SegmentSource, H> Drop for Editor<S, R, H> {
+    fn drop(&mut self) {
+        self.unarm_window();
+    }
+}
+
 /// What one leaf hands the next when the document is measured leaf by leaf.
 ///
 /// A leaf cut is a byte count, not a line or a cluster boundary, so a leaf's layout is only
@@ -1915,10 +2089,11 @@ fn measure_window(
     // OQ-11).
     let mut cluster_ends: Vec<(u64, Fixed)> = Vec::new();
     for line in layout.lines() {
+        let align_shift = line.end_x() - line.carry_x();
         let base_x = line
             .clusters()
             .first()
-            .map_or(line.end_x(), |cluster| cluster.x);
+            .map_or(line.carry_x(), |cluster| cluster.x - align_shift);
         let mut by_byte: Vec<_> = line.clusters().iter().collect();
         by_byte.sort_unstable_by_key(|cluster| cluster.byte);
         let mut cursor = base_x;

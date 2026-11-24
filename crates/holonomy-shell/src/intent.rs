@@ -12,7 +12,7 @@
 
 use crate::{Editor, ShellError};
 use holonomy_eye::{Fixed, Point, Shaper, View};
-use holonomy_text::{SegmentSink, SegmentSource};
+use holonomy_text::{SegmentSink, SegmentSource, StylePatch};
 
 /// Where a caret move asks the caret to go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +85,17 @@ pub enum Intent {
     Flush,
     /// Measure every leaf, one at a time.
     Reflow,
+    /// Apply a rich-text [`StylePatch`] across the active selection as one undoable transaction.
+    Format(StylePatch),
+    /// Set or clear (`None`) a hyperlink URL across the active selection as one undoable step.
+    SetLink(Option<String>),
+    /// Atomically replace every occurrence of `needle` with `replacement` across the document.
+    ReplaceAll {
+        /// Plaintext needle to match.
+        needle: String,
+        /// Replacement text.
+        replacement: String,
+    },
 }
 
 /// Something the window, and only the window, can do in response.
@@ -213,6 +224,29 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             Intent::Reflow => {
                 self.reflow()?;
                 effects.push(Effect::Redraw);
+            }
+            Intent::Format(patch) => {
+                if self.format_selection(&patch)? {
+                    effects.push(Effect::Redraw);
+                    effects.push(Effect::Caret(self.caret()));
+                }
+            }
+            Intent::SetLink(url) => {
+                if self.set_selection_link(url.as_deref())? {
+                    effects.push(Effect::Redraw);
+                    effects.push(Effect::Caret(self.caret()));
+                }
+            }
+            Intent::ReplaceAll {
+                needle,
+                replacement,
+            } => {
+                let count = self.replace_all(&needle, &replacement)?;
+                if count > 0 {
+                    effects.push(Effect::Redraw);
+                    effects.push(Effect::Caret(self.caret()));
+                    effects.push(Effect::Saved);
+                }
             }
         }
         Ok(effects)

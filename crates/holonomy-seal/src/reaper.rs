@@ -15,8 +15,8 @@
 use core::hint::spin_loop;
 use core::ptr::{read_volatile, slice_from_raw_parts_mut, write_volatile, NonNull};
 use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, OnceLock};
+use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 /// Maximum simultaneously armed secret/slab/canary arenas (`2048` covers a full 4 MiB viewport of
@@ -28,10 +28,29 @@ const SLOT_INIT: usize = 1;
 const SLOT_ARMED: usize = 2;
 const SLOT_WIPING: usize = 3;
 const SLOT_UNREGISTERING: usize = 4;
+const SLOT_READING: usize = 5;
 
 /// Opaque handle to one armed slot inside [`SecretArenas`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArenaSlot(usize);
+
+impl ArenaSlot {
+    /// Returns the slot's zero-based index (`0..MAX_ARENAS`).
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0
+    }
+
+    /// Reconstructs an [`ArenaSlot`] from a raw index when `index < MAX_ARENAS`.
+    #[must_use]
+    pub const fn from_index(index: usize) -> Option<Self> {
+        if index < MAX_ARENAS {
+            Some(Self(index))
+        } else {
+            None
+        }
+    }
+}
 
 struct Slot {
     state: AtomicUsize,
@@ -74,7 +93,8 @@ impl SecretArenas {
     ///
     /// `[ptr, ptr + len)` must point to a live, initialized, mutable allocation that stays at
     /// that address until [`Self::unregister`] returns for the yielded [`ArenaSlot`] (or the
-    /// process terminates).
+    /// process terminates). No other access may overlap a wipe, and subsequent accesses must not
+    /// invalidate the pointer's provenance. Slot coordination alone does not provide exclusivity.
     pub unsafe fn register(&self, ptr: *mut u8, len: usize) -> Option<ArenaSlot> {
         if ptr.is_null() || len == 0 {
             return None;
@@ -113,7 +133,7 @@ impl SecretArenas {
                     slot.state.store(SLOT_EMPTY, Ordering::Release);
                     return;
                 }
-                Err(SLOT_WIPING) => spin_loop(),
+                Err(SLOT_WIPING | SLOT_READING) => spin_loop(),
                 Err(_) => return,
             }
         }
@@ -126,7 +146,7 @@ impl SecretArenas {
             .iter()
             .filter(|s| {
                 let st = s.state.load(Ordering::Acquire);
-                st == SLOT_ARMED || st == SLOT_WIPING
+                st == SLOT_ARMED || st == SLOT_WIPING || st == SLOT_READING
             })
             .count()
     }
@@ -139,11 +159,19 @@ impl SecretArenas {
         let mut arenas_wiped = 0usize;
         let mut bytes_wiped = 0usize;
         for slot in &self.slots {
-            if slot
-                .state
-                .compare_exchange(SLOT_ARMED, SLOT_WIPING, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            let acquired = loop {
+                match slot.state.compare_exchange(
+                    SLOT_ARMED,
+                    SLOT_WIPING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break true,
+                    Err(SLOT_READING) => spin_loop(),
+                    Err(_) => break false,
+                }
+            };
+            if acquired {
                 let ptr = slot.address.load(Ordering::Relaxed) as *mut u8;
                 let len = slot.length.load(Ordering::Relaxed);
                 if !ptr.is_null() && len > 0 {
@@ -255,6 +283,24 @@ impl CanarySlab {
     }
 
     fn ghost_bytes(&self) -> usize {
+        let slot = self
+            .armed
+            .as_ref()
+            .map(|(arenas, handle)| &arenas.slots[handle.0]);
+        if let Some(slot) = slot {
+            loop {
+                match slot.state.compare_exchange(
+                    SLOT_ARMED,
+                    SLOT_READING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(SLOT_WIPING | SLOT_READING) => spin_loop(),
+                    Err(_) => unreachable!("a live canary remains registered"),
+                }
+            }
+        }
         let ptr = self.ptr.as_ptr().cast_const();
         let len = self.len;
         let mut ghosts = 0usize;
@@ -264,6 +310,9 @@ impl CanarySlab {
             if b != 0 {
                 ghosts += 1;
             }
+        }
+        if let Some(slot) = slot {
+            slot.state.store(SLOT_ARMED, Ordering::Release);
         }
         ghosts
     }
@@ -320,6 +369,18 @@ impl CanarySet {
             }
         }
         armed
+    }
+
+    /// How many canary buffers this set holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slabs.len()
+    }
+
+    /// Whether this canary set holds no buffers.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slabs.is_empty()
     }
 
     /// Volatile-reads every canary buffer and counts surviving non-zero ghost bytes.
@@ -387,9 +448,11 @@ pub enum SchedClass {
 pub struct Tripwire {
     origin: Instant,
     last_beat_ns: AtomicU64,
-    tripped_at_ns: AtomicU64,
-    explicit_reason: AtomicU8,
+    // Timestamp in the upper bits, reason in the low three bits. One atomic publication keeps
+    // concurrent producers from pairing one reason with another producer's timestamp.
+    trip: AtomicU64,
     deadman_timeout_ns: u64,
+    reaper_thread: OnceLock<Thread>,
 }
 
 impl Tripwire {
@@ -402,55 +465,102 @@ impl Tripwire {
         Arc::new(Self {
             origin: Instant::now(),
             last_beat_ns: AtomicU64::new(0),
-            tripped_at_ns: AtomicU64::new(0),
-            explicit_reason: AtomicU8::new(0),
+            trip: AtomicU64::new(0),
             deadman_timeout_ns: timeout_ns,
+            reaper_thread: OnceLock::new(),
         })
     }
 
     fn now_ns(&self) -> u64 {
-        u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        // Reserve MAX as the heartbeat state meaning an expiry is being published.
+        u64::try_from(self.origin.elapsed().as_nanos())
+            .unwrap_or(u64::MAX - 1)
+            .min(u64::MAX - 1)
     }
 
-    /// Refreshes the dead-man heartbeat timestamp.
+    // Claim an expired heartbeat before publishing the trip. The CAS makes expiry and a
+    // concurrent heartbeat mutually exclusive: a late beat cannot revive an expired timer.
+    fn latch_expired(&self, last: u64) -> bool {
+        if self
+            .last_beat_ns
+            .compare_exchange(last, u64::MAX, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let deadline = last.saturating_add(self.deadman_timeout_ns).max(1);
+        self.fire_at(TripReason::DeadmanTimeout, deadline);
+        true
+    }
+
+    /// Refreshes the dead-man heartbeat timestamp, unless the deadline has already expired.
     pub fn beat(&self) {
-        self.last_beat_ns.store(self.now_ns(), Ordering::Release);
+        loop {
+            if self.trip.load(Ordering::Acquire) != 0 {
+                return;
+            }
+            let last = self.last_beat_ns.load(Ordering::Acquire);
+            if last == u64::MAX {
+                spin_loop();
+                continue;
+            }
+            let now = self.now_ns();
+            if self.deadman_timeout_ns != u64::MAX
+                && now.saturating_sub(last) > self.deadman_timeout_ns
+            {
+                if self.latch_expired(last) {
+                    return;
+                }
+            } else if self
+                .last_beat_ns
+                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
     /// Fires an immediate tripwire (`Manual`, `Suspend`, or `UmbilicalDisconnect`).
     pub fn fire(&self, reason: TripReason) {
-        let now = self.now_ns().max(1);
-        // Publish `tripped_at_ns` *before* `explicit_reason` so a concurrent `evaluate()` that
-        // `Acquire`-loads `explicit_reason != 0` always observes the real trip timestamp rather
-        // than a zero sentinel clamped to `1`.
-        let _ = self
-            .tripped_at_ns
-            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
-        let _ = self.explicit_reason.compare_exchange(
-            0,
-            reason as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        self.fire_at(reason, self.now_ns().max(1));
     }
 
-    /// Evaluates whether the tripwire has fired at the current monotonic instant.
+    fn fire_at(&self, reason: TripReason, at: u64) {
+        // Three low bits hold the reason. A timestamp beyond roughly 73 years saturates.
+        let packed = (at.clamp(1, u64::MAX >> 3) << 3) | u64::from(reason as u8);
+        let _ = self
+            .trip
+            .compare_exchange(0, packed, Ordering::AcqRel, Ordering::Acquire);
+        if let Some(watcher) = self.reaper_thread.get() {
+            watcher.unpark();
+        }
+    }
+
+    /// Evaluates whether the tripwire has fired at the current monotonic instant. Once a
+    /// dead-man deadline expires, observing it permanently latches the trip.
     #[must_use]
     pub fn evaluate(&self) -> Option<(TripReason, u64)> {
-        let code = self.explicit_reason.load(Ordering::Acquire);
-        if let Some(reason) = TripReason::from_code(code) {
-            let at = self.tripped_at_ns.load(Ordering::Acquire).max(1);
-            return Some((reason, at));
-        }
-        if self.deadman_timeout_ns != u64::MAX {
-            let now = self.now_ns();
+        loop {
+            let trip = self.trip.load(Ordering::Acquire);
+            if let Some(reason) = TripReason::from_code((trip & 7) as u8) {
+                return Some((reason, trip >> 3));
+            }
             let last = self.last_beat_ns.load(Ordering::Acquire);
-            if now.saturating_sub(last) > self.deadman_timeout_ns {
-                let deadline = last.saturating_add(self.deadman_timeout_ns).max(1);
-                return Some((TripReason::DeadmanTimeout, deadline));
+            if last == u64::MAX {
+                // The winner of the expiry CAS is publishing the reason.
+                spin_loop();
+                continue;
+            }
+            if self.deadman_timeout_ns == u64::MAX
+                || self.now_ns().saturating_sub(last) <= self.deadman_timeout_ns
+            {
+                return None;
+            }
+            if self.latch_expired(last) {
+                continue;
             }
         }
-        None
     }
 }
 
@@ -494,6 +604,8 @@ fn promote_realtime() -> SchedClass {
 pub struct ReaperGuard {
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    pending: Arc<AtomicBool>,
+    permission: Option<Arc<AtomicBool>>,
     sched: Arc<AtomicU8>,
     handle: Option<JoinHandle<Option<ReaperOutcome>>>,
 }
@@ -507,21 +619,59 @@ impl ReaperGuard {
         tripwire: Arc<Tripwire>,
         poll_interval: Duration,
     ) -> Self {
+        Self::spawn_inner(arenas, canaries, tripwire, poll_interval, false)
+    }
+
+    /// Starts a reaper which waits for the editor to acknowledge quiescence before wiping.
+    ///
+    /// This trades immediate wiping for memory safety: a stuck editor cannot acknowledge a trip,
+    /// so this mode does not by itself satisfy the L-7 deadline.
+    #[must_use]
+    pub fn spawn_cooperative(
+        arenas: Arc<SecretArenas>,
+        canaries: Arc<CanarySet>,
+        tripwire: Arc<Tripwire>,
+        poll_interval: Duration,
+    ) -> Self {
+        Self::spawn_inner(arenas, canaries, tripwire, poll_interval, true)
+    }
+
+    fn spawn_inner(
+        arenas: Arc<SecretArenas>,
+        canaries: Arc<CanarySet>,
+        tripwire: Arc<Tripwire>,
+        poll_interval: Duration,
+        cooperative: bool,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(AtomicBool::new(false));
+        let permission = cooperative.then(|| Arc::new(AtomicBool::new(false)));
         let sched = Arc::new(AtomicU8::new(0));
         let stop_bg = Arc::clone(&stop);
         let done_bg = Arc::clone(&done);
+        let pending_bg = Arc::clone(&pending);
+        let permission_bg = permission.clone();
         let sched_bg = Arc::clone(&sched);
 
         let handle = thread::Builder::new()
             .name("holonomy-reaper".to_owned())
             .spawn(move || {
                 let sched_class = promote_realtime();
+                let _ = tripwire.reaper_thread.set(thread::current());
                 sched_bg.store(sched_class as u8, Ordering::Release);
 
                 while !stop_bg.load(Ordering::Acquire) {
                     if let Some((reason, tripped_at_ns)) = tripwire.evaluate() {
+                        pending_bg.store(true, Ordering::Release);
+                        if let Some(permission) = &permission_bg {
+                            while !permission.load(Ordering::Acquire) {
+                                if stop_bg.load(Ordering::Acquire) {
+                                    return None;
+                                }
+                                thread::park();
+                            }
+                        }
                         let wipe = arenas.wipe();
                         let wiped_ns = tripwire.now_ns();
                         let canary_report = canaries.sample_ghosts();
@@ -536,7 +686,7 @@ impl ReaperGuard {
                             trip_to_verified_ns: verified_ns.saturating_sub(tripped_at_ns),
                         });
                     }
-                    thread::sleep(poll_interval);
+                    thread::park_timeout(poll_interval);
                 }
                 None
             })
@@ -550,8 +700,31 @@ impl ReaperGuard {
         Self {
             stop,
             done,
+            pending,
+            permission,
             sched,
             handle: Some(handle),
+        }
+    }
+
+    /// Whether the watcher has latched a trip, even if a later heartbeat arrives.
+    #[must_use]
+    pub fn has_tripped(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+    }
+
+    /// Allows a cooperative reaper to proceed after all registered allocations are quiescent.
+    ///
+    /// # Safety
+    ///
+    /// All registered allocations and canaries must remain exclusively available to the reaper
+    /// until `wait_outcome` returns. No thread may read, write, register, or free them meanwhile.
+    pub unsafe fn acknowledge_quiescence(&self) {
+        if let Some(permission) = &self.permission {
+            permission.store(true, Ordering::Release);
+            if let Some(handle) = &self.handle {
+                handle.thread().unpark();
+            }
         }
     }
 
@@ -583,6 +756,7 @@ impl Drop for ReaperGuard {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
             let _ = handle.join();
         }
     }
@@ -633,6 +807,145 @@ mod tests {
     }
 
     #[test]
+    fn canary_sampling_can_overlap_a_reaper_wipe() {
+        let arenas = SecretArenas::new();
+        let mut canaries = CanarySet::new(16, 1024);
+        assert_eq!(canaries.arm_all(&arenas), 16);
+        let canaries = Arc::new(canaries);
+        let sampled = Arc::clone(&canaries);
+        let reader = thread::spawn(move || {
+            for _ in 0..200 {
+                assert_eq!(sampled.sample_ghosts().canaries_sampled, 16);
+            }
+        });
+        let tripwire = Tripwire::new(None);
+        let guard = ReaperGuard::spawn(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_millis(1),
+        );
+        tripwire.fire(TripReason::Manual);
+        let outcome = guard.wait_outcome().unwrap();
+        reader.join().unwrap();
+        assert_eq!(outcome.wipe.arenas_wiped, 16);
+        assert_eq!(outcome.canaries.ghost_bytes, 0);
+        assert_eq!(canaries.sample_ghosts().ghost_bytes, 0);
+    }
+
+    #[test]
+    fn cooperative_reaper_waits_for_editor_quiescence() {
+        let arenas = SecretArenas::new();
+        let mut canaries = CanarySet::new(2, 128);
+        assert_eq!(canaries.arm_all(&arenas), 2);
+        let canaries = Arc::new(canaries);
+        let mut editor_bytes = vec![42u8; 256];
+        let tripwire = Tripwire::new(None);
+        let guard = ReaperGuard::spawn_cooperative(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_millis(1),
+        );
+        tripwire.fire(TripReason::Manual);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !guard.has_tripped() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(guard.has_tripped());
+        assert!(!guard.has_completed());
+        // Editing remains safe until the single owner explicitly yields the allocations.
+        editor_bytes[0] = 17;
+        assert_eq!(canaries.sample_ghosts().ghost_canaries, 2);
+        // SAFETY: register a fresh pointer only after editing; the allocation remains live and
+        // untouched until the reaper has joined and the slot is unregistered.
+        let slot =
+            unsafe { arenas.register(editor_bytes.as_mut_ptr(), editor_bytes.len()) }.unwrap();
+        // SAFETY: this thread stops touching registered buffers and canaries until join returns.
+        unsafe { guard.acknowledge_quiescence() };
+        let result = guard.wait_outcome().unwrap();
+        assert_eq!(result.canaries.ghost_bytes, 0);
+        arenas.unregister(slot);
+        assert!(editor_bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn deadman_expiry_survives_a_late_heartbeat_and_wakes_reaper() {
+        let arenas = SecretArenas::new();
+        let mut canaries = CanarySet::new(2, 128);
+        assert_eq!(canaries.arm_all(&arenas), 2);
+        let canaries = Arc::new(canaries);
+        let tripwire = Tripwire::new(Some(Duration::from_millis(2)));
+        tripwire.beat();
+        // Park long enough to ensure the UI, rather than the worker, observes expiry first.
+        let guard = ReaperGuard::spawn_cooperative(
+            arenas,
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_secs(10),
+        );
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+        tripwire.beat();
+        assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+        // SAFETY: no other thread accesses the registered canaries until the join completes.
+        unsafe { guard.acknowledge_quiescence() };
+        let outcome = guard.wait_outcome().unwrap();
+        assert_eq!(outcome.reason, TripReason::DeadmanTimeout);
+        assert_eq!(outcome.canaries.ghost_bytes, 0);
+    }
+
+    #[test]
+    fn racing_late_heartbeat_and_observer_cannot_clear_expiry() {
+        for _ in 0..16 {
+            let tripwire = Tripwire::new(Some(Duration::from_millis(1)));
+            tripwire.beat();
+            thread::sleep(Duration::from_millis(4));
+            let other = Arc::clone(&tripwire);
+            let heartbeat = thread::spawn(move || other.beat());
+            assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+            heartbeat.join().unwrap();
+            assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+        }
+    }
+
+    #[test]
+    fn late_beat_alone_latches_expired_deadman() {
+        let tripwire = Tripwire::new(Some(Duration::from_millis(2)));
+        tripwire.beat();
+        thread::sleep(Duration::from_millis(10));
+        tripwire.beat();
+        assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+    }
+
+    #[test]
+    fn concurrent_trip_producers_publish_a_matching_reason_and_timestamp() {
+        for _ in 0..128 {
+            let tripwire = Tripwire::new(None);
+            let start = Arc::new(std::sync::Barrier::new(3));
+            let a = Arc::clone(&tripwire);
+            let a_start = Arc::clone(&start);
+            let first = thread::spawn(move || {
+                a_start.wait();
+                a.fire_at(TripReason::Manual, 11);
+            });
+            let b = Arc::clone(&tripwire);
+            let b_start = Arc::clone(&start);
+            let second = thread::spawn(move || {
+                b_start.wait();
+                b.fire_at(TripReason::Suspend, 22);
+            });
+            start.wait();
+            first.join().unwrap();
+            second.join().unwrap();
+            assert!(matches!(
+                tripwire.evaluate(),
+                Some((TripReason::Manual, 11) | (TripReason::Suspend, 22))
+            ));
+        }
+    }
+
+    #[test]
     fn tripwire_fire_publishes_real_timestamp_to_concurrent_evaluator() {
         for _ in 0..64 {
             let tripwire = Tripwire::new(None);
@@ -653,5 +966,34 @@ mod tests {
                 "observed clamped timestamp {at} < {min_expected}"
             );
         }
+    }
+
+    #[test]
+    fn idle_reaper_parks_without_polling_and_wakes_on_fire_or_drop() {
+        let arenas = SecretArenas::new();
+        let canaries = Arc::new(CanarySet::new(2, 256));
+        let tripwire = Tripwire::new(None);
+        let guard = ReaperGuard::spawn(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_secs(3_600),
+        );
+        let started = Instant::now();
+        drop(guard);
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let tripwire = Tripwire::new(None);
+        let guard = ReaperGuard::spawn(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_secs(3_600),
+        );
+        let started = Instant::now();
+        tripwire.fire(TripReason::Manual);
+        let outcome = guard.wait_outcome().expect("tripwire fired");
+        assert_eq!(outcome.reason, TripReason::Manual);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

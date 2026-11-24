@@ -1461,11 +1461,15 @@ fn open_seeks_over_historical_manifests_and_verify_authenticates_them() {
     let scanned = scan_records(&mut guarded, &header, &epoch, &dem).unwrap();
     assert_eq!(
         scanned.manifest,
-        Some(vec![LineSlab {
-            segment: 1,
-            start: 0,
-            len: 6,
-        }])
+        Some(LineManifest {
+            slabs: vec![LineSlab {
+                segment: 1,
+                start: 0,
+                len: 6,
+            }],
+            styles: Vec::new(),
+            links: Vec::new(),
+        })
     );
 
     // Flipping a byte in a superseded historical manifest does not break lazy open, and full
@@ -1548,6 +1552,85 @@ fn short_writes_at_every_byte_of_manifest_commits_recover_cleanly() {
         recovered.commit_manifest(&[]).unwrap();
         assert_eq!(recovered.recovery_info().trailing_bytes, 0);
         assert!(recovered.document_slabs().is_empty());
+        assert_eq!(recovered.verify().unwrap().segments_verified, 1);
+    }
+}
+
+#[test]
+fn multi_segment_styled_transaction_recovers_old_manifest_after_every_short_write() {
+    let base_path = temp_path("atomic-replace-base");
+    let salt = [0x5a; 64];
+    let (_keys, capsule, dem) = test_material(b"atomic replace", salt);
+    let mut base =
+        WorldLine::create(&base_path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
+    base.append_segments(&[&b"hello world"[..]]).unwrap();
+    let baseline = fs::read(&base_path.0).unwrap();
+    let manifest = LineManifest {
+        slabs: vec![
+            LineSlab {
+                segment: 0,
+                start: 0,
+                len: 6,
+            },
+            LineSlab {
+                segment: 1,
+                start: 0,
+                len: 5,
+            },
+            LineSlab {
+                segment: 2,
+                start: 0,
+                len: 5,
+            },
+            LineSlab {
+                segment: 0,
+                start: 6,
+                len: 5,
+            },
+        ],
+        styles: vec![LineStyleRun {
+            start: 0,
+            end: 21,
+            flags: 1,
+            family: 0,
+            heading: 0,
+            alignment: 0,
+            list_kind: 0,
+            list_depth: 0,
+            blockquote: 0,
+            size_milli: 1000,
+            list_start: 0,
+            link_id: 0,
+        }],
+        links: Vec::new(),
+    };
+    let chunks: &[&[u8]] = &[b"dear ", b"kind "];
+    let probe = AppendIoProbeGuard::install(None, None, false);
+    let before_witnesses = base.witness_count();
+    base.append_segments_with_full_manifest(chunks, &manifest)
+        .unwrap();
+    let total_bytes = probe.snapshot().bytes_written;
+    drop(probe);
+    assert_eq!(base.witness_count(), before_witnesses + 1);
+    drop(base);
+    let reopened = WorldLine::open(&base_path.0, dem.duplicate()).unwrap();
+    assert_eq!(reopened.document_manifest(), manifest);
+    assert_eq!(reopened.segment_count(), 3);
+    drop(reopened);
+
+    for cut in 0..total_bytes {
+        let trial_path = temp_path("atomic-replace-trial");
+        fs::write(&trial_path.0, &baseline).unwrap();
+        let mut line = WorldLine::open(&trial_path.0, dem.duplicate()).unwrap();
+        let probe = AppendIoProbeGuard::install(Some(cut), None, false);
+        let result = line.append_segments_with_full_manifest(chunks, &manifest);
+        drop(probe);
+        assert!(result.is_err(), "cut at {cut} unexpectedly succeeded");
+        drop(line);
+        let recovered = WorldLine::open(&trial_path.0, dem.duplicate()).unwrap();
+        assert_eq!(recovered.segment_count(), 1, "cut at {cut}");
+        assert!(!recovered.has_manifest(), "cut at {cut}");
+        assert_eq!(&recovered.open_segment(0).unwrap()[..], b"hello world");
         assert_eq!(recovered.verify().unwrap().segments_verified, 1);
     }
 }
@@ -1638,6 +1721,90 @@ fn compact_active_to_erases_deleted_bytes_and_resets_manifest() {
     assert_eq!(compacted.witness_count(), 2);
     assert_eq!(&compacted.open_segment(0).unwrap()[..], b"kept prose");
     assert_eq!(compacted.verify().unwrap().plaintext_bytes_verified, 10);
+}
+
+#[test]
+fn styled_manifest_roundtrips_and_survives_active_compaction() {
+    let source = temp_path("styled-manifest-source");
+    let destination = temp_path("styled-manifest-compacted");
+    let salt = [0x66; 64];
+    let params = test_params();
+    let keys = MasterKeys::derive(b"styled manifest", &salt, None, ParamsClass::Test).unwrap();
+    let (old_capsule, old_dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
+    let old_header = test_header(salt, old_capsule);
+    let old_file_id = *old_header.file_id();
+    let mut line = WorldLine::create(&source.0, old_header, old_dem.duplicate()).unwrap();
+
+    let manifest = LineManifest {
+        slabs: vec![LineSlab {
+            segment: 0,
+            start: 7,
+            len: 11,
+        }],
+        styles: vec![
+            LineStyleRun {
+                start: 0,
+                end: 5,
+                flags: 0x05,
+                family: 1,
+                heading: 2,
+                alignment: 1,
+                list_kind: 0,
+                list_depth: 0,
+                blockquote: 0,
+                size_milli: 1_550,
+                list_start: 0,
+                link_id: 0,
+            },
+            LineStyleRun {
+                start: 6,
+                end: 11,
+                flags: 0x02,
+                family: 0,
+                heading: 0,
+                alignment: 0,
+                list_kind: 2,
+                list_depth: 1,
+                blockquote: 1,
+                size_milli: 1_000,
+                list_start: 1,
+                link_id: 1,
+            },
+        ],
+        links: vec!["https://example.invalid/spec".to_owned()],
+    };
+    line.append_segments_with_full_manifest(&[&b"draft: hello world"[..]], &manifest)
+        .unwrap();
+
+    let reopened = WorldLine::open(&source.0, old_dem.duplicate()).unwrap();
+    assert_eq!(reopened.document_manifest(), manifest);
+    assert_eq!(reopened.verify().unwrap().segments_verified, 1);
+
+    let mut out_of_bounds = manifest.clone();
+    out_of_bounds.styles[1].end = 12;
+    assert!(matches!(
+        line.commit_full_manifest(&out_of_bounds),
+        Err(LineError::InvalidManifest(_))
+    ));
+
+    let approval = holonomy_seal::confirm_compaction(
+        b"styled manifest",
+        &salt,
+        None,
+        &params,
+        keys.unwrap_key(),
+        &old_file_id,
+    )
+    .unwrap();
+    let (new_capsule, new_dem) = create_capsule_for(keys.unwrap_key(), None).unwrap();
+    let new_header = test_header(salt, new_capsule);
+    let compacted = reopened
+        .compact_active_to(&destination.0, new_header, &new_dem, approval)
+        .unwrap();
+    let compacted_manifest = compacted.document_manifest();
+    assert_eq!(compacted_manifest.styles, manifest.styles);
+    assert_eq!(compacted_manifest.links, manifest.links);
+    assert_eq!(&compacted.open_segment(0).unwrap()[..], b"hello world");
 }
 
 struct GuardedReader {

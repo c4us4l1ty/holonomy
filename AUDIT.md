@@ -68,6 +68,95 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-85 — Bounded dense search work; gates remain open.** Added a visitor and
+  count/index API that avoid accumulating match positions, limit needle size, and use small scan
+  windows so a heavily fragmented spine cannot fill a full-document span vector. The terminal's
+  find operation uses the count/index API. The collecting API and actual replace-all now refuse
+  more than 16,384 matches before modifying the document; identical no-op replacement can count
+  densely without collecting. This is a visible functional limitation, not dense replace-all
+  support. Push run [45321900958](https://github.com/c4us4l1ty/holonomy/actions/runs/45321900958)
+  scanned 30,013,649 dense matches in the encrypted fixture: peak Rust live heap 1,310,741 bytes,
+  1,174,991 bytes over the pre-open baseline, and 4,415,488 bytes peak sampled Linux process RSS.
+  RSS was sampled every 64 segments, so it cannot prove an instantaneous peak or account for kernel
+  page cache. Workspace tests and the encrypted measurement passed; clippy found use of an API newer
+  than the declared MSRV, corrected afterward and awaiting CI. The architecture and qualification
+  paths for streaming transactional dense replacement and a stalled-UI wipe are in
+  `docs/BOUNDED_SEARCH_AND_WIPE.md`. No 50 ms guarantee, full wipe coverage, total-memory bound, or
+  Block 7/9 gate is claimed.
+
+- **2026-11-22 — D-84 — Dead-man and no-op replacement follow-up.** A heartbeat arriving
+  after a dead-man deadline could previously erase an expiry before the watcher saw it, leaving
+  a cooperative wipe waiting indefinitely; expiry and heartbeat now compete on one atomic
+  heartbeat state, and expiry latches the reason and wakes the watcher. Concurrent trip producers
+  also previously could pair one producer's reason with another's timestamp; those values now
+  publish as a single atomic word, saturating the timestamp after roughly 73 years. Regression
+  tests cover concurrent producers, an observed expiry followed by a late heartbeat, and a late
+  heartbeat without a prior observer.
+  The terminal checks for a trip before treating EOF/read errors, input batches, or quit as normal
+  exit. These checks do not prove that every trip racing shutdown is handled, nor do they meet
+  L-7's 50 ms deadline when the UI is blocked. A no-match or identical replace now searches the
+  live draft without flushing, preserving its undo/redo history. A Rust 1.99 reproduction found
+  redo depth dropping from 1 to 0 when a replacement's atomic commit failed after flushing a live
+  draft. Replacement now checkpoints the live editor state before a needed flush and restores it
+  on failure; the previously failing redo regression passes locally. A successful preliminary
+  flush may already be durable, and an uncertain I/O failure still requires reopening the poisoned
+  world-line. Checkpointing can copy undo-held plaintext and has not been included in the sparse
+  no-draft memory measurement. Full pinned CI and adversarial review remain necessary.
+
+- **2026-11-22 — D-83 — Encrypted sparse search memory diagnostic.** Push CI run
+  [45238499667](https://github.com/c4us4l1ty/holonomy/actions/runs/45238499667) on
+  `17161dd` ran the release-mode `encrypted_search_memory` test successfully: a reopened,
+  production-fenced encrypted world-line contained 180,092,928 plaintext bytes and 30,013,653
+  whitespace-delimited words. Five matches included three segment seams. The Rust global
+  allocator measured a peak live-heap increase over the pre-open baseline of 1,177,528 bytes
+  for find and 1,781,497 bytes for replace-all, including reopened document metadata, editor,
+  resident allocations, and operation allocations; resident capacity was 199,680 bytes. One undo
+  restored the original in-memory root. The 4 MiB threshold was asserted for this fixture.
+  This is not total process memory: the pre-open baseline (including keys), stack, allocator
+  overhead, memory mappings and OS page cache are excluded; only one low-match-density workload
+  and a partly occupied resident set were exercised. Search collects matches in a vector, so
+  dense-match behavior is not bounded by this result. Block 7's memory gate remains open.
+  The successful measurement does not remove the cooperative reaper's timeout, coverage, and
+  safety-review limitations in D-82; no live L-7 deadline or full wipe guarantee is claimed.
+
+- **2026-11-22 — D-82 — Draft fixes for D-81; release gates still open.**
+  Replace-all now asks the sink to reserve IDs and publish all replacement chunks and the final
+  styled manifest in one world-line transaction; unsupported sinks fail closed. The editor root
+  and undo history change only after the sink returns success. An injected sink failure test and
+  a multi-segment styled-manifest short-write/reopen test cover the new boundary; the pinned
+  workspace tests passed in CI run 45232126253 on `59287b7`.
+  The terminal now uses a cooperative reaper that waits for the UI thread to stop before registering
+  live allocations and allowing the wipe; existing undo buffers are included, and canary sampling
+  serializes with wipe. This avoids the identified editor/reaper concurrent-access path, but a
+  blocked UI thread cannot acknowledge the trip, so the L-7 50 ms deadline is not established.
+  Terminal surface, temporary search strings and other transient plaintext still need a complete
+  wipe-coverage and pointer-provenance audit. The panel labels cooperative operation honestly.
+  `StyleMap` also coalesces adjacent runs after link-ID remapping. Local tests used Rust 1.99 with
+  zeroize 1.9.1 for text/eye and a minimal libc binding for reaper tests; subsequent pinned CI and
+  the limited encrypted memory measurement are recorded above.
+
+- **2026-11-22 — D-81 — Ribbon and live-reaper work is a draft, not a closed gate.**
+  Cross-crate review found two release blockers in the current working tree:
+  (1) `SecretArenas` prevents a registered allocation from being freed during `wipe`, but its
+  slot state does not prevent the editor from reading or writing that allocation concurrently.
+  A dead-man trip can therefore race with normal plaintext or key access; volatile accesses do
+  not make that data race safe. Canary sampling can race with wiping for the same reason. The
+  app wiring must not be considered safe until ownership/access is synchronized or the editor
+  is quiesced before any registered data is wiped, with tests for trip/edit races.
+  (2) `Typing::replace_all` calls `append_segment` for replacement chunks before committing the
+  final manifest. The production sink publishes each append in the active document, so a crash
+  or later failure can expose a partial replacement transaction. It also swaps the in-memory root
+  before the final commit succeeds. Replace-all needs a single atomic sink operation and failure
+  injection/reopen coverage before its atomicity claim is valid.
+  The 30 M-word test uses a generated `SegmentSource`, not an encrypted world-line, and checking
+  only `ResidentSet::resident_bytes()` does not bound the search seam buffers or match list. No
+  Block 7 gate is claimed by this draft. Local Rust tools are unavailable. CI run `45218714739`
+  failed formatting and compilation (including the shell's style-run lifetime and stale test APIs);
+  the independent million-keystroke rehearsal and gates contract did pass. Subsequent fixes require
+  another full CI run. Run `45220066975` passed formatting, gates, rsync and ext4 qualification
+  but still failed compilation on a GUI lifetime error; that error was corrected afterward.
+  Passing CI alone will not resolve the two release blockers above.
+
 - **2026-11-22 — D-80 — Cross-crate bug hunt closed split-BiDi selection rendering, multi-leaf
   `ParagraphContext` and `Carry` invariants, UAX #9 `P2`/`L1.4` edge cases, reaper provenance and
   timestamp ordering, and residual plaintext buffers.**

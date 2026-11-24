@@ -31,15 +31,17 @@ use holonomy_eye::Fixed;
 use holonomy_gui::panel::Facts;
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
-use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
+use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers, SealWipeBridge};
 use holonomy_seal::{
-    probe_capability, LockCapability, PassphraseInput, MAX_PASSPHRASE_INPUT_BYTES,
+    probe_capability, CanarySet, LockCapability, PassphraseInput, ReaperGuard, SecretArenas,
+    TripReason, Tripwire, MAX_PASSPHRASE_INPUT_BYTES,
 };
-use holonomy_shell::Editor;
-use holonomy_shell::Effect;
+use holonomy_shell::{Editor, Effect, Intent};
 use holonomy_text::{ResidentSet, Typing};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// How long a pause counts as a pause, for the autosave.
@@ -299,6 +301,28 @@ enum Ended {
     Saved,
     /// The last save was refused: the bytes are in memory and the file does not have them.
     SaveFailed,
+    /// Emergency reaper wipe fired (`Ctrl+L` or deadman timeout): resident memory was zeroized.
+    Wiped,
+}
+
+#[derive(Debug, Clone)]
+enum SearchPrompt {
+    Find { needle: String, next_idx: u64 },
+    Replace { needle: String, replacement: String },
+}
+
+impl SearchPrompt {
+    fn render(&self) -> String {
+        match self {
+            Self::Find { needle, .. } => {
+                format!("Find (Enter next · Tab replace · Esc close): {needle}")
+            }
+            Self::Replace {
+                needle,
+                replacement,
+            } => format!("Replace all '{needle}' with (Enter run · Esc close): {replacement}"),
+        }
+    }
 }
 
 /// How the session ended, in the window's own words.
@@ -362,26 +386,72 @@ fn unchanged(
     })
 }
 
-fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Error>> {
+// Only the UI thread owns the editor and document. Register fresh pointers after it has stopped
+// editing, then let the worker wipe; do not touch registered allocations until it has joined.
+fn wipe_quiescent(
+    app: &mut Window,
+    document: &Document,
+    arenas: &Arc<SecretArenas>,
+    reaper: ReaperGuard,
+) -> Ended {
+    // SAFETY: the UI thread has stopped using the document until the worker has joined.
+    let _ = unsafe { document.arm_reaper(arenas) };
+    // SAFETY: the UI thread has stopped editing and will not touch any registered allocation
+    // again until the reaper has completed.
+    unsafe {
+        app.editor()
+            .set_wipe_registry(Arc::new(SealWipeBridge(Arc::clone(arenas))));
+    }
+    // SAFETY: this thread holds the only app/document handles used by the editor, and it does not
+    // access the registered buffers or canaries again until the worker has joined.
+    unsafe { reaper.acknowledge_quiescence() };
+    let _ = reaper.wait_outcome();
+    app.editor().wipe_all_in_place();
+    Ended::Wiped
+}
+
+fn run(
+    path: &Path,
+    document: &Document,
+    deadman_timeout: Option<Duration>,
+) -> Result<Ended, Box<dyn std::error::Error>> {
+    let arenas = SecretArenas::new();
+    let mut canary_set = CanarySet::new(8, 256);
+    let _ = canary_set.arm_all(&arenas);
+    let canaries = Arc::new(canary_set);
+    let tripwire = Tripwire::new(deadman_timeout);
+    tripwire.beat();
+    let reaper = ReaperGuard::spawn_cooperative(
+        Arc::clone(&arenas),
+        Arc::clone(&canaries),
+        Arc::clone(&tripwire),
+        Duration::from_millis(50),
+    );
+
     let (columns, rows) = size();
     let text_rows = rows.saturating_sub(1).max(1);
     let mut app = window(document, columns, text_rows)?;
+
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut decoder = Decoder::new();
     let mut bytes = [0u8; 256];
     let mut message = String::new();
+    let mut search: Option<SearchPrompt> = None;
     let mut panel: Option<(LockCapability, Option<u64>)> = None;
     print!("\x1b[?25l\x1b[2J");
     // What the screen currently shows, so an unchanged view is not written again (D-68).
     // `None` means "nothing has been written yet", which is what makes the first pass paint.
     let mut shown: Option<Shown> = None;
     loop {
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+        }
         let (now_columns, now_rows) = size();
         // The panel gives way, never the surface: `1 + panel + 1` lines that do not fit make the
         // terminal scroll, and then the caret the renderer places is a row off (D-48).
         let panel_room = if panel.is_some() {
-            now_rows.saturating_sub(2).min(4)
+            now_rows.saturating_sub(2).min(5)
         } else {
             0
         };
@@ -401,17 +471,27 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
         let repainted = app.draw()?;
         let panel_lines = match panel {
             Some((capability, verified)) => {
-                let facts = Facts::gather_with(app.residency(), document, capability, verified);
+                let facts = Facts::gather_with(app.residency(), document, capability, verified)
+                    .with_cooperative_reaper(&arenas, &canaries, reaper.has_tripped());
                 term::panel_fits(&facts.lines(), now_rows)
             }
             None => Vec::new(),
+        };
+        let ribbon_or_msg = if let Some(prompt) = &search {
+            prompt.render()
+        } else if !message.is_empty() {
+            message.clone()
+        } else if app.selection().is_some() {
+            app.toolbar_summary()
+        } else {
+            String::new()
         };
         let line = status(
             path,
             document,
             app.document_len(),
             app.has_pending(),
-            message.as_str(),
+            ribbon_or_msg.as_str(),
         );
         let caret = app
             .surface()
@@ -447,15 +527,33 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
         // the exposure is bounded by `store::CAPACITY` rather than by how long someone types. The
         // first version of this comment said "nothing is lost if the machine dies between
         // keystrokes", which is true of every sealed byte and false of the ones just typed (D-64).
-        if !readable(PAUSE_MILLIS) {
+        let poll_ms = deadman_timeout.map_or(PAUSE_MILLIS, |d| {
+            i32::try_from(d.as_millis() / 2)
+                .unwrap_or(PAUSE_MILLIS)
+                .clamp(10, PAUSE_MILLIS)
+        });
+        if !readable(poll_ms) {
+            if reaper.has_tripped() || tripwire.evaluate().is_some() {
+                return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+            }
             if app.has_pending() && save(&mut app) {
                 message.clear();
             }
             continue;
         }
-        let read = stdin.read(&mut bytes)?;
+        let read = stdin.read(&mut bytes);
+        // EOF or a read error must not take the ordinary exit path if a trip fired during read.
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+        }
+        let read = read?;
         if read == 0 {
             break;
+        }
+        tripwire.beat();
+        // A heartbeat may itself latch an already-expired deadline.
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
         }
         let mut inputs = decoder.feed_all(&bytes[..read]);
         // A read can end mid-sequence: `ESC` may be the Escape key or the start of an arrow the
@@ -466,9 +564,111 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
         }
         let mut quit = false;
         for input in inputs {
+            if reaper.has_tripped() || tripwire.evaluate().is_some() {
+                return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+            }
             let Input::Key(key, modifiers) = input else {
                 continue;
             };
+            if modifiers.control && matches!(key, Key::Character('l' | 'L')) {
+                tripwire.fire(TripReason::Manual);
+                return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+            }
+            if let Some(prompt_state) = search.as_mut() {
+                if modifiers.control && matches!(key, Key::Character('q') | Key::Character('c')) {
+                    quit = true;
+                    continue;
+                }
+                match key {
+                    Key::Escape => {
+                        search = None;
+                    }
+                    Key::Backspace => match prompt_state {
+                        SearchPrompt::Find {
+                            needle, next_idx, ..
+                        } => {
+                            needle.pop();
+                            *next_idx = 0;
+                        }
+                        SearchPrompt::Replace { replacement, .. } => {
+                            replacement.pop();
+                        }
+                    },
+                    Key::Character('\t') if !modifiers.control => {
+                        if let SearchPrompt::Find { needle, .. } = prompt_state {
+                            search = Some(SearchPrompt::Replace {
+                                needle: needle.clone(),
+                                replacement: String::new(),
+                            });
+                        }
+                    }
+                    Key::Enter => match prompt_state.clone() {
+                        SearchPrompt::Find { needle, next_idx } => {
+                            if needle.is_empty() {
+                                search = None;
+                            } else {
+                                match app.editor().find_nth(&needle, next_idx) {
+                                    Ok(summary) if summary.count == 0 => {
+                                        message = format!("0 matches for '{needle}'");
+                                        search = None;
+                                    }
+                                    Ok(summary) => {
+                                        let idx = if next_idx < summary.count {
+                                            next_idx
+                                        } else {
+                                            0
+                                        };
+                                        let hit = summary
+                                            .selected
+                                            .expect("a nonempty result has a selected match");
+                                        let _ = app.editor().select_range(hit.start, hit.end);
+                                        let _ = app.editor().apply(Intent::RevealCaret);
+                                        message = format!("match {}/{}", idx + 1, summary.count);
+                                        search = Some(SearchPrompt::Find {
+                                            needle,
+                                            next_idx: idx + 1,
+                                        });
+                                    }
+                                    Err(error) => {
+                                        message = format!("search refused: {error}");
+                                        search = None;
+                                    }
+                                }
+                            }
+                        }
+                        SearchPrompt::Replace {
+                            needle,
+                            replacement,
+                        } => {
+                            search = None;
+                            if !needle.is_empty() {
+                                match app.editor().replace_all(&needle, &replacement) {
+                                    Ok(count) => {
+                                        let _ = app.editor().apply(Intent::RevealCaret);
+                                        message = format!("replaced {count} matches");
+                                    }
+                                    Err(error) => {
+                                        message = format!("replace-all refused: {error}");
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Key::Character(ch) if !modifiers.control && !modifiers.alt => {
+                        match prompt_state {
+                            SearchPrompt::Find { needle, next_idx } => {
+                                needle.push(ch);
+                                *next_idx = 0;
+                            }
+                            SearchPrompt::Replace { replacement, .. } => {
+                                replacement.push(ch);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if modifiers.control {
                 match key {
                     Key::Character('q') | Key::Character('c') => {
@@ -481,6 +681,13 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
                         } else {
                             message.clear();
                         }
+                        continue;
+                    }
+                    Key::Character('f') => {
+                        search = Some(SearchPrompt::Find {
+                            needle: String::new(),
+                            next_idx: 0,
+                        });
                         continue;
                     }
                     Key::Character('g') => {
@@ -512,9 +719,15 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
                 message = "the world-line refused the last edit".to_owned();
             }
         }
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+        }
         if quit {
             break;
         }
+    }
+    if reaper.has_tripped() || tripwire.evaluate().is_some() {
+        return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
     }
     // Seal whatever is open before the window goes away: a quit is a save, and whether it worked is
     // part of what the window says on the way out (D-49).
@@ -530,11 +743,22 @@ fn run(path: &Path, document: &Document) -> Result<Ended, Box<dyn std::error::Er
 fn usage_text() -> &'static str {
     concat!(
         "usage:\n",
-        "  holonomy <document.wavefunction>\n",
+        "  holonomy [--deadman <ms>] <document.wavefunction>\n",
         "  holonomy verify <document.wavefunction>\n",
         "  holonomy compact <source.wavefunction> <destination.wavefunction>\n",
         "  the file is created if it does not exist, opened if it does"
     )
+}
+
+fn parse_editor_args(args: &[String]) -> Option<(PathBuf, Option<Duration>)> {
+    match args {
+        [single] if !single.starts_with('-') => Some((PathBuf::from(single), None)),
+        [flag, ms, target] if flag == "--deadman" && !target.starts_with('-') => {
+            let millis = ms.parse::<u64>().ok().filter(|&v| v > 0)?;
+            Some((PathBuf::from(target), Some(Duration::from_millis(millis))))
+        }
+        _ => None,
+    }
 }
 
 fn run_verify(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -598,8 +822,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("{}", usage_text());
             std::process::exit(2);
         }
-        [single] => {
-            let path = PathBuf::from(single);
+        other => {
+            let Some((path, deadman)) = parse_editor_args(other) else {
+                eprintln!("{}", usage_text());
+                std::process::exit(2);
+            };
             let raw = RawMode::enable()?;
             let existing = path.exists();
             let passphrase = prompt(if existing { "open" } else { "create" }, &path)?;
@@ -610,7 +837,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let started = document.trailing_bytes();
             drop(passphrase);
-            let outcome = run(&path, &document);
+            let outcome = run(&path, &document, deadman);
             let segments = document.segment_count();
             let witnesses = document.witness_count();
             drop(raw);
@@ -620,31 +847,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      a previous run died mid-append"
                 );
             }
-            println!(
-                "{}",
-                closing(
-                    &path,
-                    segments,
-                    witnesses,
-                    outcome_words(
-                        outcome.is_err(),
-                        match outcome {
-                            Ok(Ended::SaveFailed) => Some(false),
-                            Ok(Ended::Saved) => Some(true),
-                            Ok(Ended::NothingToWrite) | Err(_) => None,
-                        }
-                    )
-                )
-            );
+            let summary = match outcome {
+                Ok(Ended::Wiped) => "emergency wipe attempted — full memory coverage not verified",
+                Ok(Ended::SaveFailed) => outcome_words(false, Some(false)),
+                Ok(Ended::Saved) => outcome_words(false, Some(true)),
+                Ok(Ended::NothingToWrite) => outcome_words(false, None),
+                Err(_) => outcome_words(true, None),
+            };
+            println!("{}", closing(&path, segments, witnesses, summary));
             if matches!(outcome, Ok(Ended::SaveFailed)) {
                 // A window that could not write must not exit as though it had.
                 std::process::exit(1);
             }
             outcome.map(|_| ())
-        }
-        _ => {
-            eprintln!("{}", usage_text());
-            std::process::exit(2);
         }
     }
 }

@@ -211,13 +211,19 @@ impl Decoder {
 fn control(byte: u8) -> Input {
     match byte {
         0x01 => Input::Key(Key::Character('a'), Modifiers::control()),
+        0x02 => Input::Key(Key::Character('b'), Modifiers::control()),
         0x03 => Input::Key(Key::Character('c'), Modifiers::control()),
+        0x05 => Input::Key(Key::Character('e'), Modifiers::control()),
+        0x06 => Input::Key(Key::Character('f'), Modifiers::control()),
         0x07 => Input::Key(Key::Character('g'), Modifiers::control()),
         0x08 => Input::Key(Key::Backspace, Modifiers::none()),
         0x09 => Input::Key(Key::Character('\t'), Modifiers::none()),
         0x0a | 0x0d => Input::Key(Key::Enter, Modifiers::none()),
+        0x0c => Input::Key(Key::Character('l'), Modifiers::control()),
         0x11 => Input::Key(Key::Character('q'), Modifiers::control()),
         0x13 => Input::Key(Key::Character('s'), Modifiers::control()),
+        0x14 => Input::Key(Key::Character('t'), Modifiers::control()),
+        0x15 => Input::Key(Key::Character('u'), Modifiers::control()),
         0x19 => Input::Key(Key::Character('y'), Modifiers::control()),
         0x1a => Input::Key(Key::Character('z'), Modifiers::control()),
         0x1b => Input::Key(Key::Escape, Modifiers::none()),
@@ -329,6 +335,50 @@ fn truncate_to_columns(text: &str, columns: usize) -> String {
 /// Same renderer, one extra block: the panel's lines are the security panel's own text (see
 /// [`crate::panel`]), truncated to the terminal's cell width, so a number or filename that is too
 /// wide to show is visibly cut rather than wrapping and scrolling the screen (D-48, OQ-25).
+fn push_styled_cluster(out: &mut String, shown: &str, style: Style) {
+    let mut codes: [&str; 6] = [""; 6];
+    let mut n = 0usize;
+    if style.is_bold() {
+        codes[n] = "1";
+        n += 1;
+    }
+    if style.is_code_span() {
+        codes[n] = "2";
+        n += 1;
+    }
+    if style.is_italic() {
+        codes[n] = "3";
+        n += 1;
+    }
+    if style.is_underline() || style.link_id().is_some() {
+        codes[n] = "4";
+        n += 1;
+    }
+    if style.is_strikethrough() {
+        codes[n] = "9";
+        n += 1;
+    }
+    if style.link_id().is_some() {
+        codes[n] = "34";
+        n += 1;
+    }
+    if n == 0 {
+        out.push_str(shown);
+        return;
+    }
+    out.push_str("\x1b[");
+    for (idx, code) in codes[..n].iter().enumerate() {
+        if idx > 0 {
+            out.push(';');
+        }
+        out.push_str(code);
+    }
+    out.push('m');
+    out.push_str(shown);
+    out.push_str("\x1b[0m");
+}
+
+/// Renders the styled surface, security panel, and status line as a terminal screen.
 #[must_use]
 pub fn screen_with(
     surface: &CellSurface,
@@ -346,7 +396,7 @@ pub fn screen_with(
                 let (shown, _) = display_cluster(cluster);
                 let width = span.max(1);
                 if column + width <= columns {
-                    line.push_str(shown);
+                    push_styled_cluster(&mut line, shown, surface.style_at(column, row));
                     column += width;
                 } else {
                     line.push(' ');

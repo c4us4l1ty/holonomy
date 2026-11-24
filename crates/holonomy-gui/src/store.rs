@@ -29,15 +29,19 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::io;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
-use holonomy_line::{LineError, LineHeader, LineSlab, WorldLine};
+use holonomy_line::{LineError, LineHeader, LineManifest, LineSlab, LineStyleRun, WorldLine};
 use holonomy_seal::{
     calibrate, confirm_compaction, create_capsule_for, generate_kdf_salt, open_capsule_for,
-    KdfParamsRecord, MasterKeys, PassphraseInput,
+    KdfParamsRecord, MasterKeys, PassphraseInput, SecretArenas,
 };
-use holonomy_text::{Appended, SegmentId, SegmentSink, SegmentSource, Slab, Spine};
+use holonomy_text::{
+    Appended, DocStyle, DocStyleSpan, SegmentId, SegmentSink, SegmentSource, Slab, Spine, StyleMap,
+};
 
 /// How much text one open leaf holds before the session seals it.
 ///
@@ -371,6 +375,33 @@ impl Document {
         })
     }
 
+    /// Arms this document's unlocked [`MasterKeys`] (`UnwrapKey`) and [`WorldLine`] (`DEMKey`) in
+    /// `arenas` so an emergency reaper trip volatile-zeroes both keys in place (`L-7`).
+    ///
+    /// # Safety
+    ///
+    /// No document or key access may overlap a wipe, and registered pointers must remain valid.
+    pub unsafe fn arm_reaper(&self, arenas: &Arc<SecretArenas>) -> usize {
+        let mut inner = self.line.borrow_mut();
+        let mut count = 0usize;
+        // SAFETY: the caller guarantees exclusive access throughout the wipe.
+        if unsafe { inner.keys.unwrap_key_mut().arm_reaper(arenas) } {
+            count += 1;
+        }
+        // SAFETY: the same guarantee covers the world-line key.
+        if unsafe { inner.line.arm_reaper(arenas) } {
+            count += 1;
+        }
+        count
+    }
+
+    /// Whether an emergency reaper wipe has zeroized this document's keys in place.
+    #[must_use]
+    pub fn are_keys_zeroized(&self) -> bool {
+        let inner = self.line.borrow();
+        inner.keys.unwrap_key().is_zeroized() && inner.line.is_key_zeroized()
+    }
+
     /// The sink half of the document, for a session that seals leaves into it.
     #[must_use]
     pub fn sink(&self) -> DocumentSink {
@@ -384,19 +415,44 @@ impl Document {
     }
 }
 
-/// The spine a world-line presents: one [`Slab`] per active [`LineSlab`], in authenticated
-/// document order (AUDIT OQ-29, OQ-30).
-///
-/// An append-only world-line presents its implicit full-segment slabs; a world-line with a
-/// committed manifest presents its exact sub-segment spans (or zero slabs when the document was
-/// emptied).
+/// The spine a world-line presents: one [`Slab`] per active [`LineSlab`] plus any persisted
+/// rich-text [`StyleMap`] runs and links, in authenticated document order (AUDIT OQ-29, OQ-30,
+/// Block 7).
 fn spine_of(line: &WorldLine) -> Spine {
-    Spine::from_slabs(
-        line.document_slabs()
-            .into_iter()
-            .map(|slab| Slab::new(SegmentId::new(slab.segment), slab.start, slab.len))
-            .collect::<Vec<_>>(),
-    )
+    let manifest = line.document_manifest();
+    let slabs: Vec<Slab> = manifest
+        .slabs
+        .into_iter()
+        .map(|slab| Slab::new(SegmentId::new(slab.segment), slab.start, slab.len))
+        .collect();
+    if manifest.styles.is_empty() && manifest.links.is_empty() {
+        return Spine::from_slabs(slabs);
+    }
+    let runs: Vec<DocStyleSpan> = manifest
+        .styles
+        .into_iter()
+        .filter_map(|r| {
+            let style = DocStyle::from_wire(
+                r.flags,
+                r.family,
+                r.heading,
+                r.alignment,
+                r.list_kind,
+                r.list_depth,
+                r.blockquote,
+                r.size_milli,
+                r.list_start,
+                r.link_id,
+            )?;
+            Some(DocStyleSpan {
+                start: r.start,
+                end: r.end,
+                style,
+            })
+        })
+        .collect();
+    let styles = StyleMap::from_raw(runs, manifest.links);
+    Spine::from_slabs_and_styles(slabs, styles)
 }
 
 /// Converts a text-layer [`Slab`] slice into container [`LineSlab`] records.
@@ -409,6 +465,34 @@ fn to_line_slabs(slabs: &[Slab]) -> Vec<LineSlab> {
             len: slab.len(),
         })
         .collect()
+}
+
+/// Converts resolved [`LineSlab`] spans and a [`StyleMap`] into a [`LineManifest`].
+fn to_line_manifest(slabs: Vec<LineSlab>, styles: &StyleMap) -> LineManifest {
+    let mut runs = Vec::with_capacity(styles.runs().len());
+    for span in styles.runs() {
+        let st = span.style;
+        let (list_kind, list_depth, list_start) = st.list.to_wire();
+        runs.push(LineStyleRun {
+            start: span.start,
+            end: span.end,
+            flags: st.flags_byte(),
+            family: st.family.code(),
+            heading: st.heading.code(),
+            alignment: st.alignment.code(),
+            list_kind,
+            list_depth,
+            blockquote: st.blockquote.min(8),
+            size_milli: st.size_milli.max(1),
+            list_start,
+            link_id: st.link_id.map_or(0, NonZeroU32::get),
+        });
+    }
+    LineManifest {
+        slabs,
+        styles: runs,
+        links: styles.links().to_vec(),
+    }
 }
 
 /// Appends one sealed leaf per call — the sink half of a [`Document`].
@@ -439,28 +523,40 @@ impl SegmentSink for DocumentSink {
         before: &[Slab],
         after: &[Slab],
     ) -> Result<Appended, String> {
+        self.append_segment_with_manifest(plaintext, before, after, &StyleMap::empty())
+    }
+
+    fn append_segment_with_manifest(
+        &mut self,
+        plaintext: &[u8],
+        before: &[Slab],
+        after: &[Slab],
+        styles: &StyleMap,
+    ) -> Result<Appended, String> {
         let mut line = self.0.line.borrow_mut();
         let next_segment = SegmentId::new(line.line.segment_count());
         let Ok(len) = u32::try_from(plaintext.len()) else {
             return Err("segment exceeds u32".to_owned());
         };
-        let mut manifest = Vec::with_capacity(before.len() + 1 + after.len());
-        manifest.extend(to_line_slabs(before));
-        manifest.push(LineSlab {
+        let mut slabs = Vec::with_capacity(before.len() + 1 + after.len());
+        slabs.extend(to_line_slabs(before));
+        slabs.push(LineSlab {
             segment: next_segment.get(),
             start: 0,
             len,
         });
-        manifest.extend(to_line_slabs(after));
-        let receipt = if line.line.is_implicit_after_append(&[plaintext], &manifest) {
-            line.line
-                .append_segments(&[plaintext])
-                .map_err(|error| error.to_string())?
-        } else {
-            line.line
-                .append_segments_with_manifest(&[plaintext], &manifest)
-                .map_err(|error| error.to_string())?
-        };
+        slabs.extend(to_line_slabs(after));
+        let receipt =
+            if styles.is_empty() && line.line.is_implicit_after_append(&[plaintext], &slabs) {
+                line.line
+                    .append_segments(&[plaintext])
+                    .map_err(|error| error.to_string())?
+            } else {
+                let full = to_line_manifest(slabs, styles);
+                line.line
+                    .append_segments_with_full_manifest(&[plaintext], &full)
+                    .map_err(|error| error.to_string())?
+            };
         Ok(Appended {
             segment: next_segment,
             witness_sequence: receipt.witness_sequence,
@@ -469,14 +565,41 @@ impl SegmentSink for DocumentSink {
         })
     }
 
-    fn commit_spine(&mut self, slabs: &[Slab]) -> Result<(), String> {
+    fn atomic_replace(
+        &mut self,
+        chunks: &[&[u8]],
+        build: &mut holonomy_text::ReplacementBuilder<'_>,
+    ) -> Result<(), String> {
         let mut line = self.0.line.borrow_mut();
-        let desired = to_line_slabs(slabs);
-        if desired == line.line.document_slabs() {
+        let first = line.line.segment_count();
+        let ids = (0..chunks.len())
+            .map(|index| {
+                first
+                    .checked_add(index as u64)
+                    .map(SegmentId::new)
+                    .ok_or_else(|| "segment ID overflow".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (slabs, styles) = build(&ids)?;
+        let manifest = to_line_manifest(to_line_slabs(&slabs), &styles);
+        line.line
+            .append_segments_with_full_manifest(chunks, &manifest)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn commit_spine(&mut self, slabs: &[Slab]) -> Result<(), String> {
+        self.commit_manifest(slabs, &StyleMap::empty())
+    }
+
+    fn commit_manifest(&mut self, slabs: &[Slab], styles: &StyleMap) -> Result<(), String> {
+        let mut line = self.0.line.borrow_mut();
+        let desired = to_line_manifest(to_line_slabs(slabs), styles);
+        if desired == line.line.document_manifest() {
             return Ok(());
         }
         line.line
-            .commit_manifest(&desired)
+            .commit_full_manifest(&desired)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }

@@ -526,3 +526,30 @@ fn nfc_and_nfd_passphrases_open_the_same_document_and_compaction_purges_deleted_
     let mut window = open_window(&reopened_compacted);
     assert_eq!(text(&mut window), "surviving prose");
 }
+
+#[test]
+fn replace_all_commits_one_witness_and_undo_persists() {
+    let path = temp_path("replace-all-atomic");
+    let document = create(&path.0);
+    let mut typing = Typing::new(document.sink(), store::CAPACITY);
+    typing.insert(b"one fish, one bird").unwrap();
+    typing.flush().unwrap();
+    let original = typing.spine().clone();
+    let witnesses = document.witness_count();
+    let mut source = document.source();
+    assert_eq!(typing.replace_all(b"one", b"two", &mut source).unwrap(), 2);
+    assert_eq!(document.witness_count(), witnesses + 1);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens replacement");
+    assert_eq!(text(&mut open_window(&reopened)), "two fish, two bird");
+    reopened.verify().unwrap();
+    drop(reopened);
+
+    assert!(typing.undo().unwrap());
+    assert!(typing.spine().ptr_eq(&original));
+    typing.flush().unwrap();
+    drop(typing);
+    drop(document);
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens undo");
+    assert_eq!(text(&mut open_window(&reopened)), "one fish, one bird");
+}

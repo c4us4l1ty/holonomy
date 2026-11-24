@@ -384,6 +384,17 @@ v3 died bolting a Wordcraft-shaped ribbon onto split geometry. v6 puts the toolb
 5's single geometry and the Block 1 UI spec — same visual language, none of the split-brain. It
 sits above the quiet-md page Block 6 installs, in the same window, in the same run tree.
 
+**Draft status (2026-11-22):** implementation is in progress; none of the gates below is claimed.
+A single-commit replace-all path and a cooperative reaper are under test (AUDIT D-82, D-84).
+Replacement restores a checkpoint of live edit history if a later commit fails; the preliminary
+flush may still have been durable, and an uncertain I/O failure requires reopening. Checkpoint
+memory and failure recovery need further verification. The reaper waits for the editor and does
+not guarantee L-7 latency or complete wipe coverage. A sparse-match
+search and replace on a real encrypted 30 M-word world-line measured less than 4 MiB of incremental
+live heap in CI (AUDIT D-83). Dense find is being measured separately; collecting and replace-all
+currently refuse over 16,384 matches (D-85). The full dense-replacement and total-memory gates remain
+open; the implementation plan is in `docs/BOUNDED_SEARCH_AND_WIPE.md`.
+
 **Deliverables**
 - Toolbar per spec: font family/size, bold/italic/underline/strike, headings 1–3, alignment,
   lists (real list structure — not v3's literal-prefix `- ` fake), link, horizontal rule,
@@ -441,7 +452,7 @@ v5's 45 ms wipe-budget overshoot disappears by construction.
   and says so. The anti-decorative-security instrument.
 - Forced recheck: adversarial re-audit of Blocks 2–9 implementations (not just RFCs).
 
-**GATES** — ✅ **passed 2026-11-22 under headless runtime scope; L-7 remains `spec` pending OS shell hooks** (CI run [45106234334](https://github.com/c4us4l1ty/holonomy/actions/runs/45106234334) on `3b54969`; AUDIT D-79)
+**GATES** — Historical headless measurements below passed in CI run [45106234334](https://github.com/c4us4l1ty/holonomy/actions/runs/45106234334), but live runtime gates remain open following D-81–D-83; L-7 remains `spec`. The cooperative reaper does not establish the 50 ms deadline or complete wipe coverage.
 - [x] Reaper fire test: time from tripwire to wipe-verified measured; canary ghosts: zero.
       **Measured 2026-11-22 by `crates/holonomy-text/tests/wipe_gate.rs` + `holonomy_seal::reaper`**
       across 24 end-to-end trials covering `Manual`, `Suspend`, `UmbilicalDisconnect`, and

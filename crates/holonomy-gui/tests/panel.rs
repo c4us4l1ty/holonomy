@@ -164,3 +164,126 @@ fn the_panel_never_claims_more_than_its_bytes() {
         "no rounding up into a lie"
     );
 }
+
+#[test]
+fn live_reaper_arms_document_keys_and_residency_and_reports_honestly_in_panel() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use holonomy_gui::SealWipeBridge;
+    use holonomy_seal::{CanarySet, ReaperGuard, SecretArenas, TripReason, Tripwire};
+
+    let path = temp_path();
+    let document =
+        Document::create_with(&path.0, PASSPHRASE, store::test_params()).expect("creates");
+
+    let arenas = SecretArenas::new();
+    let mut canary_set = CanarySet::new(4, 128);
+    assert_eq!(canary_set.arm_all(&arenas), 4);
+    let canaries = Arc::new(canary_set);
+
+    // SAFETY: the test does not use the keys while the reaper is wiping them.
+    assert_eq!(unsafe { document.arm_reaper(&arenas) }, 2);
+    assert!(!document.are_keys_zeroized());
+
+    let mut residency = ResidentSet::new(Pages(64), 64 * 1024, 64).expect("budget");
+    let _ = residency.fault_in(SegmentId::new(0)).expect("faults");
+    // SAFETY: the resident allocation is quiescent until the reaper has joined.
+    unsafe { residency.set_wipe_registry(Arc::new(SealWipeBridge(Arc::clone(&arenas)))) };
+
+    let tripwire = Tripwire::new(None);
+    let guard = ReaperGuard::spawn(
+        Arc::clone(&arenas),
+        Arc::clone(&canaries),
+        Arc::clone(&tripwire),
+        Duration::from_millis(25),
+    );
+
+    let armed_facts = Facts::gather(&residency, &document, None).with_reaper(
+        &arenas,
+        &canaries,
+        tripwire.evaluate().is_some(),
+    );
+    assert!(armed_facts.reaper_line().contains("reaper: armed"));
+    assert!(armed_facts.reaper_line().contains("4/4 canaries live"));
+    // 4 canaries + 2 document keys + 1 resident slab = 7 armed arenas.
+    assert_eq!(armed_facts.armed_arenas, 7);
+
+    tripwire.fire(TripReason::Manual);
+    let outcome = guard.wait_outcome().expect("reaper completed");
+    assert_eq!(outcome.canaries.ghost_bytes, 0);
+    assert!(document.are_keys_zeroized());
+    assert!(residency
+        .fault_in(SegmentId::new(0))
+        .expect("still resident")
+        .iter()
+        .all(|&b| b == 0));
+
+    let tripped_facts = Facts::gather(&residency, &document, None).with_reaper(
+        &arenas,
+        &canaries,
+        tripwire.evaluate().is_some(),
+    );
+    assert!(tripped_facts.reaper_line().contains("TRIPPED"));
+    assert!(tripped_facts
+        .reaper_line()
+        .contains("4/4 canaries zeroized"));
+}
+
+#[test]
+fn document_persists_and_restores_ribbon_formatting_through_app() {
+    use holonomy_eye::Fixed;
+    use holonomy_gui::term::CellShaper;
+    use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
+    use holonomy_shell::Editor;
+    use holonomy_text::Typing;
+
+    let path = temp_path();
+    let doc = Document::create_with(&path.0, PASSPHRASE, store::test_params()).expect("creates");
+    let res = ResidentSet::new(doc.source(), store::BUDGET, store::SLACK).expect("budget");
+    let editor = Editor::new(
+        Typing::resume(doc.sink(), doc.spine().unwrap(), store::CAPACITY),
+        res,
+        CellShaper,
+        Fixed::units(80),
+        Fixed::units(24),
+    );
+    let mut app = App::new(
+        editor,
+        Keymap::new(Fixed::units(24)),
+        CellSurface::new(80, 24, 1),
+    );
+    for ch in "Hello Ribbon".chars() {
+        app.press(Key::Character(ch), Modifiers::none()).unwrap();
+    }
+    app.press(Key::Character('a'), Modifiers::control())
+        .unwrap();
+    app.press(Key::Character('b'), Modifiers::control())
+        .unwrap();
+    app.press(Key::Character('1'), Modifiers::control())
+        .unwrap();
+    app.press(Key::Character('s'), Modifiers::control())
+        .unwrap();
+    assert_eq!(app.toolbar_summary(), "Sans H1 [B]");
+    drop(app);
+    drop(doc);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens");
+    reopened.verify().expect("authenticates v2 styled manifest");
+    let res2 = ResidentSet::new(reopened.source(), store::BUDGET, store::SLACK).expect("budget");
+    let editor2 = Editor::new(
+        Typing::resume(reopened.sink(), reopened.spine().unwrap(), store::CAPACITY),
+        res2,
+        CellShaper,
+        Fixed::units(80),
+        Fixed::units(24),
+    );
+    let mut app2 = App::new(
+        editor2,
+        Keymap::new(Fixed::units(24)),
+        CellSurface::new(80, 24, 1),
+    );
+    app2.press(Key::Character('a'), Modifiers::control())
+        .unwrap();
+    assert_eq!(app2.toolbar_summary(), "Sans H1 [B]");
+}
