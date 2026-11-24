@@ -226,9 +226,9 @@ pub const BUDGETS: &[Budget] = &[
              pointed at an empty directory that must stay empty — the process half of the law \
              (`HOLONOMY_PORTABILITY L-9=partial`)",
         ),
-        owes: "a copied file opened on a second machine and platform — the drill above carries the \
-               file, the passphrase and nothing else, but it is still one kernel and one libc, \
-               which is Block 10's release matrix",
+        owes: "a copied file opened on a second machine and platform — the drill above carries \
+               the file, the passphrase and nothing else, but it is still one kernel and one \
+               libc, which is Block 10's release matrix",
     },
     Budget {
         vision: "Tail-only sync: backing up after a save transfers O(appended bytes)",
@@ -366,11 +366,27 @@ mod tests {
                 );
             }
         }
+        // Every budget row names a harness as of 2026-11-24 (D-92): L-9 was the last `None`, and it
+        // now names `scripts/qualify-l9-portability.sh`, which measures the process half of the law
+        // and says `L-9=partial` in its own output. Having a harness is therefore no longer rare
+        // enough to be worth counting — but *claiming a law without measuring all of it* is, so
+        // that is what this pins instead.
         let unmeasured = BUDGETS.iter().filter(|b| b.measured_by.is_none()).count();
         assert_eq!(
-            unmeasured, 1,
-            "exactly one budget (L-9 portability) has no harness; if one gains or loses one, \
-             update this count and the prose that quotes it"
+            unmeasured, 0,
+            "every budget names a harness as of D-92; if one loses its harness, say so here and in \
+             docs/GATES.md's measured column rather than letting the row go quiet"
+        );
+        let partial = BUDGETS
+            .iter()
+            .filter(|b| b.measured_by.is_some_and(|h| h.contains("=partial")))
+            .map(|b| b.law)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            partial,
+            vec!["L-9"],
+            "exactly one budget (L-9 portability) is measured only in part; if another becomes \
+             partial, name it here and in the prose that ships with it"
         );
     }
 }

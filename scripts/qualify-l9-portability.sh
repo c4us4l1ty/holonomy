@@ -52,8 +52,10 @@ if [[ ! -x "$binary" ]]; then
 fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The sentence is asserted on the far side, and asserted absent from the ciphertext.
-sentence="a document that outlives the machine that wrote it"
+# The sentence is asserted on the far side and asserted absent from the ciphertext. It is kept
+# short on purpose: the drill declares a 120-column window below, and a sentence that wrapped
+# would test the terminal rather than the document.
+sentence="a document that outlives the machine"
 phrase="correct horse battery staple"
 
 authored="$work_dir/authored"
@@ -62,6 +64,11 @@ importer_home="$work_dir/importer-everything"
 mkdir -p "$authored/bin" "$delivered/bin/import" "$importer_home"
 
 # --- 1. Author the document with the binary, at the version the tag would ship ---------------------
+# The drill's declared window: wide enough that the asserted sentence never wraps, tall enough for
+# the status line and a panel-free screen. Declared rather than inherited — see `drive-pty.py`.
+L9_COLS=120
+L9_ROWS=30
+
 drive() { # out, phrase, text, path
   local out="$1" phrase="$2" text="$3" path="$4"
   local spec="$work_dir/keys.json"
@@ -71,7 +78,7 @@ phrase, text, path = sys.argv[1], sys.argv[2], sys.argv[3]
 json.dump([[0.8, phrase + "\r"], [0.5, text], [0.5, "\u0011"]], open(path, "w"))
 ' "$phrase" "$text" "$spec"
   python3 "$here/drive-pty.py" --timeout "${HOLONOMY_SMOKE_TIMEOUT:-30}" --out "$out" \
-    --keys "$spec" -- "$binary" "$@"
+    --cols "$L9_COLS" --rows "$L9_ROWS" --keys "$spec" -- "$binary" "$@"
 }
 
 original="$authored/notes.wavefunction"
@@ -92,6 +99,7 @@ while IFS= read -r fragment; do
 done <<'FRAGMENTS'
 outlives the machine
 document that outlives
+the machine
 FRAGMENTS
 
 # --- 2. Deliver it as a person would: a copied file, nothing else --------------------------------
@@ -105,6 +113,17 @@ delivered_sum="$(sha256sum "$delivered/notes.wavefunction" | cut -d' ' -f1)"
 # binary's own loader) and the XDG/HOME/TMPDIR set, every one of them inside a directory that is
 # empty right now. The import therefore starts with no config, no cache, no keyring, no state.
 import_home="$importer_home"
+
+# The pty driver is scaffolding, not the importer: it must be findable *inside* the scrubbed
+# environment, and `env -i` throws away the PATH that would find it. Resolve it once, here, and pass
+# an absolute path in. (Found the hard way: `PATH=/usr/bin:/bin python3` fails wherever the
+# interpreter is not in one of those two directories.)
+python_bin="$(command -v python3 || true)"
+if [[ -z "$python_bin" ]]; then
+  echo "l9: python3 is required to drive a pty (see scripts/drive-pty.py)" >&2
+  exit 1
+fi
+
 importer_cmd=(
   env -i
   PATH=/usr/bin:/bin
@@ -147,9 +166,10 @@ import json, sys
 json.dump([[0.8, sys.argv[1] + "\r"], [0.5, " and still readable"], [0.8, "\u0011"]],
           open(sys.argv[2], "w"))
 ' "$phrase" "$delivered/bin/import/keys.json"
-if ! "${importer_cmd[@]}" python3 "$delivered/bin/import/drive-pty.py" \
+if ! "${importer_cmd[@]}" "$python_bin" "$delivered/bin/import/drive-pty.py" \
   --timeout "${HOLONOMY_SMOKE_TIMEOUT:-30}" \
   --out "$work_dir/import.session" \
+  --cols "$L9_COLS" --rows "$L9_ROWS" \
   --keys "$delivered/bin/import/keys.json" \
   -- "$binary" "$continued"; then
   echo "l9: FAIL — the importing session did not exit cleanly" >&2

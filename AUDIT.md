@@ -88,11 +88,28 @@ Listed so they stay dead.
   and the script's header spells out that a different kernel, libc, filesystem, architecture and OS
   are exactly what it does **not** prove. **L-9 stays `spec`**: the machine half needs the release
   tarball opened on a second machine, which is the drill this one is the prerequisite for.
-  Two shell defects were found and fixed before pushing, both by executing the script's logic
-  outside CI rather than reading it: a process substitution passed to `env -i` (which cannot see
-  the replaced path), and the driver's key schedule being fed through a fifo rather than a file in
-  the delivered tree. The `env -i` verify dispatch was then exercised against a stub binary to
-  confirm the confinement and the `verified (` assertion work together.
+  Three defects were found and fixed, and the last two only by running the thing:
+
+  1. **Read, not run (fixed before the first push):** a process substitution passed to `env -i`
+     (which cannot see the replaced path), and the driver's key schedule fed through a fifo rather
+     than a file in the delivered tree.
+  2. **Found by CI, not by me (fixed after the first red push):** `env -i PATH=/usr/bin:/bin` then
+     `python3` — the confined environment cannot resolve the driver's interpreter wherever it is not
+     in those two directories, so the import died at `execv` with 127. The pty driver is scaffolding,
+     not the importer; it is now resolved with `command -v` *outside* the confinement and passed in
+     as an absolute path.
+  3. **Found while reproducing (2) locally:** a pty inherits the caller's window size, and in CI that
+     is whatever `tee` had. A narrow window wraps the rendered sentence and makes the "did the far
+     side see what the near side wrote" assertion fail for a reason that is about the terminal, not
+     about portability. `scripts/drive-pty.py` now takes `--cols`/`--rows` and applies `TIOCSWINSZ`
+     in the child before exec — verified by reading the size back in a child at two different
+     requested sizes — and the drill declares a 120×30 window and keeps its asserted sentence short
+     enough not to wrap at it.
+
+  The lesson is worth recording because it is the same one D-73 recorded about `script(1)`: a pty
+  harness has failure modes of its own, and they look like product failures from a distance. Every
+  step of this script that can be run outside CI now has been; the parts that cannot (the real
+  binary in the real release build) are what the CI job is for.
 
 - **2026-11-24 — D-91 — The viewport gate's absolute number was quoted as a property of the code;
   it is a property of the runner.** Harness bookkeeping, not a product defect, but the class this
