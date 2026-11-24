@@ -84,7 +84,7 @@ use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
 use crate::formatting::{StylePatch, ToolbarState};
 use crate::residency::{SegmentSource, WipeRegistry};
-use crate::search::{find_streaming, SearchError, SearchMatch};
+use crate::search::{find_streaming, visit_streaming, SearchError, SearchMatch, SearchSummary};
 use crate::slab::{SegmentId, Slab, SlabSpan};
 use crate::source::OpenSources;
 use crate::spine::{Spine, SpineError};
@@ -1257,8 +1257,9 @@ impl<S: SegmentSink> Typing<S> {
         Ok(())
     }
 
-    /// Streams across the live document (including any unsealed typing draft) to find all
-    /// non-overlapping occurrences of `needle` without touching [`crate::ResidentSet`].
+    /// Collects non-overlapping matches in the live document without touching [`crate::ResidentSet`].
+    /// Refuses more than [`crate::MAX_COLLECTED_MATCHES`] matches; use [`Self::find_nth`] for dense
+    /// searches without accumulating result positions.
     pub fn find_all<R: SegmentSource>(
         &self,
         needle: &[u8],
@@ -1274,13 +1275,63 @@ impl<S: SegmentSink> Typing<S> {
         )
     }
 
+    /// Counts matches and selects the indexed match without allocating a result vector. When the
+    /// index is beyond the match count, the first match is selected, allowing a search UI to wrap.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SearchError`] if a segment cannot be read, the needle is too large, or the
+    /// count is not representable.
+    pub fn find_nth<R: SegmentSource>(
+        &self,
+        needle: &[u8],
+        index: u64,
+        source: &mut R,
+    ) -> Result<SearchSummary, SearchError> {
+        let mut count = 0u64;
+        let mut first = None;
+        let mut selected = None;
+        let mut overflow = false;
+        visit_streaming(
+            &self.spine,
+            &self.draft,
+            &self.sources,
+            self.pending(),
+            needle,
+            source,
+            |hit| {
+                if count == 0 {
+                    first = Some(hit);
+                }
+                if count == index {
+                    selected = Some(hit);
+                }
+                if let Some(next) = count.checked_add(1) {
+                    count = next;
+                    true
+                } else {
+                    overflow = true;
+                    false
+                }
+            },
+        )?;
+        if overflow {
+            return Err(SearchError::MatchCountOverflow);
+        }
+        Ok(SearchSummary {
+            count,
+            selected: selected.or(first),
+        })
+    }
+
     /// Atomically replaces every non-overlapping occurrence of `needle` with `replacement` across
     /// the entire document as **one** undoable transaction, without widening [`crate::ResidentSet`]
     /// (`L-2`, Block 7 Gate 2).
     ///
     /// Returns the number of occurrences replaced. Untouched leaves are never read or re-sealed;
     /// `replacement` is sealed once in `<= 64 KiB` UTF-8 chunks and referenced across all match
-    /// sites by Spine path-copying.
+    /// sites by Spine path-copying. If more than [`crate::MAX_COLLECTED_MATCHES`] matches exist,
+    /// the operation refuses before changing the document; dense replacement is not yet supported.
     pub fn replace_all<R: SegmentSource>(
         &mut self,
         needle: &[u8],
@@ -1293,6 +1344,11 @@ impl<S: SegmentSink> Typing<S> {
         if needle.is_empty() {
             return Ok(0);
         }
+        if needle == replacement {
+            let count = self.find_nth(needle, 0, source)?.count;
+            return usize::try_from(count)
+                .map_err(|_| TypingError::Search(SearchError::MatchCountOverflow));
+        }
         // Search the live draft first: sealing a no-op would unnecessarily alter undo/redo
         // history and write to the world-line. Sealing does not change document byte offsets.
         let matches = find_streaming(
@@ -1303,8 +1359,8 @@ impl<S: SegmentSink> Typing<S> {
             needle,
             source,
         )?;
-        if matches.is_empty() || needle == replacement {
-            return Ok(matches.len());
+        if matches.is_empty() {
+            return Ok(0);
         }
         let checkpoint =
             (self.open.is_some() || self.structure_dirty).then(|| ReplaceCheckpoint::capture(self));
@@ -2572,6 +2628,51 @@ mod tests {
             self.spines.push(slabs);
             Ok(())
         }
+    }
+
+    #[test]
+    fn find_nth_counts_without_collecting_and_wraps_at_the_end() {
+        struct NoSource;
+        impl SegmentSource for NoSource {
+            fn load(&mut self, _: SegmentId) -> Result<Vec<u8>, String> {
+                Err("unexpected sealed segment load".to_owned())
+            }
+        }
+        let mut typing = session(64);
+        typing.insert(b"x x x").unwrap();
+        let second = typing.find_nth(b"x", 1, &mut NoSource).unwrap();
+        assert_eq!(second.count, 3);
+        assert_eq!(second.selected, Some(SearchMatch { start: 2, end: 3 }));
+        let wrapped = typing.find_nth(b"x", 3, &mut NoSource).unwrap();
+        assert_eq!(wrapped.count, 3);
+        assert_eq!(wrapped.selected, Some(SearchMatch { start: 0, end: 1 }));
+        assert_eq!(typing.find_nth(b"z", 0, &mut NoSource).unwrap().count, 0);
+    }
+
+    #[test]
+    fn dense_replacement_refuses_before_modifying_draft_or_history() {
+        struct NoSource;
+        impl SegmentSource for NoSource {
+            fn load(&mut self, _: SegmentId) -> Result<Vec<u8>, String> {
+                Err("unexpected sealed segment load".to_owned())
+            }
+        }
+        let size = crate::MAX_COLLECTED_MATCHES + 1;
+        let mut typing = session(size + 1);
+        typing.mark();
+        typing.insert(&vec![b'x'; size]).unwrap();
+        let depth = typing.undo_depth();
+        assert!(matches!(
+            typing.replace_all(b"x", b"y", &mut NoSource),
+            Err(TypingError::Search(SearchError::MatchLimitExceeded { .. }))
+        ));
+        assert_eq!(typing.pending().len(), size);
+        assert_eq!(typing.undo_depth(), depth);
+        assert!(typing.sink.segments.is_empty());
+        assert_eq!(typing.replace_all(b"x", b"x", &mut NoSource).unwrap(), size);
+        assert_eq!(typing.undo_depth(), depth);
+        assert!(typing.undo().unwrap());
+        assert_eq!(typing.document_len(), 0);
     }
 
     #[test]

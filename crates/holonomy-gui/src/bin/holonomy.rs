@@ -307,7 +307,7 @@ enum Ended {
 
 #[derive(Debug, Clone)]
 enum SearchPrompt {
-    Find { needle: String, next_idx: usize },
+    Find { needle: String, next_idx: u64 },
     Replace { needle: String, replacement: String },
 }
 
@@ -607,24 +607,30 @@ fn run(
                             if needle.is_empty() {
                                 search = None;
                             } else {
-                                match app.editor().find_all(&needle) {
-                                    Ok(hits) if hits.is_empty() => {
+                                match app.editor().find_nth(&needle, next_idx) {
+                                    Ok(summary) if summary.count == 0 => {
                                         message = format!("0 matches for '{needle}'");
                                         search = None;
                                     }
-                                    Ok(hits) => {
-                                        let idx = next_idx % hits.len();
-                                        let hit = hits[idx];
+                                    Ok(summary) => {
+                                        let idx = if next_idx < summary.count {
+                                            next_idx
+                                        } else {
+                                            0
+                                        };
+                                        let hit = summary
+                                            .selected
+                                            .expect("a nonempty result has a selected match");
                                         let _ = app.editor().select_range(hit.start, hit.end);
                                         let _ = app.editor().apply(Intent::RevealCaret);
-                                        message = format!("match {}/{}", idx + 1, hits.len());
+                                        message = format!("match {}/{}", idx + 1, summary.count);
                                         search = Some(SearchPrompt::Find {
                                             needle,
                                             next_idx: idx + 1,
                                         });
                                     }
-                                    Err(_) => {
-                                        message = "streaming search refused".to_owned();
+                                    Err(error) => {
+                                        message = format!("search refused: {error}");
                                         search = None;
                                     }
                                 }
@@ -641,8 +647,8 @@ fn run(
                                         let _ = app.editor().apply(Intent::RevealCaret);
                                         message = format!("replaced {count} matches");
                                     }
-                                    Err(_) => {
-                                        message = "replace-all refused".to_owned();
+                                    Err(error) => {
+                                        message = format!("replace-all refused: {error}");
                                     }
                                 }
                             }

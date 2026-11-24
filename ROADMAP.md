@@ -391,7 +391,9 @@ flush may still have been durable, and an uncertain I/O failure requires reopeni
 memory and failure recovery need further verification. The reaper waits for the editor and does
 not guarantee L-7 latency or complete wipe coverage. A sparse-match
 search and replace on a real encrypted 30 M-word world-line measured less than 4 MiB of incremental
-live heap in CI (AUDIT D-83); it does not measure total process memory or prove dense-match bounds.
+live heap in CI (AUDIT D-83). Dense find is being measured separately; collecting and replace-all
+currently refuse over 16,384 matches (D-85). The full dense-replacement and total-memory gates remain
+open; the implementation plan is in `docs/BOUNDED_SEARCH_AND_WIPE.md`.
 
 **Deliverables**
 - Toolbar per spec: font family/size, bold/italic/underline/strike, headings 1–3, alignment,

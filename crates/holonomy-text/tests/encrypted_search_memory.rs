@@ -20,6 +20,24 @@ use holonomy_text::{
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_os = "linux")]
+static SAMPLED_RSS_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+// Point samples are useful evidence, but cannot establish a true peak or account for kernel cache.
+#[cfg(target_os = "linux")]
+fn sample_rss() {
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        if let Some(kib) = status.lines().find_map(|line| {
+            line.strip_prefix("VmRSS:")?
+                .split_whitespace()
+                .next()?
+                .parse::<usize>()
+                .ok()
+        }) {
+            SAMPLED_RSS_PEAK.fetch_max(kib.saturating_mul(1024), Ordering::Relaxed);
+        }
+    }
+}
 struct Counting;
 // SAFETY: allocation and deallocation are forwarded to System; atomics only account for sizes.
 unsafe impl GlobalAlloc for Counting {
@@ -69,6 +87,10 @@ impl SegmentSource for Shared {
                 self.words += 1;
             }
             self.in_word = word;
+        }
+        #[cfg(target_os = "linux")]
+        if self.loads.is_multiple_of(64) {
+            sample_rss();
         }
         Ok(bytes)
     }
@@ -217,6 +239,52 @@ fn encrypted_30m_word_search_and_replace_heap_measurement() {
     assert!(words >= 30_000_000);
     assert!(find_peak <= LIMIT, "find peak {find_peak} exceeds {LIMIT}");
     drop(hits);
+
+    // A match roughly every six bytes: stream/count/select without retaining all positions.
+    resident.source_mut().loads = 0;
+    #[cfg(target_os = "linux")]
+    {
+        SAMPLED_RSS_PEAK.store(0, Ordering::SeqCst);
+        sample_rss();
+    }
+    PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
+    let dense = typing
+        .find_nth(b"word0", 12_345_678, resident.source_mut())
+        .unwrap();
+    let dense_heap_total = PEAK.load(Ordering::SeqCst);
+    let dense_heap_delta = dense_heap_total.saturating_sub(baseline);
+    assert!(
+        dense.count >= 30_000_000,
+        "only {} dense matches",
+        dense.count
+    );
+    assert_eq!(
+        dense.selected.unwrap().end - dense.selected.unwrap().start,
+        5
+    );
+    assert_eq!(resident.source_mut().loads, SEGMENTS as u64);
+    assert!(
+        dense_heap_delta <= LIMIT,
+        "dense find peak {dense_heap_delta} exceeds {LIMIT}"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        sample_rss();
+        println!("HOLONOMY_DENSE_FIND matches={} selected_index=12345678 heap_total_peak={} heap_delta_peak={} rss_sampled_peak={} rss_sampling=each_64_segments", dense.count, dense_heap_total, dense_heap_delta, SAMPLED_RSS_PEAK.load(Ordering::SeqCst));
+    }
+    #[cfg(not(target_os = "linux"))]
+    println!("HOLONOMY_DENSE_FIND matches={} selected_index=12345678 heap_total_peak={} heap_delta_peak={} rss_sampling=unavailable", dense.count, dense_heap_total, dense_heap_delta);
+    assert!(matches!(
+        typing.find_all(b"word0", resident.source_mut()),
+        Err(holonomy_text::SearchError::MatchLimitExceeded { .. })
+    ));
+    assert!(matches!(
+        typing.replace_all(b"word0", b"x", resident.source_mut()),
+        Err(holonomy_text::TypingError::Search(
+            holonomy_text::SearchError::MatchLimitExceeded { .. }
+        ))
+    ));
+    assert!(typing.spine().ptr_eq(&original));
 
     PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
     assert_eq!(

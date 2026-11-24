@@ -75,7 +75,10 @@ pub use formatting::{
     ToolbarState, TriState,
 };
 pub use residency::{ResidencyError, ResidentSet, SegmentSource, WipeRegistry};
-pub use search::{find_streaming, SearchError, SearchMatch};
+pub use search::{
+    find_streaming, visit_streaming, SearchError, SearchMatch, SearchSummary,
+    MAX_COLLECTED_MATCHES, MAX_SEARCH_NEEDLE_BYTES,
+};
 pub use select::{copy, CopyError, Selection};
 pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
 pub use source::{is_provisional, Location, OpenSources, SealError};

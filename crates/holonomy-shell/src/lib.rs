@@ -62,8 +62,8 @@ use holonomy_eye::{
     StyledText, View, Window, WindowText, WindowTextError,
 };
 use holonomy_text::{
-    LiveSpan, ResidentSet, SearchMatch, SegmentSink, SegmentSource, Selection, StylePatch,
-    ToolbarState, Typing, TypingError, WipeRegistry,
+    LiveSpan, ResidentSet, SearchMatch, SearchSummary, SegmentSink, SegmentSource, Selection,
+    StylePatch, ToolbarState, Typing, TypingError, WipeRegistry,
 };
 
 /// Why an intent could not be carried out.
@@ -354,11 +354,22 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Ok(changed)
     }
 
-    /// Streams across the document to find all non-overlapping occurrences of `needle` without
-    /// widening [`ResidentSet`].
+    /// Collects non-overlapping matches without widening [`ResidentSet`], refusing result sets
+    /// above [`holonomy_text::MAX_COLLECTED_MATCHES`]. Use [`Self::find_nth`] for dense searches.
     pub fn find_all(&mut self, needle: &str) -> Result<Vec<SearchMatch>, ShellError> {
         self.typing
             .find_all(needle.as_bytes(), self.residency.source_mut())
+            .map_err(|err| ShellError::Typing(TypingError::Search(err)))
+    }
+
+    /// Counts matches and selects one by index without collecting all match positions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when scanning cannot complete or the needle exceeds the scan limit.
+    pub fn find_nth(&mut self, needle: &str, index: u64) -> Result<SearchSummary, ShellError> {
+        self.typing
+            .find_nth(needle.as_bytes(), index, self.residency.source_mut())
             .map_err(|err| ShellError::Typing(TypingError::Search(err)))
     }
 
