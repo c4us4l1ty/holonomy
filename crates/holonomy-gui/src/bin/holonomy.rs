@@ -309,7 +309,9 @@ enum Ended {
     /// Emergency reaper wipe fired but could **not** be confirmed: the reaper join produced no
     /// outcome, it scrubbed no arenas, or a canary survived. The window must say this rather than
     /// claim a wipe (D-89) — an unconfirmed wipe is an *unmet protection*, not a success.
-    WipeUnconfirmed(WipeUnconfirmed, usize)
+    /// The count is what the editor scrubbed in place anyway (`D-93`), so the closing line can
+    /// report the scrub a reader cannot otherwise see happened.
+    WipeUnconfirmed(WipeUnconfirmed, usize),
 }
 
 /// The measured facts of a wipe that was confirmed, kept so the window can show them.
