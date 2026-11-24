@@ -465,6 +465,14 @@ v5's 45 ms wipe-budget overshoot disappears by construction.
       zero-allocation scrubbing. *Scope residual: OS suspend/USB event listeners and native-window
       capture exclusion remain owned by Block 6's GPUI shell and Block 10's three-OS qualification,
       so L-7 stays `spec` in `docs/GATES.md` while its `BUDGETS` row cites `tests::wipe_gate`.*
+      **Live-editor receipt added 2026-11-24 (D-89, not a gate):** the terminal used to discard the
+      reaper's outcome and print a fixed sentence that neither affirmed nor denied a wipe. It now
+      keeps `ReaperOutcome` and splits it three ways — scrubbed bytes with no surviving canary is
+      reported with its arena/byte/µs counts and exits 0; a join with no outcome, a wipe over an
+      empty registry, or any surviving canary prints *why* and exits 1, on the same policy as a
+      refused save (D-49). This changes what the window *admits*, not what it *covers*: the
+      cooperative watcher still cannot meet the 50 ms deadline from a blocked UI thread, and
+      registration still covers only the allocations the editor arms, so **L-7 stays `spec`**.
 - [x] Security panel claims cross-checked by test (no status a test cannot prove).
       **Enforced by `crates/holonomy-gui/tests/panel.rs` (M6):** every line rendered by
       `holonomy_gui::panel::Facts` is verified by mutating live `ResidentSet` byte/leaf counts,

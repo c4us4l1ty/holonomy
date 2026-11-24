@@ -312,8 +312,23 @@ reason.
 
 ### M8 — Packaging
 
-**Partially done (2026-11-21).** The parts that need one Linux machine and no distribution are
-built; the parts that need signing, a second platform, or a release pipeline are not.
+**Partially done (2026-11-21, extended 2026-11-24).** The parts that need one Linux machine and no
+distribution are built; the parts that need signing, a second platform or a signing identity still
+are not — but there is now a pipeline, and it publishes nothing it has not first run.
+
+**Done — the release pipeline (D-90).** `.github/workflows/release.yml` builds the binary from the
+pinned toolchain and the committed lockfile, **runs `scripts/smoke-install.sh` against the artefact
+before packaging it**, and only then assembles
+`holonomy-<version>-x86_64-unknown-linux-gnu.tar.gz`: `bin/holonomy`, the licences and
+`THIRD_PARTY.md`, a `README-RELEASE.txt` that states in its first line that the build is unsigned,
+experimental and for one platform, a `.sha256`, and a `.provenance.txt` recording the commit, ref,
+target and the fact that no signature exists. Publishing is reachable **only** by pushing a `v*`
+tag — there is no manual path that can name a release after a branch — and the artefact is attached
+to a GitHub release whose body says what it is. A `workflow_dispatch` run builds and attests
+without publishing. Two consequences are deliberate: a tarball whose binary failed the smoke test is
+never uploaded, and "there is no packaged release" is no longer true, so the README's row says
+*unsigned, one platform, no installer* instead. **L-9 does not move:** its bound is the same file
+opened on a second machine, and a tarball is the prerequisite for that drill rather than the drill.
 
 **Done — the smoke test (D-72, D-73, D-74).** `scripts/smoke-install.sh` builds the release binary
 and drives it through a real pty, giving it a passphrase, a sentence and `Ctrl+Q`. It asserts that
@@ -326,9 +341,10 @@ from `scripts/drive-pty.py` because `script(1)` hangs (D-73).
 
 **Not done — and each needs something this environment does not have:**
 
-- **A release artefact per platform.** macOS and Windows builds need runner time and code signing;
-  the workspace has no release workflow at all, which is honest rather than hidden: there is nothing
-  to install yet because nothing is published.
+- **A release artefact per platform.** Linux x86_64 now exists (D-90). macOS and Windows still need
+  runner time, a second toolchain and code signing, and nothing is signed on any platform: the
+  artefact carries a `.sha256` and a `.provenance.txt` and says in its own README that there is no
+  signature to check.
 - **An install line that works.** `cargo install --path crates/holonomy-gui` would work for someone
   with the toolchain; a user without one has no path, and the README says so.
 - **L-9's portability claim.** It needs the same file opened on a second machine, which is the only

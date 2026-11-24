@@ -209,6 +209,30 @@ if [[ ! -f "$compacted" || "$compact_out" != *"compacted from"* ]]; then
 fi
 echo "smoke: ok — verify and compact subcommands authenticated and re-keyed the world-line"
 
+# --- 7. an ordinary quit still reports the save, and never a wipe verdict ---------------------
+# D-89 split `Ended` so a wipe is only ever reported from the reaper's own measured outcome, on the
+# same exit-status policy as a refused save (D-49). That is only safe if the *ordinary* path cannot
+# fall into it, so the transcript of a clean quit must carry the closing line's save verdict and
+# none of the wipe wording. `first.session` is the same run asserted in steps 1–2, so this adds no
+# session and cannot pass by re-running something easier.
+transcript="$(sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$first" | tr -d '\r')"
+if ! grep -qF "witnesses, saved" <<<"$transcript"; then
+  echo "smoke: FAIL — a clean quit did not report its save in the closing line" >&2
+  tail -20 <<<"$transcript" >&2
+  exit 1
+fi
+while IFS= read -r forbidden; do
+  if grep -qiF "$forbidden" <<<"$transcript"; then
+    echo "smoke: FAIL — an ordinary quit reported a wipe verdict: '$forbidden'" >&2
+    exit 1
+  fi
+done <<'FORBIDDEN'
+could not be confirmed
+FAILED verification
+emergency wipe
+FORBIDDEN
+echo "smoke: ok — a clean quit said 'saved' and claimed no wipe"
+
 # --- summary ----------------------------------------------------------------------------------
 # The marker is what CI greps, following the other measured jobs. The numbers are the ones this run
 # actually saw, so a failure is a diff and a pass is a record.

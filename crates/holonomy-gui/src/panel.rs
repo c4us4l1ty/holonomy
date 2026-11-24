@@ -199,17 +199,30 @@ impl Facts {
             );
         }
         if self.reaper_tripped {
+            if self.armed_arenas == 0 {
+                // Nothing was registered to scrub. "0/8 zeroized" would read as a defeat when the
+                // truth is that the set was empty, which is the failure worth naming (D-89).
+                return format!(
+                    "reaper: TRIPPED (no arena armed — nothing was proven wiped, {} canaries live)",
+                    self.ghost_canaries
+                );
+            }
             let zeroized = self.canaries_sampled.saturating_sub(self.ghost_canaries);
-            format!(
-                "reaper: TRIPPED ({} arenas, {zeroized}/{} canaries zeroized)",
-                self.armed_arenas, self.canaries_sampled
-            )
-        } else {
-            format!(
-                "reaper: armed ({} arenas, {}/{} canaries live)",
-                self.armed_arenas, self.ghost_canaries, self.canaries_sampled
-            )
+            return format!(
+                "reaper: TRIPPED ({} arenas, {zeroized}/{} canaries zeroized){}",
+                self.armed_arenas,
+                self.canaries_sampled,
+                if self.ghost_canaries == 0 {
+                    ""
+                } else {
+                    " — GHOSTS SURVIVED"
+                }
+            );
         }
+        format!(
+            "reaper: armed ({} arenas, {}/{} canaries live)",
+            self.armed_arenas, self.ghost_canaries, self.canaries_sampled
+        )
     }
 
     /// The panel, top to bottom.
@@ -342,5 +355,36 @@ mod tests {
             "{}",
             facts.worldline_line()
         );
+    }
+
+    // --- D-89: the reaper line distinguishes a clean wipe from one that proved nothing ----------
+
+    #[test]
+    fn a_wipe_with_no_arena_armed_is_not_reported_as_zeroized() {
+        // The defect this pins: a tripped reaper over an empty registry previously rendered
+        // "TRIPPED (0 arenas, 4/4 canaries zeroized)" from a stale `ghost_canaries` count, which
+        // reads as a successful wipe when nothing had been registered to wipe.
+        let mut facts = facts();
+        facts.reaper_tripped = true;
+        facts.armed_arenas = 0;
+        let line = facts.reaper_line();
+        assert!(line.contains("no arena armed"), "{line}");
+        assert!(line.contains("nothing was proven wiped"), "{line}");
+        assert!(
+            !line.contains("zeroized"),
+            "an empty registry must not be described as zeroized: {line}"
+        );
+    }
+
+    #[test]
+    fn a_tripped_reaper_with_a_surviving_canary_says_ghosts_survived() {
+        let mut facts = facts();
+        facts.reaper_tripped = true;
+        facts.armed_arenas = 3;
+        facts.canaries_sampled = 8;
+        facts.ghost_canaries = 1;
+        let line = facts.reaper_line();
+        assert!(line.contains("GHOSTS SURVIVED"), "{line}");
+        assert!(line.contains("7/8 canaries zeroized"), "{line}");
     }
 }
