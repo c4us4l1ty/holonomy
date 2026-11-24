@@ -541,14 +541,20 @@ fn run(
             }
             continue;
         }
-        let read = stdin.read(&mut bytes)?;
-        if read == 0 {
-            break;
-        }
+        let read = stdin.read(&mut bytes);
+        // EOF or a read error must not take the ordinary exit path if a trip fired during read.
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
             return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
         }
+        let read = read?;
+        if read == 0 {
+            break;
+        }
         tripwire.beat();
+        // A heartbeat may itself latch an already-expired deadline.
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+        }
         let mut inputs = decoder.feed_all(&bytes[..read]);
         // A read can end mid-sequence: `ESC` may be the Escape key or the start of an arrow the
         // terminal is still delivering. Only a stream that stays quiet for the grace period settles
@@ -558,6 +564,9 @@ fn run(
         }
         let mut quit = false;
         for input in inputs {
+            if reaper.has_tripped() || tripwire.evaluate().is_some() {
+                return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+            }
             let Input::Key(key, modifiers) = input else {
                 continue;
             };
@@ -704,9 +713,15 @@ fn run(
                 message = "the world-line refused the last edit".to_owned();
             }
         }
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
+        }
         if quit {
             break;
         }
+    }
+    if reaper.has_tripped() || tripwire.evaluate().is_some() {
+        return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
     }
     // Seal whatever is open before the window goes away: a quit is a save, and whether it worked is
     // part of what the window says on the way out (D-49).

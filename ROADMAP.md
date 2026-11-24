@@ -385,8 +385,9 @@ v3 died bolting a Wordcraft-shaped ribbon onto split geometry. v6 puts the toolb
 sits above the quiet-md page Block 6 installs, in the same window, in the same run tree.
 
 **Draft status (2026-11-22):** implementation is in progress; none of the gates below is claimed.
-A single-commit replace-all path and a cooperative reaper are under test (AUDIT D-82). The latter
-waits for the editor and does not guarantee L-7 latency or complete wipe coverage. A sparse-match
+A single-commit replace-all path and a cooperative reaper are under test (AUDIT D-82, D-84). A
+failed replacement after a draft flush can still change undo history. The reaper waits for the
+editor and does not guarantee L-7 latency or complete wipe coverage. A sparse-match
 search and replace on a real encrypted 30 M-word world-line measured less than 4 MiB of incremental
 live heap in CI (AUDIT D-83); it does not measure total process memory or prove dense-match bounds.
 

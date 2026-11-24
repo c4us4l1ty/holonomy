@@ -1242,11 +1242,20 @@ impl<S: SegmentSink> Typing<S> {
         if needle.is_empty() {
             return Ok(0);
         }
-        self.flush()?;
-        let matches = find_streaming(&self.spine, &self.draft, &self.sources, &[], needle, source)?;
+        // Search the live draft first: sealing a no-op would unnecessarily alter undo/redo
+        // history and write to the world-line. Sealing does not change document byte offsets.
+        let matches = find_streaming(
+            &self.spine,
+            &self.draft,
+            &self.sources,
+            self.pending(),
+            needle,
+            source,
+        )?;
         if matches.is_empty() || needle == replacement {
             return Ok(matches.len());
         }
+        self.flush()?;
 
         let mut chunks = Vec::new();
         let mut rest = replacement;
@@ -2490,6 +2499,37 @@ mod tests {
             self.spines.push(slabs);
             Ok(())
         }
+    }
+
+    #[test]
+    fn no_op_replacement_preserves_live_draft_and_history() {
+        struct NoSource;
+        impl SegmentSource for NoSource {
+            fn load(&mut self, _: SegmentId) -> Result<Vec<u8>, String> {
+                Err("the draft should not be sealed or loaded".to_owned())
+            }
+        }
+        let mut typing = session(64);
+        typing.mark();
+        typing.insert(b"hello world").unwrap();
+        let undo_depth = typing.undo_depth();
+        assert_eq!(
+            typing.replace_all(b"missing", b"x", &mut NoSource).unwrap(),
+            0
+        );
+        assert_eq!(
+            typing
+                .replace_all(b"hello", b"hello", &mut NoSource)
+                .unwrap(),
+            1
+        );
+        assert_eq!(typing.pending(), b"hello world");
+        assert_eq!(typing.undo_depth(), undo_depth);
+        assert!(typing.sink.segments.is_empty());
+        assert!(typing.undo().unwrap());
+        assert_eq!(typing.document_len(), 0);
+        assert!(typing.redo().unwrap());
+        assert_eq!(typing.pending(), b"hello world");
     }
 
     #[test]

@@ -68,6 +68,19 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-84 — Dead-man and no-op replacement follow-up.** A heartbeat arriving
+  after a dead-man deadline could previously erase an expiry before the watcher saw it, leaving
+  a cooperative wipe waiting indefinitely; expiry and heartbeat now compete on one atomic
+  heartbeat state, and expiry latches the reason and wakes the watcher. Regression tests cover
+  an observed expiry followed by a late heartbeat and a late heartbeat without a prior observer.
+  The terminal checks for a trip before treating EOF/read errors, input batches, or quit as normal
+  exit. These checks do not prove that every trip racing shutdown is handled, nor do they meet
+  L-7's 50 ms deadline when the UI is blocked. A no-match or identical replace now searches the
+  live draft without flushing, preserving its undo/redo history. A real replacement still flushes
+  the draft before its atomic transaction; if the later replacement commit fails, that flush can
+  change undo/redo state even though the replacement was not published. This residual is not
+  covered by the clean-spine failure test and remains a blocker. Changes await full pinned CI.
+
 - **2026-11-22 — D-83 — Encrypted sparse search memory diagnostic.** Push CI run
   [45238499667](https://github.com/c4us4l1ty/holonomy/actions/runs/45238499667) on
   `17161dd` ran the release-mode `encrypted_search_memory` test successfully: a reopened,

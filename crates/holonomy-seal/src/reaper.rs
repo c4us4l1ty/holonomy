@@ -472,23 +472,65 @@ impl Tripwire {
     }
 
     fn now_ns(&self) -> u64 {
-        u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        // Reserve MAX as the heartbeat state meaning an expiry is being published.
+        u64::try_from(self.origin.elapsed().as_nanos())
+            .unwrap_or(u64::MAX - 1)
+            .min(u64::MAX - 1)
     }
 
-    /// Refreshes the dead-man heartbeat timestamp.
+    // Claim an expired heartbeat before publishing the trip. The CAS makes expiry and a
+    // concurrent heartbeat mutually exclusive: a late beat cannot revive an expired timer.
+    fn latch_expired(&self, last: u64) -> bool {
+        if self
+            .last_beat_ns
+            .compare_exchange(last, u64::MAX, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let deadline = last.saturating_add(self.deadman_timeout_ns).max(1);
+        self.fire_at(TripReason::DeadmanTimeout, deadline);
+        true
+    }
+
+    /// Refreshes the dead-man heartbeat timestamp, unless the deadline has already expired.
     pub fn beat(&self) {
-        self.last_beat_ns.store(self.now_ns(), Ordering::Release);
+        loop {
+            if self.explicit_reason.load(Ordering::Acquire) != 0 {
+                return;
+            }
+            let last = self.last_beat_ns.load(Ordering::Acquire);
+            if last == u64::MAX {
+                spin_loop();
+                continue;
+            }
+            let now = self.now_ns();
+            if self.deadman_timeout_ns != u64::MAX
+                && now.saturating_sub(last) > self.deadman_timeout_ns
+            {
+                if self.latch_expired(last) {
+                    return;
+                }
+            } else if self
+                .last_beat_ns
+                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
     /// Fires an immediate tripwire (`Manual`, `Suspend`, or `UmbilicalDisconnect`).
     pub fn fire(&self, reason: TripReason) {
-        let now = self.now_ns().max(1);
-        // Publish `tripped_at_ns` *before* `explicit_reason` so a concurrent `evaluate()` that
-        // `Acquire`-loads `explicit_reason != 0` always observes the real trip timestamp rather
-        // than a zero sentinel clamped to `1`.
+        self.fire_at(reason, self.now_ns().max(1));
+    }
+
+    fn fire_at(&self, reason: TripReason, at: u64) {
+        // Publish the timestamp before the reason, so an acquiring reader sees both.
         let _ = self
             .tripped_at_ns
-            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
+            .compare_exchange(0, at, Ordering::AcqRel, Ordering::Acquire);
         let _ = self.explicit_reason.compare_exchange(
             0,
             reason as u8,
@@ -500,23 +542,31 @@ impl Tripwire {
         }
     }
 
-    /// Evaluates whether the tripwire has fired at the current monotonic instant.
+    /// Evaluates whether the tripwire has fired at the current monotonic instant. Once a
+    /// dead-man deadline expires, observing it permanently latches the trip.
     #[must_use]
     pub fn evaluate(&self) -> Option<(TripReason, u64)> {
-        let code = self.explicit_reason.load(Ordering::Acquire);
-        if let Some(reason) = TripReason::from_code(code) {
-            let at = self.tripped_at_ns.load(Ordering::Acquire).max(1);
-            return Some((reason, at));
-        }
-        if self.deadman_timeout_ns != u64::MAX {
-            let now = self.now_ns();
+        loop {
+            let code = self.explicit_reason.load(Ordering::Acquire);
+            if let Some(reason) = TripReason::from_code(code) {
+                let at = self.tripped_at_ns.load(Ordering::Acquire).max(1);
+                return Some((reason, at));
+            }
             let last = self.last_beat_ns.load(Ordering::Acquire);
-            if now.saturating_sub(last) > self.deadman_timeout_ns {
-                let deadline = last.saturating_add(self.deadman_timeout_ns).max(1);
-                return Some((TripReason::DeadmanTimeout, deadline));
+            if last == u64::MAX {
+                // The winner of the expiry CAS is publishing the reason.
+                spin_loop();
+                continue;
+            }
+            if self.deadman_timeout_ns == u64::MAX
+                || self.now_ns().saturating_sub(last) <= self.deadman_timeout_ns
+            {
+                return None;
+            }
+            if self.latch_expired(last) {
+                continue;
             }
         }
-        None
     }
 }
 
@@ -823,6 +873,55 @@ mod tests {
         assert_eq!(result.canaries.ghost_bytes, 0);
         arenas.unregister(slot);
         assert!(editor_bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn deadman_expiry_survives_a_late_heartbeat_and_wakes_reaper() {
+        let arenas = SecretArenas::new();
+        let mut canaries = CanarySet::new(2, 128);
+        assert_eq!(canaries.arm_all(&arenas), 2);
+        let canaries = Arc::new(canaries);
+        let tripwire = Tripwire::new(Some(Duration::from_millis(2)));
+        tripwire.beat();
+        // Park long enough to ensure the UI, rather than the worker, observes expiry first.
+        let guard = ReaperGuard::spawn_cooperative(
+            arenas,
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_secs(10),
+        );
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+        tripwire.beat();
+        assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+        // SAFETY: no other thread accesses the registered canaries until the join completes.
+        unsafe { guard.acknowledge_quiescence() };
+        let outcome = guard.wait_outcome().unwrap();
+        assert_eq!(outcome.reason, TripReason::DeadmanTimeout);
+        assert_eq!(outcome.canaries.ghost_bytes, 0);
+    }
+
+    #[test]
+    fn racing_late_heartbeat_and_observer_cannot_clear_expiry() {
+        for _ in 0..16 {
+            let tripwire = Tripwire::new(Some(Duration::from_millis(1)));
+            tripwire.beat();
+            thread::sleep(Duration::from_millis(4));
+            let other = Arc::clone(&tripwire);
+            let heartbeat = thread::spawn(move || other.beat());
+            assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+            heartbeat.join().unwrap();
+            assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
+        }
+    }
+
+    #[test]
+    fn late_beat_alone_latches_expired_deadman() {
+        let tripwire = Tripwire::new(Some(Duration::from_millis(2)));
+        tripwire.beat();
+        thread::sleep(Duration::from_millis(10));
+        tripwire.beat();
+        assert_eq!(tripwire.evaluate().unwrap().0, TripReason::DeadmanTimeout);
     }
 
     #[test]
