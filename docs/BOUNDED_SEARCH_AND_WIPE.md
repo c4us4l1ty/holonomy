@@ -41,6 +41,15 @@ thread may read or mutate it is a data race, even with volatile stores; a mutex 
 acknowledgement cannot provide a 50 ms deadline if its holder is indefinitely blocked. Killing a
 process or discarding pages is not proof that all plaintext was zeroed or that canaries verified.
 
+A Linux-only test prototype now lives in `crates/holonomy-seal/tests/supervisor_probe.rs`. It
+executes a separate controlled worker with a 4 MiB shared memfd, confirms a group stop and then
+process exit, and only then wipes and verifies that shared mapping. The worker is tested in socket
+read, lock-holding spin, and multithreaded cases; an unconfirmed stop refuses to wipe. The measured
+trip-to-verification time includes a pre-wipe negative-control read. The worker is terminated, not
+resumed. The prototype is not wired to the editor, and its known shared mapping is neither all
+plaintext nor an audited protected arena. It does not verify private heap, stack, registers, keys,
+terminal output or descendants, and the stop/exit and cleanup waits have no hard real-time bound.
+
 A possible platform-specific design is a supervisor isolated from the editor process: keep all
 plaintext and keys in explicitly inventoried, locked, shared wipe arenas; prohibit uncontrolled
 plaintext copies; and on a trip use an OS-supported mechanism to stop every editor thread, with a

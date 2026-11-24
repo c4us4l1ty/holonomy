@@ -68,6 +68,19 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-86 — Linux isolated supervisor experiment, not L-7.** Added a test-only
+  subprocess probe: a controlled worker owns a 4 MiB memfd mapping while blocked in an observed
+  socket read, spinning while holding a lock, or running a concurrent writer. The supervisor
+  confirms a group stop, kills the worker, confirms its exit, then wipes and verifies the shared
+  mapping; an unconfirmed stop refuses the wipe. The timer includes a pre-wipe negative control.
+  Locally, an optimized Rust 1.99 build with the real libc 0.2.191 source passed 12 trials
+  (p50 3,733 µs, max 5,351 µs, zero ghosts, no trial over 50 ms); debug timings exceeded 50 ms.
+  This is host-specific prototype evidence only: the live editor, private allocations, stacks,
+  registers, terminal copies, descendants, page locking, external interference and uninterruptible
+  waits are not covered. SIGKILL or process exit is not itself a verified wipe, and the cleanup
+  path may block indefinitely. The L-7 deadline and production wipe coverage remain unproven.
+  Pinned full-workspace CI and the separate release-mode probe are pending.
+
 - **2026-11-22 — D-85 — Bounded dense search work; gates remain open.** Added a visitor and
   count/index API that avoid accumulating match positions, limit needle size, and use small scan
   windows so a heavily fragmented spine cannot fill a full-document span vector. The terminal's
