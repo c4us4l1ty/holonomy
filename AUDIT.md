@@ -68,6 +68,31 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-22 — D-87 — Supervisor probe bug hunt.** A worker externally reaped before a
+  signal could make numeric-PID cleanup target a reused PID. After setup, the Linux prototype now
+  signals and waits through a pidfd, with a stale-pidfd/external-reaper regression; its initial
+  `pidfd_open` still is not atomic with child creation and is not a production-safe spawn design.
+  Added a nonzero-canary negative control and made a verification ghost an error rather than a
+  successful report. The probe requires Linux pidfd and `waitid(P_PIDFD)` support; its tests are
+  ignored in ordinary workspace runs and explicitly exercised by the Linux CI measurement.
+  Pinned CI is pending. This does not establish L-7 or complete live-editor wipe coverage.
+
+- **2026-11-22 — D-86 — Linux isolated supervisor experiment, not L-7.** Added a test-only
+  subprocess probe: a controlled worker owns a 4 MiB memfd mapping while blocked in an observed
+  socket read, spinning while holding a lock, or running a concurrent writer. The supervisor
+  confirms a group stop, kills the worker, confirms its exit, then wipes and verifies the shared
+  mapping; an unconfirmed stop refuses the wipe. The timer includes a pre-wipe negative control.
+  Locally, an optimized Rust 1.99 build with the real libc 0.2.191 source passed 12 trials
+  (p50 3,733 µs, max 5,351 µs, zero ghosts, no trial over 50 ms); debug timings exceeded 50 ms.
+  This is host-specific prototype evidence only: the live editor, private allocations, stacks,
+  registers, terminal copies, descendants, page locking, external interference and uninterruptible
+  waits are not covered. SIGKILL or process exit is not itself a verified wipe, and the cleanup
+  path may block indefinitely. The L-7 deadline and production wipe coverage remain unproven.
+  Pinned push CI [45333626167](https://github.com/c4us4l1ty/holonomy/actions/runs/45333626167)
+  passed the workspace and release probe: 12 shared-arena trials, p50 2,768 µs, max 4,261 µs,
+  zero ghosts and zero trials over 50 ms. These CI timings include the negative-control scan and
+  are not reference-hardware certification or evidence of a live-editor deadline.
+
 - **2026-11-22 — D-85 — Bounded dense search work; gates remain open.** Added a visitor and
   count/index API that avoid accumulating match positions, limit needle size, and use small scan
   windows so a heavily fragmented spine cannot fill a full-document span vector. The terminal's
