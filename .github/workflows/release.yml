@@ -100,18 +100,24 @@ jobs:
             -czf "target/package/${STEM}.tar.gz" "${STEM}"
 
           # Provenance next to the artifact: what it was built from and how.
+          #
+          # The smoke line says "gated", not "passed". This step runs *after* the smoke step, so a
+          # failure would already have stopped the job — but this step cannot read that result, and
+          # writing a fact it did not observe is the class of claim the project refuses. The run log
+          # carries the actual `HOLONOMY_SMOKE` numbers.
           (
             cd target/package
             sha256sum "${STEM}.tar.gz" > "${STEM}.tar.gz.sha256"
             {
-              echo "artifact: ${STEM}.tar.gz"
-              echo "commit:   ${GITHUB_SHA}"
-              echo "ref:      ${GITHUB_REF}"
-              echo "target:   ${TARGET}"
+              echo "artifact:  ${STEM}.tar.gz"
+              echo "commit:    ${GITHUB_SHA}"
+              echo "ref:       ${GITHUB_REF}"
+              echo "target:    ${TARGET}"
               echo "toolchain: pinned by rust-toolchain.toml (channel 1.100.0)"
-              echo "built:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-              echo "smoke:    passed (scripts/smoke-install.sh before packaging)"
-              echo "signed:   no — there is no signing key; do not treat this as an attested binary"
+              echo "built:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "smoke:     gated — scripts/smoke-install.sh runs earlier in the same job, so a"
+              echo "           failure stops the build before packaging; the numbers are in the run log"
+              echo "signed:    no — there is no signing key; do not treat this as an attested binary"
             } > "${STEM}.provenance.txt"
           )
 
