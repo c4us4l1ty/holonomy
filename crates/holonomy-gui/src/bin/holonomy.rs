@@ -28,13 +28,13 @@
 //! nothing older (D-64).
 
 use holonomy_eye::Fixed;
-use holonomy_gui::panel::Facts;
+use holonomy_gui::panel::{self, Facts};
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers, SealWipeBridge};
 use holonomy_seal::{
-    probe_capability, CanarySet, LockCapability, PassphraseInput, ReaperGuard, SecretArenas,
-    TripReason, Tripwire, MAX_PASSPHRASE_INPUT_BYTES,
+    probe_capability, CanarySet, LockCapability, PassphraseInput, ReaperGuard, ReaperOutcome,
+    SchedClass, SecretArenas, TripReason, Tripwire, MAX_PASSPHRASE_INPUT_BYTES,
 };
 use holonomy_shell::{Editor, Effect, Intent};
 use holonomy_text::{ResidentSet, Typing};
@@ -301,8 +301,119 @@ enum Ended {
     Saved,
     /// The last save was refused: the bytes are in memory and the file does not have them.
     SaveFailed,
-    /// Emergency reaper wipe fired (`Ctrl+L` or deadman timeout): resident memory was zeroized.
-    Wiped,
+    /// Emergency reaper wipe fired (`Ctrl+L` or deadman timeout) and a wipe was **confirmed**:
+    /// the reaper ran, reported that it scrubbed at least one registered arena, and read back no
+    /// surviving canary byte. This is a receipt, not a proof of total coverage — see
+    /// [`WipeReceipt`] and `docs/WIPE_SUPERVISOR_REVIEW.md` for what it does not cover.
+    Wiped(WipeReceipt),
+    /// Emergency reaper wipe fired but could **not** be confirmed: the reaper join produced no
+    /// outcome, it scrubbed no arenas, or a canary survived. The window must say this rather than
+    /// claim a wipe (D-89) — an unconfirmed wipe is an *unmet protection*, not a success.
+    WipeUnconfirmed(WipeUnconfirmed),
+}
+
+/// The measured facts of a wipe that was confirmed, kept so the window can show them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WipeReceipt {
+    /// Bytes of registered plaintext and key material volatile-zeroed.
+    bytes_wiped: usize,
+    /// Registered arenas the reaper actually scrubbed. Coverage of *all* resident plaintext is a
+    /// larger claim than this number, which is why the sentence it renders says "registered
+    /// arenas only".
+    arenas_wiped: usize,
+    /// Canary buffers read back after the wipe.
+    canaries: usize,
+    /// Monotonic microseconds from the tripwire's instant to verified zero canaries.
+    trip_to_verified_us: u64,
+    /// Whether the reaper got real-time scheduling on this host, so the number is read honestly.
+    real_time: bool,
+}
+
+/// Why a wipe could not be confirmed, in the reaper's own terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WipeUnconfirmed {
+    /// The reaper thread produced no outcome (join yielded nothing).
+    NoOutcome,
+    /// The reaper ran, but nothing was registered to scrub: resident plaintext was never armed, so
+    /// zero bytes may have been wiped.
+    NothingArmed,
+    /// The reaper ran and canaries were read back, but `ghost_canaries` of them still held non-zero
+    /// bytes. The invariant broke *on this machine*, and the window says so.
+    Ghosts {
+        /// Canary buffers with at least one surviving non-zero byte.
+        ghost_canaries: usize,
+        /// Total surviving non-zero bytes.
+        ghost_bytes: usize,
+    },
+}
+
+impl WipeUnconfirmed {
+    /// A sentence for the closing line, in voice with the window's other outcome words.
+    fn describe(self) -> String {
+        match self {
+            Self::NoOutcome => {
+                "emergency wipe fired but could not be confirmed — the reaper reported no outcome"
+                    .to_owned()
+            }
+            Self::NothingArmed => {
+                "emergency wipe fired but could not be confirmed — no resident arena was armed, \
+                 so nothing was proven wiped"
+                    .to_owned()
+            }
+            Self::Ghosts {
+                ghost_canaries,
+                ghost_bytes,
+            } => format!(
+                "emergency wipe FAILED verification — {ghost_canaries} canar{} still held \
+                 {ghost_bytes} bytes: the wipe invariant broke on this machine",
+                if ghost_canaries == 1 { "y" } else { "ies" }
+            ),
+        }
+    }
+}
+
+impl WipeReceipt {
+    /// Decides what a reaper outcome is entitled to claim.
+    ///
+    /// This is the whole of D-89: `wipe_quiescent` used to drop the outcome on the floor and the
+    /// window printed a fixed sentence that neither affirmed nor denied a wipe. Splitting the
+    /// outcome here means the *confirmed* branch can only be reached by an outcome that actually
+    /// scrubbed bytes and left no ghost, and every other shape has to say so.
+    fn from_outcome(outcome: &ReaperOutcome) -> Result<Self, WipeUnconfirmed> {
+        if outcome.canaries.ghost_canaries > 0 {
+            return Err(WipeUnconfirmed::Ghosts {
+                ghost_canaries: outcome.canaries.ghost_canaries,
+                ghost_bytes: outcome.canaries.ghost_bytes,
+            });
+        }
+        if outcome.wipe.arenas_wiped == 0 || outcome.wipe.bytes_wiped == 0 {
+            return Err(WipeUnconfirmed::NothingArmed);
+        }
+        Ok(Self {
+            bytes_wiped: outcome.wipe.bytes_wiped,
+            arenas_wiped: outcome.wipe.arenas_wiped,
+            canaries: outcome.canaries.canaries_sampled,
+            trip_to_verified_us: outcome.trip_to_verified_ns / 1_000,
+            real_time: outcome.sched_class == SchedClass::RealTime,
+        })
+    }
+
+    /// What the window says on the way out after a confirmed wipe.
+    fn describe(self) -> String {
+        format!(
+            "emergency wipe confirmed — {} across {} arenas, {} canaries clean, {} µs to verified \
+             ({}; coverage is registered arenas only)",
+            panel::human(self.bytes_wiped),
+            self.arenas_wiped,
+            self.canaries,
+            self.trip_to_verified_us,
+            if self.real_time {
+                "real-time reaper"
+            } else {
+                "normal-priority reaper"
+            }
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -388,6 +499,12 @@ fn unchanged(
 
 // Only the UI thread owns the editor and document. Register fresh pointers after it has stopped
 // editing, then let the worker wipe; do not touch registered allocations until it has joined.
+//
+// D-89: the reaper's outcome is the *only* thing entitled to say a wipe happened, so it is kept
+// and classified rather than dropped. `acknowledge_quiescence` is called before the join: it is
+// this thread reporting that it has stopped touching the registered buffers, which is exactly the
+// condition `wipe_quiescent` exists to establish — so the reaper is never left waiting on a
+// "cooperative" gate for a deadline it already cannot meet.
 fn wipe_quiescent(
     app: &mut Window,
     document: &Document,
@@ -405,9 +522,21 @@ fn wipe_quiescent(
     // SAFETY: this thread holds the only app/document handles used by the editor, and it does not
     // access the registered buffers or canaries again until the worker has joined.
     unsafe { reaper.acknowledge_quiescence() };
-    let _ = reaper.wait_outcome();
-    app.editor().wipe_all_in_place();
-    Ended::Wiped
+    match reaper.wait_outcome() {
+        Some(outcome) => match WipeReceipt::from_outcome(&outcome) {
+            Ok(receipt) => {
+                // The reaper has joined, so the editor's own viewport buffer can be scrubbed in
+                // place without racing it.
+                app.editor().wipe_all_in_place();
+                Ended::Wiped(receipt)
+            }
+            // The unconfirmed branch deliberately does *not* run the in-place scrub: an
+            // unverified wipe gets no supporting gesture, because a scrub the window cannot
+            // measure would be the decorative evidence this branch exists to refuse.
+            Err(unconfirmed) => Ended::WipeUnconfirmed(unconfirmed),
+        },
+        None => Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome),
+    }
 }
 
 fn run(
@@ -848,15 +977,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             let summary = match outcome {
-                Ok(Ended::Wiped) => "emergency wipe attempted — full memory coverage not verified",
+                // An unconfirmed wipe must not exit zero: a person scripting around this app has to
+                // see the protection fail, exactly as a refused save exits non-zero (D-49).
+                Ok(Ended::Wiped(receipt)) => {
+                    println!("{}", receipt.describe());
+                    outcome_words(false, None)
+                }
+                Ok(Ended::WipeUnconfirmed(reason)) => {
+                    println!("{}", reason.describe());
+                    outcome_words(true, None)
+                }
                 Ok(Ended::SaveFailed) => outcome_words(false, Some(false)),
                 Ok(Ended::Saved) => outcome_words(false, Some(true)),
                 Ok(Ended::NothingToWrite) => outcome_words(false, None),
                 Err(_) => outcome_words(true, None),
             };
             println!("{}", closing(&path, segments, witnesses, summary));
-            if matches!(outcome, Ok(Ended::SaveFailed)) {
-                // A window that could not write must not exit as though it had.
+            if matches!(outcome, Ok(Ended::SaveFailed | Ended::WipeUnconfirmed(_))) {
+                // A window that could not write, or could not verify its own wipe, must not exit as
+                // though it had.
                 std::process::exit(1);
             }
             outcome.map(|_| ())
@@ -867,6 +1006,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use holonomy_seal::{CanaryReport, WipeStats};
 
     #[test]
     fn a_failed_save_is_never_called_saved() {
@@ -952,5 +1092,121 @@ mod tests {
         assert!(read_passphrase_from(&mut eof, None).is_err());
         let mut empty = b"\n".as_slice();
         assert!(read_passphrase_from(&mut empty, None).is_err());
+    }
+
+    // --- D-89: a wipe is claimed only when the reaper measured it ----------------------------
+
+    fn outcome(
+        arenas_wiped: usize,
+        bytes_wiped: usize,
+        ghost_canaries: usize,
+        ghost_bytes: usize,
+    ) -> ReaperOutcome {
+        ReaperOutcome {
+            reason: TripReason::Manual,
+            sched_class: SchedClass::NormalFallback,
+            wipe: WipeStats {
+                arenas_wiped,
+                bytes_wiped,
+            },
+            canaries: CanaryReport {
+                canaries_sampled: 8,
+                bytes_sampled: 2048,
+                ghost_canaries,
+                ghost_bytes,
+            },
+            trip_to_wiped_ns: 300,
+            trip_to_verified_ns: 880_000,
+        }
+    }
+
+    #[test]
+    fn a_wiped_arena_with_no_ghost_is_the_only_confirmed_wipe() {
+        // The one shape entitled to say "confirmed": bytes were actually scrubbed and every canary
+        // read back zero.
+        let receipt = WipeReceipt::from_outcome(&outcome(1041, 4_324_384, 0, 0))
+            .expect("a clean, non-empty wipe is confirmed");
+        assert_eq!(receipt.bytes_wiped, 4_324_384);
+        assert_eq!(receipt.arenas_wiped, 1041);
+        assert_eq!(receipt.canaries, 8);
+        // Nanoseconds are reported in microseconds, so a sub-millisecond wipe is not rounded to 0.
+        assert_eq!(receipt.trip_to_verified_us, 880);
+        assert!(!receipt.real_time, "a fallback-scheduled reaper must say so");
+        let described = receipt.describe();
+        assert!(described.contains("confirmed"), "{described}");
+        assert!(described.contains("1041 arenas"), "{described}");
+        assert!(
+            described.contains("normal-priority reaper"),
+            "the receipt must not imply a real-time guarantee it did not get: {described}"
+        );
+    }
+
+    #[test]
+    fn a_wipe_that_scrubbed_nothing_is_never_called_confirmed() {
+        // Zero armed arenas means zero bytes may have been wiped. A window that called this
+        // "confirmed" would be the decorative-security failure L-7 exists to prevent.
+        assert_eq!(
+            WipeReceipt::from_outcome(&outcome(0, 0, 0, 0)),
+            Err(WipeUnconfirmed::NothingArmed)
+        );
+        assert!(
+            WipeUnconfirmed::NothingArmed
+                .describe()
+                .contains("could not be confirmed")
+        );
+    }
+
+    #[test]
+    fn a_surviving_canary_outranks_everything_else() {
+        // Even a large wipe with a single surviving canary is a failure, and it is reported with
+        // the counts rather than as a generic error.
+        let reason = WipeReceipt::from_outcome(&outcome(1041, 4_324_384, 1, 4096))
+            .expect_err("a ghost canary must not be confirmed");
+        assert_eq!(
+            reason,
+            WipeUnconfirmed::Ghosts {
+                ghost_canaries: 1,
+                ghost_bytes: 4096
+            }
+        );
+        let described = reason.describe();
+        assert!(described.contains("FAILED verification"), "{described}");
+        assert!(described.contains("1 canary"), "{described}");
+        assert!(described.contains("4096 bytes"), "{described}");
+        // Pluralisation is not cosmetic here: the sentence is the only thing a user reads.
+        let plural = WipeUnconfirmed::Ghosts {
+            ghost_canaries: 3,
+            ghost_bytes: 12,
+        }
+        .describe();
+        assert!(plural.contains("3 canaries"), "{plural}");
+    }
+
+    #[test]
+    fn an_outcome_that_never_arrived_is_not_a_wipe() {
+        assert!(
+            WipeUnconfirmed::NoOutcome
+                .describe()
+                .contains("could not be confirmed")
+        );
+    }
+
+    #[test]
+    fn a_confirmed_wipe_is_the_only_wipe_that_does_not_end_the_session_badly() {
+        // The exit status is the contract for anyone scripting around the app: an unconfirmed
+        // wipe exits non-zero, exactly as a refused save does (D-49). Pinned here so a future
+        // refactor cannot quietly route it through `outcome_words(false, None)`.
+        let ended: Ended = Ended::Wiped(
+            WipeReceipt::from_outcome(&outcome(2, 4096, 0, 0)).expect("clean wipe confirmed"),
+        );
+        assert!(
+            !matches!(ended, Ended::SaveFailed | Ended::WipeUnconfirmed(_)),
+            "a confirmed wipe is not a failure"
+        );
+        let unconfirmed: Ended = Ended::WipeUnconfirmed(WipeUnconfirmed::NoOutcome);
+        assert!(
+            matches!(unconfirmed, Ended::WipeUnconfirmed(_)),
+            "an unconfirmed wipe must take the non-zero exit path"
+        );
     }
 }

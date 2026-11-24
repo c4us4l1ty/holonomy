@@ -60,6 +60,13 @@ about its own memory, `Esc` dismisses that panel, and `Ctrl+Q` or `Ctrl+C` quits
 is open — if that last save is refused, the window says so and exits non-zero rather than claiming
 success (D-49).
 
+A wipe is reported by its own evidence, on that same policy (D-89). The window keeps the reaper's
+measured outcome instead of discarding it: **confirmed** prints the bytes, arenas, canaries and
+microseconds it actually scrubbed and exits 0; an outcome that is absent, that scrubbed no arena,
+or in which a canary still held a non-zero byte prints the reason — `emergency wipe FAILED
+verification` when a ghost survived — and **exits 1**. That is a receipt about the arenas the
+editor registered, not a proof of complete coverage; see the row below.
+
 A **seal** is the unit of durability: when the 16 KiB buffer fills, its bytes are appended to the
 world-line and witnessed, so text is on disk once it has sealed. The open buffer and any structural
 edits (mid-segment insertions, cuts, or post-save undos) are committed by `Ctrl+S`, by an autosave
@@ -90,7 +97,7 @@ detail lives.
 | GPU backend, font shaping, IME | **Not built** — the window is a grid of cells (`GSUB`/`GPOS` glyph shaping is OQ-24) | `docs/TO-APP.md` M4b-ii |
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
 | Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection** (`displaced = 0`, split selection spans); contextual glyph joining (`GSUB`/`GPOS`) is not built | OQ-11 (D-77), OQ-24 |
-| Emergency wipe & zeroize canaries (`L-7`) | **Not qualified.** Historical headless tests wipe selected buffers and canaries; the live reaper is cooperative and can stall with the UI. Complete plaintext coverage and a 50 ms deadline are unproven. A Linux isolated-supervisor test is not wired into the editor. | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-82–D-87) |
+| Emergency wipe & zeroize canaries (`L-7`) | **Not qualified.** Historical headless tests wipe selected buffers and canaries; the live reaper is cooperative and can stall with the UI, so a blocked window cannot meet the 50 ms deadline. The window now reports a wipe by the reaper's own outcome and exits 1 when it cannot be confirmed (D-89), but that is a receipt for *registered* arenas, not complete plaintext coverage. A Linux isolated-supervisor test is not wired into the editor. | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-82–D-89) |
 | Crash before a save | **Unsaved edits can be lost.** The open typing buffer and unsaved structural changes are not durable until a successful commit; physical power-loss behavior remains unqualified. | D-64, OQ-29/OQ-30 |
 | Search and replace | **Available with limits.** Find streams matches; replace-all refuses more than 16,384 matches when the needle and replacement differ. Total-process-memory and dense-replacement gates remain open. | `holonomy-text::search`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-85) |
 | Documents open at once | **One**, one window, one caret. No panes or settings | — |

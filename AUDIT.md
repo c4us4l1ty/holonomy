@@ -68,6 +68,46 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-24 — D-89 — The window discarded its own wipe evidence; a confirmed wipe now exits 0
+  and an unconfirmed one exits 1.** Found while writing an inventory of what the *live* editor can
+  say about `L-7` rather than what the headless harness measures. `holonomy-gui`'s
+  `wipe_quiescent` called `let _ = reaper.wait_outcome()` — the `ReaperOutcome` carries
+  `bytes_wiped`, `arenas_wiped`, `canaries.ghost_canaries`, `ghost_bytes` and
+  `trip_to_verified_ns`, and every one of those was dropped on the floor. The window then printed
+  the fixed string `"emergency wipe attempted — full memory coverage not verified"` and **exited
+  0**, so a session in which the canary read-back found a surviving byte was indistinguishable, to
+  a person or a script, from one in which the wipe was clean. That is D-49's defect (a failed save
+  exited 0) in the one place the project cannot afford it: the runtime protection.
+  Fixed by classifying the outcome instead of discarding it. `WipeReceipt::from_outcome` yields
+  `WipeReceipt` (bytes, arenas, canaries, µs to verified, and whether scheduling was real-time)
+  only when at least one arena was actually scrubbed **and** no canary survived; every other shape
+  becomes a `WipeUnconfirmed` — `NoOutcome` (join yielded nothing), `NothingArmed` (`arenas_wiped
+  == 0`, so zero bytes may have been wiped) or `Ghosts { ghost_canaries, ghost_bytes }` — which
+  prints the reason and exits 1 on the same policy as a refused save. `Ended::Wiped` became
+  `Ended::Wiped(WipeReceipt)` / `Ended::WipeUnconfirmed(_)` so the compiler forces every site to
+  handle both. The unconfirmed branch deliberately does **not** run the in-place editor scrub: an
+  unverified wipe gets no supporting gesture.
+  The panel had the matching defect one level down: a tripped reaper over an **empty** registry
+  rendered `"reaper: TRIPPED (0 arenas, 4/4 canaries zeroized)"` — a *successful*-looking sentence
+  built from a stale ghost count — and a tripped reaper with survivors said nothing about them.
+  `Facts::reaper_line` now names `"no arena armed — nothing was proven wiped"` for the empty case
+  and appends `"— GHOSTS SURVIVED"` when canaries remain, so the two failure shapes can no longer
+  read as success.
+  Tests pin the classification, not the prose: five bin tests cover the confirmed shape (including
+  that a fallback-scheduled reaper is described as such and nanoseconds are reported as
+  microseconds), zero-arena, a single ghost outranking a large wipe, pluralisation, and that only a
+  confirmed wipe avoids the non-zero exit path; two panel tests cover the empty-registry and
+  ghost-bearing lines. Not yet run on CI as of this entry — the environment that wrote it has no
+  Rust toolchain (AUDIT OQ-1), so the next push's `clippy -D warnings` and `test` jobs are the
+  compiler of record for it.
+  **What this does not claim.** It is a receipt about *registered* arenas, not coverage of resident
+  plaintext: the inventory in `docs/WIPE_SUPERVISOR_REVIEW.md` is still the list of what escapes
+  registration (passphrase parsing, the KDF arena, terminal strings and scrollback, stacks,
+  registers, descendants). The watcher is still cooperative, so a blocked UI thread still cannot
+  meet the 50 ms deadline from the tripwire. `L-7` therefore stays `spec` in `docs/GATES.md`; what
+  changed is that the *live* editor no longer has a code path that can call an unverified wipe a
+  success, which is the part of L-7 the shipped window can enforce today.
+
 - **2026-11-22 — D-88 — Wipe inventory and atomic-identity prototype.** Corrected the README's
   overstated live-wipe and obsolete no-search claims. `docs/WIPE_SUPERVISOR_REVIEW.md` inventories
   current plaintext/key sources and their known coverage gaps, and specifies failure and review

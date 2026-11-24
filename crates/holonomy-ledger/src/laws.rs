@@ -210,7 +210,9 @@ pub const BUDGETS: &[Budget] = &[
         law: "L-7",
         measured_by: Some(
             "`holonomy-text` tests::wipe_gate fires the reaper across a 4 MiB ResidentSet, live \
-             capability keys and 32 zeroize canaries and prints HOLONOMY_WIPE_GATE",
+             capability keys and 32 zeroize canaries and prints HOLONOMY_WIPE_GATE; the shipped \
+             window keeps `ReaperOutcome` and reports a confirmed wipe (counts, exit 0) versus an \
+             unconfirmed one (reason, exit 1) — AUDIT D-89",
         ),
         owes: "OS suspend / USB-yank hooks wired into the shipped window and reference-hardware \
                calibration — Block 9's OS shell and Block 10",
