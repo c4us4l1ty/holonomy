@@ -70,36 +70,46 @@ pub(crate) struct GlyphSlot {
     pub lig_id: u16,
 }
 
-/// 1024-bit modulo glyph filter (`gid & 1023`) for O(1) lookup skipping with zero false negatives.
+/// 4096-bit modulo glyph filter (`gid & 4095`) for O(1) lookup skipping with zero false negatives.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct CovMask([u64; 16]);
+struct CovMask([u64; 64]);
 
 impl CovMask {
     const fn empty() -> Self {
-        Self([0; 16])
+        Self([0; 64])
     }
 
     const fn all() -> Self {
-        Self([u64::MAX; 16])
+        Self([u64::MAX; 64])
     }
 
     #[inline]
     fn insert(&mut self, gid: u16) {
-        let word = usize::from(gid >> 6) & 15;
+        let word = usize::from(gid >> 6) & 63;
         let bit = gid & 63;
         self.0[word] |= 1u64 << bit;
     }
 
     #[inline]
     fn union_with(&mut self, other: &Self) {
-        for i in 0..16 {
+        for i in 0..64 {
             self.0[i] |= other.0[i];
         }
     }
 
     #[inline]
+    fn is_subset_of(&self, other: &Self) -> bool {
+        for i in 0..64 {
+            if (self.0[i] & !other.0[i]) != 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
     fn contains(&self, gid: u16) -> bool {
-        let word = usize::from(gid >> 6) & 15;
+        let word = usize::from(gid >> 6) & 63;
         let bit = gid & 63;
         (self.0[word] & (1u64 << bit)) != 0
     }
@@ -112,10 +122,31 @@ impl CovMask {
     #[inline]
     fn intersects(&self, other: &Self) -> bool {
         let mut any = 0u64;
-        for i in 0..16 {
+        for i in 0..64 {
             any |= self.0[i] & other.0[i];
         }
         any != 0
+    }
+}
+
+struct GsubState {
+    next_lig_id: u16,
+    written: CovMask,
+}
+
+impl GsubState {
+    const fn new() -> Self {
+        Self {
+            next_lig_id: 1,
+            written: CovMask::empty(),
+        }
+    }
+
+    #[inline]
+    fn alloc_lig_id(&mut self) -> u16 {
+        let id = self.next_lig_id.max(1);
+        self.next_lig_id = id.wrapping_add(1).max(1);
+        id
     }
 }
 
@@ -315,6 +346,7 @@ impl ShapingTables {
 
         if let Some(ref gsub) = self.gsub {
             let mut gsub_mutated = false;
+            let mut gsub_state = GsubState::new();
             if script == *b"latn" || script == *b"DFLT" {
                 for &idx in &self.default_gsub {
                     if let Some(lookup) = gsub.lookups.get(usize::from(idx)) {
@@ -323,7 +355,15 @@ impl ShapingTables {
                         }
                         let gdef = &self.gdef;
                         let mask = MASK_GLOBAL;
-                        if gsub.apply_gsub_lookup(idx, gdef, &mut buf, &buf_mask, mask, 0) {
+                        if gsub.apply_gsub_lookup(
+                            idx,
+                            gdef,
+                            &mut buf,
+                            &buf_mask,
+                            mask,
+                            0,
+                            &mut gsub_state,
+                        ) {
                             gsub_mutated = true;
                             buf_mask = buffer_mask(&buf);
                         }
@@ -353,7 +393,15 @@ impl ShapingTables {
                                 continue;
                             }
                             let gdef = &self.gdef;
-                            if gsub.apply_gsub_lookup(idx, gdef, &mut buf, &buf_mask, mask, 0) {
+                            if gsub.apply_gsub_lookup(
+                                idx,
+                                gdef,
+                                &mut buf,
+                                &buf_mask,
+                                mask,
+                                0,
+                                &mut gsub_state,
+                            ) {
                                 gsub_mutated = true;
                                 buf_mask = buffer_mask(&buf);
                             }
@@ -1038,6 +1086,7 @@ impl LayoutTable {
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_gsub_lookup(
         &self,
         lookup_idx: u16,
@@ -1046,6 +1095,7 @@ impl LayoutTable {
         buf_mask: &CovMask,
         req_mask: u32,
         depth: usize,
+        state: &mut GsubState,
     ) -> bool {
         if depth >= MAX_RECURSE_DEPTH {
             return false;
@@ -1075,34 +1125,29 @@ impl LayoutTable {
                 continue;
             }
             let mut matched = false;
-            let mut next_mask = None;
             for &si in &active {
                 if !lookup.sub_masks[si].1.contains(gid) {
                     continue;
                 }
                 let sub = &lookup.subtables[si];
                 if let Some(advance_slots) =
-                    sub.apply_gsub(self, gdef, buf, i, flag, mfs, req_mask, depth)
+                    sub.apply_gsub(self, gdef, buf, i, flag, mfs, req_mask, depth, state)
                 {
                     i += advance_slots.max(1);
                     matched = true;
                     any_matched = true;
-                    let candidate = buffer_mask(buf);
-                    if candidate != cur_mask {
-                        next_mask = Some(candidate);
+                    if !state.written.is_subset_of(&cur_mask) {
+                        cur_mask.union_with(&state.written);
+                        active = lookup
+                            .sub_masks
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, (nec, _))| nec.intersects(&cur_mask))
+                            .map(|(idx, _)| idx)
+                            .collect();
                     }
                     break;
                 }
-            }
-            if let Some(m) = next_mask {
-                cur_mask = m;
-                active = lookup
-                    .sub_masks
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (nec, _))| nec.intersects(&cur_mask))
-                    .map(|(idx, _)| idx)
-                    .collect();
             }
             if !matched {
                 i += 1;
@@ -1236,15 +1281,18 @@ impl Subtable {
         mfs: Option<u16>,
         req_mask: u32,
         depth: usize,
+        state: &mut GsubState,
     ) -> Option<usize> {
         match self {
-            Self::GsubSingle(s) => s.apply(buf, at),
-            Self::GsubMultiple(s) => s.apply(buf, at),
-            Self::GsubAlternate(s) => s.apply(buf, at),
-            Self::GsubLigature(s) => s.apply(gdef, buf, at, flag, mfs),
-            Self::GsubContext(s) => s.apply_gsub(table, gdef, buf, at, flag, mfs, req_mask, depth),
+            Self::GsubSingle(s) => s.apply(buf, at, state),
+            Self::GsubMultiple(s) => s.apply(buf, at, state),
+            Self::GsubAlternate(s) => s.apply(buf, at, state),
+            Self::GsubLigature(s) => s.apply(gdef, buf, at, flag, mfs, state),
+            Self::GsubContext(s) => {
+                s.apply_gsub(table, gdef, buf, at, flag, mfs, req_mask, depth, state)
+            }
             Self::GsubChainContext(s) => {
-                s.apply_gsub(table, gdef, buf, at, flag, mfs, req_mask, depth)
+                s.apply_gsub(table, gdef, buf, at, flag, mfs, req_mask, depth, state)
             }
             _ => None,
         }
@@ -1398,17 +1446,21 @@ impl SingleSubst {
         }
     }
 
-    fn apply(&self, buf: &mut [GlyphSlot], at: usize) -> Option<usize> {
+    fn apply(&self, buf: &mut [GlyphSlot], at: usize, state: &mut GsubState) -> Option<usize> {
         let gid = buf[at].gid;
         match self {
             Self::Delta { cov, delta } => {
                 cov.get(gid)?;
-                buf[at].gid = gid.wrapping_add_signed(*delta);
+                let next = gid.wrapping_add_signed(*delta);
+                buf[at].gid = next;
+                state.written.insert(next);
                 Some(1)
             }
             Self::Array { cov, subst } => {
                 let idx = usize::from(cov.get(gid)?);
-                buf[at].gid = *subst.get(idx)?;
+                let next = *subst.get(idx)?;
+                buf[at].gid = next;
+                state.written.insert(next);
                 Some(1)
             }
         }
@@ -1442,7 +1494,7 @@ impl MultipleSubst {
         Some(Self { cov, seqs })
     }
 
-    fn apply(&self, buf: &mut Vec<GlyphSlot>, at: usize) -> Option<usize> {
+    fn apply(&self, buf: &mut Vec<GlyphSlot>, at: usize, state: &mut GsubState) -> Option<usize> {
         let idx = usize::from(self.cov.get(buf[at].gid)?);
         let seq = self.seqs.get(idx)?;
         if seq.is_empty() || buf.len() + seq.len() - 1 > MAX_OUTPUT_GLYPHS {
@@ -1450,11 +1502,13 @@ impl MultipleSubst {
         }
         let base = buf[at];
         buf[at].gid = seq[0];
+        state.written.insert(seq[0]);
         for (k, &gid) in seq.iter().enumerate().skip(1) {
             let mut copy = base;
             copy.gid = gid;
             copy.cluster_span = 0;
             buf.insert(at + k, copy);
+            state.written.insert(gid);
         }
         Some(seq.len())
     }
@@ -1488,13 +1542,14 @@ impl AlternateSubst {
         Some(Self { cov, first_alts })
     }
 
-    fn apply(&self, buf: &mut [GlyphSlot], at: usize) -> Option<usize> {
+    fn apply(&self, buf: &mut [GlyphSlot], at: usize, state: &mut GsubState) -> Option<usize> {
         let idx = usize::from(self.cov.get(buf[at].gid)?);
         let alt = *self.first_alts.get(idx)?;
         if alt == 0 {
             return None;
         }
         buf[at].gid = alt;
+        state.written.insert(alt);
         Some(1)
     }
 }
@@ -1552,6 +1607,7 @@ impl LigatureSubst {
         at: usize,
         flag: u16,
         mfs: Option<u16>,
+        state: &mut GsubState,
     ) -> Option<usize> {
         let idx = usize::from(self.cov.get(buf[at].gid)?);
         let rules = self.sets.get(idx)?;
@@ -1576,9 +1632,9 @@ impl LigatureSubst {
                 let last_c_end = buf[last].cluster + buf[last].cluster_span;
                 buf[at].gid = rule.lig_glyph;
                 buf[at].cluster_span = last_c_end.saturating_sub(first_c).max(1);
-                let max_lig = buf.iter().map(|s| s.lig_id).max().unwrap_or(0);
-                let lig_id = max_lig.saturating_add(1);
+                let lig_id = state.alloc_lig_id();
                 buf[at].lig_id = lig_id;
+                state.written.insert(rule.lig_glyph);
                 // Reassign intervening marks to components before removing component base glyphs,
                 // plus trailing marks belonging to the final ligature component.
                 let mut prev_pos = at;
@@ -1663,10 +1719,11 @@ impl ContextTable {
         mfs: Option<u16>,
         req_mask: u32,
         depth: usize,
+        state: &mut GsubState,
     ) -> Option<usize> {
         let Self::Fmt3 { input, records } = self;
         let mut positions = match_forward_cov(gdef, buf, at, input, flag, mfs, false)?;
-        apply_nested_gsub(table, gdef, buf, &mut positions, records, req_mask, depth);
+        apply_nested_gsub(table, gdef, buf, &mut positions, records, req_mask, depth, state);
         Some(positions.len().max(1))
     }
 }
@@ -1826,6 +1883,7 @@ impl ChainContextTable {
         mfs: Option<u16>,
         req_mask: u32,
         depth: usize,
+        state: &mut GsubState,
     ) -> Option<usize> {
         match self {
             Self::Fmt1 { cov, sets } => {
@@ -1842,6 +1900,7 @@ impl ChainContextTable {
                             &rule.records,
                             req_mask,
                             depth,
+                            state,
                         );
                         return Some(positions.len().max(1));
                     }
@@ -1875,6 +1934,7 @@ impl ChainContextTable {
                             &rule.records,
                             req_mask,
                             depth,
+                            state,
                         );
                         return Some(positions.len().max(1));
                     }
@@ -1897,7 +1957,16 @@ impl ChainContextTable {
                 {
                     return None;
                 }
-                apply_nested_gsub(table, gdef, buf, &mut positions, records, req_mask, depth);
+                apply_nested_gsub(
+                    table,
+                    gdef,
+                    buf,
+                    &mut positions,
+                    records,
+                    req_mask,
+                    depth,
+                    state,
+                );
                 Some(positions.len().max(1))
             }
         }
@@ -2071,6 +2140,7 @@ fn match_chain_rule(
     Some(positions)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_nested_gsub(
     table: &LayoutTable,
     gdef: &GdefData,
@@ -2079,6 +2149,7 @@ fn apply_nested_gsub(
     records: &[SeqLookupRecord],
     req_mask: u32,
     depth: usize,
+    state: &mut GsubState,
 ) {
     if depth + 1 >= MAX_RECURSE_DEPTH {
         return;
@@ -2103,6 +2174,7 @@ fn apply_nested_gsub(
                         lookup.mark_filtering_set,
                         req_mask,
                         depth + 1,
+                        state,
                     )
                     .is_some()
                 {
@@ -2901,8 +2973,9 @@ mod tests {
                 lig_id: 0,
             },
         ];
+        let mut lig_state = GsubState::new();
         assert_eq!(
-            lig.apply(&gdef, &mut lbuf, 0, FLAG_IGNORE_MARKS, None),
+            lig.apply(&gdef, &mut lbuf, 0, FLAG_IGNORE_MARKS, None, &mut lig_state),
             Some(1)
         );
         assert_eq!(lbuf.len(), 3);

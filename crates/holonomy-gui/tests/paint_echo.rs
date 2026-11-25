@@ -4,6 +4,8 @@
 //! Run in release CI (`persist` job):
 //! `cargo test --release -p holonomy-gui --test paint_echo -- --ignored --nocapture`
 
+#![cfg(unix)]
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -13,7 +15,7 @@ use holonomy_gui::canvas::PixelSurface;
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::{App, Key, Keymap, Modifiers};
 use holonomy_seal::generate_container_id;
-use holonomy_shell::{Editor, Intent, Move, QUIET_MD_THEME};
+use holonomy_shell::{Editor, QUIET_MD_THEME};
 use holonomy_text::{ResidentSet, SegmentSink, StyleMap, Typing};
 
 struct TempDoc(PathBuf);
@@ -103,12 +105,10 @@ fn software_paint_echo_latency_at_30m_words_head_and_tail() {
     );
 
     // Jump to the far end of the 183.5 MiB (30M-word) document and measure tail echo latency.
-    app.editor()
-        .apply(Intent::Move {
-            to: Move::DocumentEnd,
-            extend: false,
-        })
-        .expect("jump to end of 30M words");
+    let jump_effects = app
+        .press(Key::End, Modifiers::control())
+        .expect("Ctrl+End jump to end of 30M words");
+    assert!(!jump_effects.is_empty());
     assert!(app.draw().expect("paint at 30M-word tail"));
 
     let mut tail_us = Vec::with_capacity(50);

@@ -559,11 +559,16 @@ impl Surface for PixelSurface {
     }
 
     fn cluster(&mut self, x: Fixed, y: Fixed, text: &str, advance: Fixed, style: Style) {
+        let dy = self.page_origin_y + self.to_px(y);
+        let line_h_px = self.to_px(self.fonts.line_height(style)).max(1);
+        let clip_top = self.canvas_clip.y - 16;
+        let clip_bot = self.canvas_clip.y + self.canvas_clip.h + 16;
+        if dy + line_h_px <= clip_top || dy >= clip_bot {
+            return;
+        }
         self.painted_clusters += 1;
         let dx = self.page_origin_x + self.to_px(x);
-        let dy = self.page_origin_y + self.to_px(y);
         let adv_px = (self.to_px(x + advance) - self.to_px(x)).max(0);
-        let line_h_px = self.to_px(self.fonts.line_height(style)).max(1);
         let ascent_px = self.to_px(self.fonts.ascent(style));
         let baseline_y = dy + ascent_px;
 
@@ -658,6 +663,11 @@ impl Surface for PixelSurface {
             return;
         }
         let dy = self.page_origin_y + self.to_px(y);
+        let clip_top = self.canvas_clip.y - 16;
+        let clip_bot = self.canvas_clip.y + self.canvas_clip.h + 16;
+        if dy >= clip_bot {
+            return;
+        }
         let mut run_start = 0usize;
         while run_start < clusters.len() {
             let style = clusters[run_start].style;
@@ -666,9 +676,9 @@ impl Surface for PixelSurface {
                 run_end += 1;
             }
             let run = &clusters[run_start..run_end];
-            self.painted_clusters += run.len();
 
             let line_h_px = self.to_px(self.fonts.line_height(style)).max(1);
+            let visible = dy + line_h_px > clip_top;
             let ascent_px = self.to_px(self.fonts.ascent(style));
             let baseline_y = dy + ascent_px;
 
@@ -694,23 +704,25 @@ impl Surface for PixelSurface {
                         ListKind::Bullet { depth } => {
                             self.ordered_counter = 0;
                             self.last_list_kind = list_kind;
-                            let glyph = if depth <= 1 {
-                                "\u{2022}"
-                            } else if depth == 2 {
-                                "\u{25E6}"
-                            } else {
-                                "\u{25AA}"
-                            };
-                            draw_ui_text(
-                                &mut self.fb,
-                                &self.fonts,
-                                (run_dx_first - 16).max(4),
-                                baseline_y,
-                                glyph,
-                                style,
-                                marker_ink,
-                                self.canvas_clip,
-                            );
+                            if visible {
+                                let glyph = if depth <= 1 {
+                                    "\u{2022}"
+                                } else if depth == 2 {
+                                    "\u{25E6}"
+                                } else {
+                                    "\u{25AA}"
+                                };
+                                draw_ui_text(
+                                    &mut self.fb,
+                                    &self.fonts,
+                                    (run_dx_first - 16).max(4),
+                                    baseline_y,
+                                    glyph,
+                                    style,
+                                    marker_ink,
+                                    self.canvas_clip,
+                                );
+                            }
                         }
                         ListKind::Ordered { start, .. } => {
                             self.ordered_counter =
@@ -720,24 +732,32 @@ impl Surface for PixelSurface {
                                     start
                                 };
                             self.last_list_kind = list_kind;
-                            let label = format!("{}.", self.ordered_counter);
-                            let label_w =
-                                (self.fonts.advance(&label, style).sixtyfourths() >> 6) as i32;
-                            draw_ui_text(
-                                &mut self.fb,
-                                &self.fonts,
-                                (run_dx_first - label_w - 6).max(4),
-                                baseline_y,
-                                &label,
-                                style,
-                                marker_ink,
-                                self.canvas_clip,
-                            );
+                            if visible {
+                                let label = format!("{}.", self.ordered_counter);
+                                let label_w =
+                                    (self.fonts.advance(&label, style).sixtyfourths() >> 6) as i32;
+                                draw_ui_text(
+                                    &mut self.fb,
+                                    &self.fonts,
+                                    (run_dx_first - label_w - 6).max(4),
+                                    baseline_y,
+                                    &label,
+                                    style,
+                                    marker_ink,
+                                    self.canvas_clip,
+                                );
+                            }
                         }
                         ListKind::None => {}
                     }
                 }
             }
+
+            if !visible {
+                run_start = run_end;
+                continue;
+            }
+            self.painted_clusters += run.len();
 
             if style.blockquote() > 0 && run[0].x <= Fixed::units(24) {
                 for level in 0..i32::from(style.blockquote().min(4)) {

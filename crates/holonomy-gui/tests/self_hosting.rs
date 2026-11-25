@@ -1,6 +1,8 @@
 //! Block 10 Self-Hosting gate: authoring, formatting, bookmarking, compacting, verifying, and
 //! exporting a real `.wavefunction` containing Holonomy's own v6 specification and release checks.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::path::PathBuf;
 

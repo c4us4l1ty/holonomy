@@ -1023,7 +1023,8 @@ fn formatting_torture_corpus_across_slab_boundaries_single_undo() {
         typing.insert(chunk.as_bytes()).expect("insert slab chunk");
         typing.flush().expect("seal distinct slab leaf");
     }
-    let spine = typing.spine().clone();
+    drop(typing);
+    let spine = doc.spine().expect("spine");
     assert!(
         spine.slab_count() >= 6,
         "need >= 6 slabs, got {}",
@@ -1031,7 +1032,6 @@ fn formatting_torture_corpus_across_slab_boundaries_single_undo() {
     );
     let baseline_styles = spine.styles().clone();
     assert!(baseline_styles.is_empty());
-    drop(typing);
 
     let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
     let residency = ResidentSet::new(doc.source(), store::BUDGET, store::SLACK).expect("residency");
@@ -1172,12 +1172,13 @@ fn twenty_four_year_fresh_user_lifecycle_drill() {
         .compact_to(&compacted, PASSPHRASE)
         .expect("compact after 24yr lifecycle");
     drop(restored);
+    assert_eq!(final_doc.witness_count(), 1);
     assert_eq!(
         final_doc
             .verify()
             .expect("verify compacted")
             .segments_verified,
-        1
+        DAYS + 1
     );
     drop(final_doc);
     let _ = fs::remove_dir_all(&root);
