@@ -31,7 +31,7 @@ use holonomy_gui::term::CellShaper;
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
 use holonomy_seal::generate_container_id;
 use holonomy_shell::Editor;
-use holonomy_text::{ResidentSet, Typing};
+use holonomy_text::{ResidentSet, SegmentSource, Typing};
 
 const COLUMNS: usize = 40;
 const ROWS: usize = 6;
@@ -595,6 +595,18 @@ fn document_witness_history_bookmarks_diff_search_and_restore_persist() {
     reopened.verify().unwrap();
 }
 
+fn all_bytes(document: &Document) -> Vec<u8> {
+    let spine = document.spine().expect("spine");
+    let mut source = document.source();
+    let mut out = Vec::with_capacity(usize::try_from(spine.len()).expect("fits in usize"));
+    for span in spine.spans_in(0, spine.len()) {
+        let slab = span.slab();
+        let segment = source.load(slab.segment()).expect("segment loads");
+        out.extend_from_slice(&segment[slab.start() as usize..slab.end() as usize]);
+    }
+    out
+}
+
 #[test]
 fn dense_streaming_replace_all_over_real_document_persists_and_undoes() {
     let path = temp_path("dense-streaming-persist");
@@ -613,7 +625,8 @@ fn dense_streaming_replace_all_over_real_document_persists_and_undoes() {
     drop(source);
 
     let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens dense");
-    assert_eq!(text(&mut open_window(&reopened)), "XYZ ".repeat(17_000));
+    assert_eq!(String::from_utf8(all_bytes(&reopened)).unwrap(), "XYZ ".repeat(17_000));
+    assert_eq!(open_window(&reopened).document_len(), ("XYZ ".len() * 17_000) as u64);
     reopened.verify().unwrap();
     drop(reopened);
 
@@ -624,5 +637,6 @@ fn dense_streaming_replace_all_over_real_document_persists_and_undoes() {
     drop(document);
 
     let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens dense undo");
-    assert_eq!(text(&mut open_window(&reopened)), payload);
+    assert_eq!(String::from_utf8(all_bytes(&reopened)).unwrap(), payload);
+    assert_eq!(open_window(&reopened).document_len(), payload.len() as u64);
 }

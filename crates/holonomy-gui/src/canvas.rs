@@ -155,14 +155,7 @@ impl FrameBuffer {
     }
 
     /// Alpha-blends a rasterized A8 glyph bitmap at `(dst_x, dst_y)`.
-    fn blend_glyph(
-        &mut self,
-        dst_x: i32,
-        dst_y: i32,
-        bmp: &GlyphBitmap,
-        color: Rgba8,
-        clip: Rect,
-    ) {
+    fn blend_glyph(&mut self, dst_x: i32, dst_y: i32, bmp: &GlyphBitmap, color: Rgba8, clip: Rect) {
         if bmp.width == 0 || bmp.height == 0 {
             return;
         }
