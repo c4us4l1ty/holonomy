@@ -395,14 +395,18 @@ today, and the file's own counts — not from a constant. `Esc` dismisses it (D-
 than the terminal gives way rather than scrolling the screen (D-48), and no panel line claims
 verification unless a full `verify` ran.
 
-The distance left, plainly: the remaining gates (M7), packaging (M8), plus the GPUI backend
-(M4b-ii) for a machine with registry access. **Not one of the ten laws in `docs/GATES.md` is
-`gated`** — all ten read `spec`, and `xtask gates --check` fails the build if that file and
-`crates/holonomy-ledger/src/laws.rs` ever disagree.
+The distance left, plainly: hardware / physical / external-environment gates in `docs/GATES.md`
+(`L-3`..`L-7`, `L-9`, `L-10` still read `spec`, while `L-1`, `L-2`, and `L-8` read `gated`),
+platform code signing and notarization in `.github/workflows/release.yml`, and platform IME
+composition on the Cocoa/Win32 desktop backends (`M8` now packages unsigned Linux `x86_64`, macOS
+`aarch64`, and Windows `x86_64` archives with `SHA-256` + provenance on `v*` tags). `xtask gates
+--check` fails the build if `docs/GATES.md` and `crates/holonomy-ledger/src/laws.rs` ever disagree.
 
-What is still not here, in the order it would meet a user: no GPU or font rendering (the window is
-a terminal cell grid whose wide characters use UCD 18.0.0 two-cell advances — `OQ-25` closed — and
-whose RTL/mixed lines reorder per UAX #9 — `OQ-11` closed — while OpenType `GSUB`/`GPOS` glyph
-joining remains `OQ-24`), one document at a time, deleted bytes remain encrypted in the append-only
-`.wavefunction` until explicit `holonomy compact` (`OQ-14`), and no physical power-loss
-qualification (the L-6 rehearsal is an ENOSPC test and says so in its own job name).
+What is still not here, in the order it would meet a user: platform IME composition for CJK/dead-key
+scripts and code signing on the release archives (OpenType `GDEF`/`GSUB`/`GPOS` shaping, embedded
+font rasterization, pure-FFI Linux/macOS/Windows windows, `Ctrl+W`/`Ctrl+R`/dark/light paper
+themes, passphrase meter, and Xvfb screenshot tests are all shipped and tested in CI), one
+document at a time per window (with opt-in recent world-lines list default OFF), deleted bytes
+remain encrypted in the append-only `.wavefunction` until explicit `holonomy compact` (`OQ-14`),
+and no physical power-loss qualification (the `L-6` rehearsal is an ENOSPC test and says so in its
+own job name).

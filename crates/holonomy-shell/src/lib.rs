@@ -420,18 +420,28 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
 
     fn count_words_bounded(&mut self, caret: u64) -> Result<(u64, u64), ShellError> {
         let leaf_count = self.typing.spine().slab_count() as usize;
+        let doc_len = self.typing.document_len();
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        if leaf_count == 0 {
+            if doc_len > 0 {
+                ranges.push((0, doc_len));
+            }
+        } else {
+            for leaf in 0..leaf_count {
+                let Some((start, end)) = self.leaf_bounds(leaf) else {
+                    continue;
+                };
+                if start < end {
+                    ranges.push((start, end));
+                }
+            }
+        }
         let mut total_words = 0u64;
         let mut words_before = 0u64;
         let mut in_word = false;
         let mut captured_caret = caret == 0;
 
-        for leaf in 0..leaf_count {
-            let Some((start, end)) = self.leaf_bounds(leaf) else {
-                continue;
-            };
-            if start >= end {
-                continue;
-            }
+        for (start, end) in ranges {
             let read = self.read(start, end)?;
             for (rel, ch) in read.text().char_indices() {
                 let byte_pos = start + rel as u64;
@@ -1110,25 +1120,36 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         if at == 0 {
             return Ok(Vec::new());
         }
-        let Some(mut leaf) = self.leaf_of(at - 1) else {
-            return Ok(Vec::new());
-        };
         let mut ranges: Vec<(u64, u64)> = Vec::new();
-        let mut collected = 0u64;
-        let mut cursor_end = at;
-        for _ in 0..8 {
-            let Some((leaf_start, _)) = self.leaf_bounds(leaf) else {
-                break;
-            };
-            if leaf_start < cursor_end {
-                ranges.push((leaf_start, cursor_end));
-                collected = collected.saturating_add(cursor_end - leaf_start);
-                cursor_end = leaf_start;
+        if let Some(mut leaf) = self.leaf_of(at - 1) {
+            let mut collected = 0u64;
+            let mut cursor_end = at;
+            for _ in 0..8 {
+                let Some((leaf_start, _)) = self.leaf_bounds(leaf) else {
+                    break;
+                };
+                if leaf_start < cursor_end {
+                    ranges.push((leaf_start, cursor_end));
+                    collected = collected.saturating_add(cursor_end - leaf_start);
+                    cursor_end = leaf_start;
+                }
+                if leaf == 0 || collected >= max_bytes {
+                    break;
+                }
+                leaf -= 1;
             }
-            if leaf == 0 || collected >= max_bytes {
-                break;
+        } else {
+            let guess = at.saturating_sub(max_bytes);
+            for shift in 0..4u64 {
+                let candidate = guess.saturating_add(shift);
+                if candidate >= at {
+                    break;
+                }
+                if self.read(candidate, at).is_ok() {
+                    ranges.push((candidate, at));
+                    break;
+                }
             }
-            leaf -= 1;
         }
         let mut out: Vec<ClusterMeta> = Vec::new();
         let mut carry = ClusterContext::START;
@@ -1168,6 +1189,18 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             return Ok(Vec::new());
         }
         let Some(mut leaf) = self.leaf_of(at) else {
+            let end_guess = at.saturating_add(max_bytes).min(doc_len);
+            for shrink in 0..4u64 {
+                let candidate = end_guess.saturating_sub(shrink);
+                if candidate <= at {
+                    break;
+                }
+                if let Ok(read) = self.read(at, candidate) {
+                    return Ok(Clusters::continuing(read.text(), ClusterContext::START)
+                        .map(|(rel, c)| Self::classify_cluster(at + rel as u64, c))
+                        .collect());
+                }
+            }
             return Ok(Vec::new());
         };
         let mut out: Vec<ClusterMeta> = Vec::new();
