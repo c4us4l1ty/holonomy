@@ -246,7 +246,11 @@ fn translate_cocoa_event(ev: Id) -> Option<(Key, Modifiers)> {
     if let Some(k) = translate_cocoa_keycode(keycode) {
         return Some((k, modifiers));
     }
-    let chars_ns: Id = msg!(ev, sel(b"charactersIgnoringModifiers\0") => Id);
+    let chars_ns: Id = if control {
+        msg!(ev, sel(b"charactersIgnoringModifiers\0") => Id)
+    } else {
+        msg!(ev, sel(b"characters\0") => Id)
+    };
     if chars_ns.is_null() {
         return None;
     }
@@ -260,12 +264,54 @@ fn translate_cocoa_event(ev: Id) -> Option<(Key, Modifiers)> {
     if ch.is_control() && !control {
         return None;
     }
-    let normalized = if control && ch.is_ascii_uppercase() {
-        ch.to_ascii_lowercase()
+    let (normalized, out_mods) = if control {
+        let lower = if ch.is_ascii_uppercase() {
+            ch.to_ascii_lowercase()
+        } else {
+            ch
+        };
+        (lower, modifiers)
     } else {
-        ch
+        // When `characters` emitted a printable scalar under Shift/Option layout rules, keep `alt`
+        // cleared so non-shortcut characters insert cleanly into `App::press`.
+        (
+            ch,
+            Modifiers {
+                shift,
+                control: false,
+                alt: false,
+            },
+        )
     };
-    Some((Key::Character(normalized), modifiers))
+    Some((Key::Character(normalized), out_mods))
+}
+
+struct AutoreleasePool(Id);
+
+impl AutoreleasePool {
+    fn new() -> Self {
+        let alloc: Id = msg!(cls(b"NSAutoreleasePool\0"), sel(b"alloc\0") => Id);
+        let pool: Id = msg!(alloc, sel(b"init\0") => Id);
+        Self(pool)
+    }
+}
+
+impl Drop for AutoreleasePool {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            let _: () = msg!(self.0, sel(b"drain\0") => ());
+        }
+    }
+}
+
+fn truncate_utf8_clipboard(slice: &[u8], max_bytes: usize) -> Zeroizing<Vec<u8>> {
+    let mut bytes = Zeroizing::new(slice[..slice.len().min(max_bytes)].to_vec());
+    if slice.len() > max_bytes {
+        while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
+            bytes.pop();
+        }
+    }
+    bytes
 }
 
 fn translate_cocoa_keycode(keycode: u16) -> Option<Key> {
@@ -494,6 +540,7 @@ pub struct CocoaWindow {
     queue: Rc<RefCell<CocoaQueue>>,
     dpi: i64,
     prop_raw: *const RefCell<CocoaQueue>,
+    clipboard_change_count: Option<isize>,
 }
 
 impl CocoaWindow {
@@ -503,6 +550,7 @@ impl CocoaWindow {
     ///
     /// Returns [`CocoaError`] if AppKit initialization fails.
     pub fn open(title: &str, width: u16, height: u16) -> Result<Self, CocoaError> {
+        let _pool = AutoreleasePool::new();
         let w = width.max(320);
         let h = height.max(240);
         let (view_cls, del_cls) = ensure_objc_classes();
@@ -538,8 +586,8 @@ impl CocoaWindow {
         }
 
         let ns_title = make_nsstring(title);
-        let _: Id = msg!(window, sel(b"setTitle:\0"), ns_title => Id => Id);
-        let _: Id = msg!(ns_title, sel(b"release\0") => Id);
+        let _: () = msg!(window, sel(b"setTitle:\0"), ns_title => Id => ());
+        let _: () = msg!(ns_title, sel(b"release\0") => ());
 
         let queue = Rc::new(RefCell::new(CocoaQueue {
             events: VecDeque::with_capacity(32),
@@ -561,12 +609,12 @@ impl CocoaWindow {
             object_setInstanceVariable(delegate, c"_holoQueue".as_ptr(), prop_raw as *mut c_void);
         }
 
-        let _: Id = msg!(window, sel(b"setContentView:\0"), view => Id => Id);
-        let _: Id = msg!(window, sel(b"setDelegate:\0"), delegate => Id => Id);
+        let _: () = msg!(window, sel(b"setContentView:\0"), view => Id => ());
+        let _: () = msg!(window, sel(b"setDelegate:\0"), delegate => Id => ());
         let _: Bool = msg!(window, sel(b"makeFirstResponder:\0"), view => Id => Bool);
-        let _: Id = msg!(window, sel(b"makeKeyAndOrderFront:\0"), null_mut() => Id => Id);
-        let _: Id = msg!(app, sel(b"activateIgnoringOtherApps:\0"), 1i8 => Bool => Id);
-        let _: Id = msg!(app, sel(b"finishLaunching\0") => Id);
+        let _: () = msg!(window, sel(b"makeKeyAndOrderFront:\0"), null_mut() => Id => ());
+        let _: () = msg!(app, sel(b"activateIgnoringOtherApps:\0"), 1i8 => Bool => ());
+        let _: () = msg!(app, sel(b"finishLaunching\0") => ());
 
         let scale: f64 = msg!(window, sel(b"backingScaleFactor\0") => f64);
         let dpi = dpi_from_backing_scale(scale);
@@ -579,6 +627,7 @@ impl CocoaWindow {
             queue,
             dpi,
             prop_raw,
+            clipboard_change_count: None,
         })
     }
 }
@@ -589,14 +638,15 @@ fn dpi_from_backing_scale(scale: f64) -> i64 {
 
 impl Drop for CocoaWindow {
     fn drop(&mut self) {
+        self.clear_clipboard();
         // SAFETY: clears queue ivar pointers so callbacks stop touching queue during teardown.
         unsafe {
             object_setInstanceVariable(self.view, c"_holoQueue".as_ptr(), null_mut());
             object_setInstanceVariable(self.delegate, c"_holoQueue".as_ptr(), null_mut());
         }
-        let _: Id = msg!(self.window, sel(b"close\0") => Id);
-        let _: Id = msg!(self.view, sel(b"release\0") => Id);
-        let _: Id = msg!(self.delegate, sel(b"release\0") => Id);
+        let _: () = msg!(self.window, sel(b"close\0") => ());
+        let _: () = msg!(self.view, sel(b"release\0") => ());
+        let _: () = msg!(self.delegate, sel(b"release\0") => ());
         // SAFETY: balances `Rc::into_raw` allocated in `CocoaWindow::open`.
         unsafe {
             drop(Rc::from_raw(self.prop_raw));
@@ -620,6 +670,7 @@ impl DesktopWindow for CocoaWindow {
         width: u16,
         height: u16,
     ) -> Result<(), Box<dyn Error>> {
+        let _pool = AutoreleasePool::new();
         {
             let mut q = self.queue.borrow_mut();
             q.fb_w = width;
@@ -627,12 +678,13 @@ impl DesktopWindow for CocoaWindow {
             q.pixels.clear();
             q.pixels.extend_from_slice(pixels);
         }
-        let _: Id = msg!(self.view, sel(b"setNeedsDisplay:\0"), 1i8 => Bool => Id);
-        let _: Id = msg!(self.view, sel(b"displayIfNeeded\0") => Id);
+        let _: () = msg!(self.view, sel(b"setNeedsDisplay:\0"), 1i8 => Bool => ());
+        let _: () = msg!(self.view, sel(b"displayIfNeeded\0") => ());
         Ok(())
     }
 
     fn poll_events(&mut self, timeout_ms: i32) -> Result<Vec<DesktopEvent>, Box<dyn Error>> {
+        let _pool = AutoreleasePool::new();
         let secs = f64::from(timeout_ms.max(0)) / 1000.0;
         let date: Id = if timeout_ms > 0 {
             msg!(cls(b"NSDate\0"), sel(b"dateWithTimeIntervalSinceNow:\0"), secs => f64 => Id)
@@ -661,7 +713,7 @@ impl DesktopWindow for CocoaWindow {
             if ev.is_null() {
                 break;
             }
-            let _: Id = msg!(self.app, sel(b"sendEvent:\0"), ev => Id => Id);
+            let _: () = msg!(self.app, sel(b"sendEvent:\0"), ev => Id => ());
         }
 
         let bounds: NsRect = msg!(self.view, sel(b"bounds\0") => NsRect);
@@ -684,6 +736,7 @@ impl DesktopWindow for CocoaWindow {
     }
 
     fn set_clipboard(&mut self, utf8: &[u8]) -> Result<(), Box<dyn Error>> {
+        let _pool = AutoreleasePool::new();
         let s = std::str::from_utf8(utf8).map_err(|e| Box::new(CocoaError(e.to_string())))?;
         let pb: Id = msg!(cls(b"NSPasteboard\0"), sel(b"generalPasteboard\0") => Id);
         if pb.is_null() {
@@ -693,12 +746,19 @@ impl DesktopWindow for CocoaWindow {
         let ns_str = make_nsstring(s);
         // SAFETY: `NSPasteboardTypeString` is an AppKit framework global string constant.
         let ptype = unsafe { NSPasteboardTypeString };
-        let _: Bool = msg!(pb, sel(b"setString:forType:\0"), ns_str => Id, ptype => Id => Bool);
-        let _: Id = msg!(ns_str, sel(b"release\0") => Id);
+        let ok: Bool = msg!(pb, sel(b"setString:forType:\0"), ns_str => Id, ptype => Id => Bool);
+        let _: () = msg!(ns_str, sel(b"release\0") => ());
+        if ok != 0 {
+            let cnt: isize = msg!(pb, sel(b"changeCount\0") => isize);
+            self.clipboard_change_count = Some(cnt);
+        } else {
+            self.clipboard_change_count = None;
+        }
         Ok(())
     }
 
     fn request_clipboard(&mut self) -> Result<(), Box<dyn Error>> {
+        let _pool = AutoreleasePool::new();
         let pb: Id = msg!(cls(b"NSPasteboard\0"), sel(b"generalPasteboard\0") => Id);
         if pb.is_null() {
             return Ok(());
@@ -715,15 +775,7 @@ impl DesktopWindow for CocoaWindow {
         }
         // SAFETY: `UTF8String` returns NUL-terminated UTF-8 owned by the `NSString`.
         let slice = unsafe { CStr::from_ptr(utf8) }.to_bytes();
-        let mut bytes = Zeroizing::new(slice[..slice.len().min(MAX_CLIPBOARD_BYTES)].to_vec());
-        if bytes.len() == MAX_CLIPBOARD_BYTES && slice.len() > MAX_CLIPBOARD_BYTES {
-            while !bytes.is_empty() && (bytes[bytes.len() - 1] & 0b1100_0000) == 0b1000_0000 {
-                bytes.pop();
-            }
-            if !bytes.is_empty() && (bytes[bytes.len() - 1] & 0b1100_0000) == 0b1100_0000 {
-                bytes.pop();
-            }
-        }
+        let bytes = truncate_utf8_clipboard(slice, MAX_CLIPBOARD_BYTES);
         self.queue
             .borrow_mut()
             .events
@@ -732,9 +784,16 @@ impl DesktopWindow for CocoaWindow {
     }
 
     fn clear_clipboard(&mut self) {
+        let Some(owned_count) = self.clipboard_change_count.take() else {
+            return;
+        };
+        let _pool = AutoreleasePool::new();
         let pb: Id = msg!(cls(b"NSPasteboard\0"), sel(b"generalPasteboard\0") => Id);
         if !pb.is_null() {
-            let _: isize = msg!(pb, sel(b"clearContents\0") => isize);
+            let cur_count: isize = msg!(pb, sel(b"changeCount\0") => isize);
+            if cur_count == owned_count {
+                let _: isize = msg!(pb, sel(b"clearContents\0") => isize);
+            }
         }
     }
 }
@@ -744,12 +803,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cocoa_keycode_translation_and_dpi_clamping() {
+    fn cocoa_keycode_translation_dpi_clamping_and_utf8_boundary() {
         assert_eq!(translate_cocoa_keycode(123), Some(Key::Left));
         assert_eq!(translate_cocoa_keycode(51), Some(Key::Backspace));
         assert_eq!(translate_cocoa_keycode(36), Some(Key::Enter));
         assert_eq!(dpi_from_backing_scale(1.0), 96);
         assert_eq!(dpi_from_backing_scale(2.0), 192);
         assert_eq!(dpi_from_backing_scale(4.0), 288);
+
+        // Complete 4-byte emoji ending right at boundary must stay intact.
+        let exact = format!("{}🦀extra", "a".repeat(MAX_CLIPBOARD_BYTES - 4));
+        let kept = truncate_utf8_clipboard(exact.as_bytes(), MAX_CLIPBOARD_BYTES);
+        assert_eq!(kept.len(), MAX_CLIPBOARD_BYTES);
+        assert!(std::str::from_utf8(&kept).unwrap().ends_with('🦀'));
+
+        // Split 4-byte emoji across boundary must be trimmed cleanly without dropping prior bytes.
+        let split = format!("{}🦀", "a".repeat(MAX_CLIPBOARD_BYTES - 2));
+        let trimmed = truncate_utf8_clipboard(split.as_bytes(), MAX_CLIPBOARD_BYTES);
+        assert_eq!(trimmed.len(), MAX_CLIPBOARD_BYTES - 2);
+        assert!(std::str::from_utf8(&trimmed).is_ok());
     }
 }

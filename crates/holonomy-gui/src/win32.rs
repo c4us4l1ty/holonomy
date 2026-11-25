@@ -44,6 +44,7 @@ const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_DESTROYCLIPBOARD: u32 = 0x0307;
 
 const PM_REMOVE: u32 = 0x0001;
 const QS_ALLINPUT: u32 = 0x04FF;
@@ -138,6 +139,7 @@ struct BitmapInfo {
 extern "system" {
     fn GetModuleHandleW(lp_module_name: *const u16) -> Hinstance;
     fn GlobalAlloc(u_flags: u32, dw_bytes: usize) -> Hglobal;
+    fn GlobalFree(h_mem: Hglobal) -> Hglobal;
     fn GlobalLock(h_mem: Hglobal) -> *mut c_void;
     fn GlobalUnlock(h_mem: Hglobal) -> Bool;
 }
@@ -183,15 +185,6 @@ extern "system" {
         dw_flags: u32,
     ) -> u32;
     fn GetKeyState(n_virt_key: i32) -> i16;
-    fn ToUnicode(
-        w_virt_key: u32,
-        w_scan_code: u32,
-        lp_key_state: *const u8,
-        pwsz_buff: *mut u16,
-        cch_buff: i32,
-        w_flags: u32,
-    ) -> i32;
-    fn GetKeyboardState(lp_key_state: *mut u8) -> Bool;
     fn SetPropW(h_wnd: Hwnd, lp_string: *const u16, h_data: *mut c_void) -> Bool;
     fn GetPropW(h_wnd: Hwnd, lp_string: *const u16) -> *mut c_void;
     fn RemovePropW(h_wnd: Hwnd, lp_string: *const u16) -> *mut c_void;
@@ -237,6 +230,8 @@ impl Error for Win32Error {}
 struct WinQueue {
     events: VecDeque<DesktopEvent>,
     left_down: bool,
+    owns_clipboard: bool,
+    pending_surrogate: Option<u16>,
     width: u16,
     height: u16,
 }
@@ -306,6 +301,19 @@ fn lparam_xy(lp: Lparam) -> (i16, i16) {
     )
 }
 
+fn decode_wm_char(pending_surrogate: &mut Option<u16>, unit: u16) -> Option<char> {
+    if (0xD800..=0xDBFF).contains(&unit) {
+        *pending_surrogate = Some(unit);
+        return None;
+    }
+    if (0xDC00..=0xDFFF).contains(&unit) {
+        let hi = pending_surrogate.take()?;
+        return std::char::decode_utf16([hi, unit]).next()?.ok();
+    }
+    *pending_surrogate = None;
+    char::from_u32(u32::from(unit))
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: Hwnd,
     msg: u32,
@@ -317,94 +325,103 @@ unsafe extern "system" fn wnd_proc(
     if !raw_ptr.is_null() {
         // SAFETY: `raw_ptr` stays alive until `Drop` removes the property and balances `into_raw`.
         let q_ref = unsafe { &*raw_ptr };
-        let mut q = q_ref.borrow_mut();
-        match msg {
-            WM_CLOSE => {
-                q.events.push_back(DesktopEvent::CloseRequested);
-                return 0;
-            }
-            WM_PAINT => {
-                q.events.push_back(DesktopEvent::Expose);
-            }
-            WM_KILLFOCUS => {
-                q.left_down = false;
-                q.events.push_back(DesktopEvent::FocusOut);
-            }
-            WM_SIZE => {
-                let w = ((l_param as usize) & 0xFFFF) as u16;
-                let h = (((l_param as usize) >> 16) & 0xFFFF) as u16;
-                if w > 0 && h > 0 && (w, h) != (q.width, q.height) {
-                    q.width = w;
-                    q.height = h;
-                    q.events.push_back(DesktopEvent::Resize {
-                        width: w,
-                        height: h,
-                    });
+        let mut handled_close = false;
+        {
+            let mut q = q_ref.borrow_mut();
+            match msg {
+                WM_CLOSE => {
+                    q.events.push_back(DesktopEvent::CloseRequested);
+                    handled_close = true;
                 }
-            }
-            WM_LBUTTONDOWN => {
-                let (x, y) = lparam_xy(l_param);
-                q.left_down = true;
-                q.events.push_back(DesktopEvent::MouseDown {
-                    x,
-                    y,
-                    modifiers: current_modifiers(),
-                });
-            }
-            WM_MOUSEMOVE => {
-                if q.left_down {
+                WM_PAINT => {
+                    q.events.push_back(DesktopEvent::Expose);
+                }
+                WM_KILLFOCUS => {
+                    q.left_down = false;
+                    q.pending_surrogate = None;
+                    q.events.push_back(DesktopEvent::FocusOut);
+                }
+                WM_DESTROYCLIPBOARD => {
+                    q.owns_clipboard = false;
+                }
+                WM_SIZE => {
+                    let w = ((l_param as usize) & 0xFFFF) as u16;
+                    let h = (((l_param as usize) >> 16) & 0xFFFF) as u16;
+                    if w > 0 && h > 0 && (w, h) != (q.width, q.height) {
+                        q.width = w;
+                        q.height = h;
+                        q.events.push_back(DesktopEvent::Resize {
+                            width: w,
+                            height: h,
+                        });
+                    }
+                }
+                WM_LBUTTONDOWN => {
                     let (x, y) = lparam_xy(l_param);
-                    q.events.push_back(DesktopEvent::MouseDrag { x, y });
-                }
-            }
-            WM_LBUTTONUP => {
-                q.left_down = false;
-                q.events.push_back(DesktopEvent::MouseUp);
-            }
-            WM_MOUSEWHEEL => {
-                let delta = ((w_param >> 16) as u16) as i16;
-                let lines = if delta > 0 { -3 } else { 3 };
-                q.events
-                    .push_back(DesktopEvent::Scroll { delta_lines: lines });
-            }
-            WM_KEYDOWN => {
-                let mods = current_modifiers();
-                let vk = (w_param & 0xFFFF) as u16;
-                if let Some(key) = translate_virtual_key(vk, mods) {
-                    q.events.push_back(DesktopEvent::Key {
-                        key,
-                        modifiers: mods,
+                    q.left_down = true;
+                    q.events.push_back(DesktopEvent::MouseDown {
+                        x,
+                        y,
+                        modifiers: current_modifiers(),
                     });
-                } else if !mods.control && !mods.alt {
-                    let mut kstate = [0u8; 256];
-                    let mut buf = [0u16; 4];
-                    // SAFETY: `kstate` and `buf` are stack-allocated buffers of exact Win32 sizes.
-                    let n = unsafe {
-                        if GetKeyboardState(kstate.as_mut_ptr()) != 0 {
-                            ToUnicode(u32::from(vk), 0, kstate.as_ptr(), buf.as_mut_ptr(), 4, 0)
-                        } else {
-                            0
-                        }
-                    };
-                    if n > 0 {
-                        let units = &buf[..(n as usize)];
-                        for ch in std::char::decode_utf16(units.iter().copied()).flatten() {
-                            if !ch.is_control() {
-                                q.events.push_back(DesktopEvent::Key {
-                                    key: Key::Character(ch),
-                                    modifiers: mods,
-                                });
-                            }
+                }
+                WM_MOUSEMOVE => {
+                    if q.left_down {
+                        let (x, y) = lparam_xy(l_param);
+                        q.events.push_back(DesktopEvent::MouseDrag { x, y });
+                    }
+                }
+                WM_LBUTTONUP => {
+                    q.left_down = false;
+                    q.events.push_back(DesktopEvent::MouseUp);
+                }
+                WM_MOUSEWHEEL => {
+                    let delta = ((w_param >> 16) as u16) as i16;
+                    let lines = if delta > 0 { -3 } else { 3 };
+                    q.events
+                        .push_back(DesktopEvent::Scroll { delta_lines: lines });
+                }
+                WM_KEYDOWN => {
+                    let mods = current_modifiers();
+                    let vk = (w_param & 0xFFFF) as u16;
+                    if let Some(key) = translate_virtual_key(vk, mods) {
+                        q.events.push_back(DesktopEvent::Key {
+                            key,
+                            modifiers: mods,
+                        });
+                    }
+                }
+                WM_CHAR => {
+                    let mods = current_modifiers();
+                    let unit = (w_param & 0xFFFF) as u16;
+                    if let Some(ch) = decode_wm_char(&mut q.pending_surrogate, unit) {
+                        if !ch.is_control() && !(mods.control && !mods.alt) {
+                            let ev_mods = if mods.control && mods.alt {
+                                // Windows AltGr sets Ctrl+Alt; normalize so editor inserts text.
+                                Modifiers {
+                                    shift: mods.shift,
+                                    control: false,
+                                    alt: false,
+                                }
+                            } else {
+                                mods
+                            };
+                            q.events.push_back(DesktopEvent::Key {
+                                key: Key::Character(ch),
+                                modifiers: ev_mods,
+                            });
                         }
                     }
                 }
+                WM_DESTROY => {}
+                _ => {}
             }
-            WM_CHAR => {}
-            WM_DESTROY => {}
-            _ => {}
+        }
+        if handled_close {
+            return 0;
         }
     }
-    // SAFETY: standard Win32 default window procedure forwarding.
+    // SAFETY: `q` lock is released before calling `DefWindowProcW`, preventing re-entrancy panics.
     unsafe { DefWindowProcW(hwnd, msg, w_param, l_param) }
 }
 
@@ -491,6 +508,8 @@ impl Win32Window {
         let queue = Rc::new(RefCell::new(WinQueue {
             events: VecDeque::with_capacity(32),
             left_down: false,
+            owns_clipboard: false,
+            pending_surrogate: None,
             width: cw,
             height: ch,
         }));
@@ -512,6 +531,7 @@ impl Win32Window {
 
 impl Drop for Win32Window {
     fn drop(&mut self) {
+        self.clear_clipboard();
         // SAFETY: removes prop pointer, destroys window, and releases the extra `Rc` ref.
         unsafe {
             RemovePropW(self.hwnd, PROP_NAME.as_ptr());
@@ -611,7 +631,8 @@ impl DesktopWindow for Win32Window {
         let s = std::str::from_utf8(utf8).map_err(|e| Box::new(Win32Error(e.to_string())))?;
         let mut utf16 = wide_null(s);
         let bytes = utf16.len().saturating_mul(2);
-        // SAFETY: allocates movable clipboard HGLOBAL, writes UTF-16LE, transfers ownership to OS.
+        // SAFETY: allocates movable HGLOBAL, writes UTF-16LE, transfers ownership to OS or frees
+        // `h_mem` via `GlobalFree` if `GlobalLock`/`SetClipboardData` fails.
         unsafe {
             if OpenClipboard(self.hwnd) == 0 {
                 utf16.zeroize();
@@ -625,11 +646,23 @@ impl DesktopWindow for Win32Window {
                 return Err(Box::new(Win32Error("GlobalAlloc failed".to_owned())));
             }
             let ptr = GlobalLock(h_mem).cast::<u16>();
-            if !ptr.is_null() {
-                std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
-                GlobalUnlock(h_mem);
-                let _ = SetClipboardData(CF_UNICODETEXT, h_mem);
+            if ptr.is_null() {
+                let _ = GlobalFree(h_mem);
+                CloseClipboard();
+                utf16.zeroize();
+                return Err(Box::new(Win32Error("GlobalLock failed".to_owned())));
             }
+            std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
+            GlobalUnlock(h_mem);
+            let accepted = SetClipboardData(CF_UNICODETEXT, h_mem);
+            if accepted.is_null() {
+                let _ = GlobalFree(h_mem);
+                self.queue.borrow_mut().owns_clipboard = false;
+                CloseClipboard();
+                utf16.zeroize();
+                return Err(Box::new(Win32Error("SetClipboardData failed".to_owned())));
+            }
+            self.queue.borrow_mut().owns_clipboard = true;
             CloseClipboard();
         }
         utf16.zeroize();
@@ -674,7 +707,11 @@ impl DesktopWindow for Win32Window {
     }
 
     fn clear_clipboard(&mut self) {
-        // SAFETY: empties system clipboard if owned by this window.
+        if !self.queue.borrow().owns_clipboard {
+            return;
+        }
+        self.queue.borrow_mut().owns_clipboard = false;
+        // SAFETY: empties system clipboard only while this window holds clipboard ownership.
         unsafe {
             if OpenClipboard(self.hwnd) != 0 {
                 EmptyClipboard();
@@ -689,7 +726,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn win32_virtual_key_translation_covers_navigation_and_shortcuts() {
+    fn win32_virtual_key_translation_and_utf16_surrogates() {
         assert_eq!(
             translate_virtual_key(VK_LEFT, Modifiers::none()),
             Some(Key::Left)
@@ -714,5 +751,9 @@ mod tests {
             ),
             Some(Key::Character('/'))
         );
+        let mut pending = None;
+        assert_eq!(decode_wm_char(&mut pending, 0xD83E), None);
+        assert_eq!(decode_wm_char(&mut pending, 0xDD80), Some('🦀'));
+        assert_eq!(pending, None);
     }
 }

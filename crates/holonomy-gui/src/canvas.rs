@@ -1229,7 +1229,7 @@ struct HistoryDrawerState {
     diff_base_idx: usize,
     diff_hunks: Vec<SpineDiffHunk>,
     diff_summary: String,
-    preview_text: String,
+    preview_text: Zeroizing<String>,
     preview_len: u64,
     bookmark_msg: String,
     bookmark_input: Option<String>,
@@ -2176,7 +2176,7 @@ fn run_desktop_with_window(
 
     loop {
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper, x11.as_mut()));
         }
 
         if pending_paint || app.dirty() {
@@ -2287,7 +2287,7 @@ fn run_desktop_with_window(
         });
         let events = x11.poll_events(poll_ms)?;
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper, x11.as_mut()));
         }
         if events.is_empty() {
             // Autosave after 1.5s typing pause (`D-64`, matches TUI loop).
@@ -2303,7 +2303,7 @@ fn run_desktop_with_window(
         last_activity = Instant::now();
         tripwire.beat();
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper, x11.as_mut()));
         }
 
         for ev in events {
@@ -2483,7 +2483,13 @@ fn run_desktop_with_window(
                             }
                             Key::Character('l') => {
                                 tripwire.fire(TripReason::Manual);
-                                return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+                                return Ok(finish_gui_wipe(
+                                    &mut app,
+                                    &document,
+                                    &arenas,
+                                    reaper,
+                                    x11.as_mut(),
+                                ));
                             }
                             Key::Character('s') => {
                                 status_msg = if save_gui(&mut app) {
@@ -2644,6 +2650,7 @@ fn run_desktop_with_window(
         }
     }
 
+    x11.clear_clipboard();
     Ok(if !app.has_pending() {
         DesktopEnd::NothingToWrite
     } else if save_gui(&mut app) {
@@ -2683,7 +2690,9 @@ fn finish_gui_wipe(
     document: &Document,
     arenas: &Arc<SecretArenas>,
     reaper: ReaperGuard,
+    win: &mut dyn DesktopWindow,
 ) -> DesktopEnd {
+    win.clear_clipboard();
     // SAFETY: GUI loop stops reading/modifying document & editor allocations before joining reaper.
     let _ = unsafe { document.arm_reaper(arenas) };
     // SAFETY: GUI loop does not touch editor buffers after this until reaper joins.
@@ -2734,7 +2743,7 @@ fn build_history_state(
         diff_base_idx,
         diff_hunks: Vec::new(),
         diff_summary: String::new(),
-        preview_text: String::new(),
+        preview_text: Zeroizing::new(String::new()),
         preview_len: 0,
         bookmark_msg: String::new(),
         bookmark_input: None,
@@ -2786,9 +2795,11 @@ fn refresh_history_state(
         .map_or(w_seq, |b| b.sequence);
     if let Ok(sp) = document.spine_at_witness(w_seq) {
         state.preview_len = sp.len();
-        state.preview_text = document
-            .read_witness_excerpt(w_seq, 0, sp.len().min(320))
-            .unwrap_or_default();
+        state.preview_text = Zeroizing::new(
+            document
+                .read_witness_excerpt(w_seq, 0, sp.len().min(320))
+                .unwrap_or_default(),
+        );
         if let Ok(residency) = ResidentSet::new(
             document.source(),
             (store::BUDGET / 2).max(2 * 1024 * 1024),
@@ -3078,8 +3089,11 @@ fn handle_history_button(
             let Ok(next_spine) = document.spine_at_witness(w_seq) else {
                 return;
             };
+            let next_len = next_spine.len();
             if app.editor().restore_spine(next_spine).is_ok() {
-                let _ = app.editor().reflow();
+                if next_len <= 2 * 1024 * 1024 {
+                    let _ = app.editor().reflow();
+                }
                 app.mark_dirty();
                 *status = format!("restored from witness #{w_seq}");
                 *drawer = None;

@@ -71,7 +71,7 @@ pub(crate) struct GlyphSlot {
 }
 
 /// 1024-bit modulo glyph filter (`gid & 1023`) for O(1) lookup skipping with zero false negatives.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct CovMask([u64; 16]);
 
 impl CovMask {
@@ -449,6 +449,10 @@ fn resolve_attachments(buf: &mut [GlyphSlot]) {
                 }
             }
             cur = parent;
+        }
+        if cur != i && buf[cur].attach_to.is_none() {
+            dx += local_offsets[cur].0;
+            dy += local_offsets[cur].1;
         }
         buf[i].x_offset = dx - adv_before_base;
         buf[i].y_offset = dy;
@@ -1049,11 +1053,12 @@ impl LayoutTable {
         let Some(lookup) = self.lookups.get(usize::from(lookup_idx)) else {
             return false;
         };
-        let active: Vec<usize> = lookup
+        let mut cur_mask = *buf_mask;
+        let mut active: Vec<usize> = lookup
             .sub_masks
             .iter()
             .enumerate()
-            .filter(|(_, (nec, _))| nec.intersects(buf_mask))
+            .filter(|(_, (nec, _))| nec.intersects(&cur_mask))
             .map(|(idx, _)| idx)
             .collect();
         if active.is_empty() {
@@ -1070,6 +1075,7 @@ impl LayoutTable {
                 continue;
             }
             let mut matched = false;
+            let mut next_mask = None;
             for &si in &active {
                 if !lookup.sub_masks[si].1.contains(gid) {
                     continue;
@@ -1081,8 +1087,22 @@ impl LayoutTable {
                     i += advance_slots.max(1);
                     matched = true;
                     any_matched = true;
+                    let candidate = buffer_mask(buf);
+                    if candidate != cur_mask {
+                        next_mask = Some(candidate);
+                    }
                     break;
                 }
+            }
+            if let Some(m) = next_mask {
+                cur_mask = m;
+                active = lookup
+                    .sub_masks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (nec, _))| nec.intersects(&cur_mask))
+                    .map(|(idx, _)| idx)
+                    .collect();
             }
             if !matched {
                 i += 1;
@@ -1267,15 +1287,18 @@ impl Subtable {
             Self::GsubLigature(s) => {
                 let first_cnt = s.cov.glyph_count_estimate();
                 let mut second_mask = CovMask::empty();
+                let mut has_single_comp = false;
                 for rules in &s.sets {
                     for rule in rules {
                         if let Some(&g1) = rule.components.first() {
                             second_mask.insert(g1);
+                        } else {
+                            has_single_comp = true;
                         }
                     }
                 }
                 let second_cnt = second_mask.count_ones();
-                if second_cnt > 0 && second_cnt < first_cnt {
+                if !has_single_comp && second_cnt > 0 && second_cnt < first_cnt {
                     second_mask
                 } else {
                     s.cov.to_mask()
@@ -1380,7 +1403,7 @@ impl SingleSubst {
         match self {
             Self::Delta { cov, delta } => {
                 cov.get(gid)?;
-                buf[at].gid = (i32::from(gid) + i32::from(*delta)) as u16;
+                buf[at].gid = gid.wrapping_add_signed(*delta);
                 Some(1)
             }
             Self::Array { cov, subst } => {
@@ -1422,7 +1445,7 @@ impl MultipleSubst {
     fn apply(&self, buf: &mut Vec<GlyphSlot>, at: usize) -> Option<usize> {
         let idx = usize::from(self.cov.get(buf[at].gid)?);
         let seq = self.seqs.get(idx)?;
-        if seq.is_empty() || buf.len() + seq.len() > MAX_OUTPUT_GLYPHS {
+        if seq.is_empty() || buf.len() + seq.len() - 1 > MAX_OUTPUT_GLYPHS {
             return None;
         }
         let base = buf[at];
@@ -1553,9 +1576,11 @@ impl LigatureSubst {
                 let last_c_end = buf[last].cluster + buf[last].cluster_span;
                 buf[at].gid = rule.lig_glyph;
                 buf[at].cluster_span = last_c_end.saturating_sub(first_c).max(1);
-                let lig_id = (at as u16).saturating_add(1);
+                let max_lig = buf.iter().map(|s| s.lig_id).max().unwrap_or(0);
+                let lig_id = max_lig.saturating_add(1);
                 buf[at].lig_id = lig_id;
-                // Reassign intervening marks to components before removing component base glyphs.
+                // Reassign intervening marks to components before removing component base glyphs,
+                // plus trailing marks belonging to the final ligature component.
                 let mut prev_pos = at;
                 for (comp_num, &m_idx) in (1u16..).zip(matched_indices.iter()) {
                     for slot in buf.iter_mut().take(m_idx).skip(prev_pos + 1) {
@@ -1563,6 +1588,14 @@ impl LigatureSubst {
                         slot.lig_id = lig_id;
                     }
                     prev_pos = m_idx;
+                }
+                let final_comp = matched_indices.len() as u16;
+                for slot in buf.iter_mut().skip(last + 1) {
+                    if gdef.glyph_class(slot.gid) != 3 {
+                        break;
+                    }
+                    slot.lig_comp = final_comp;
+                    slot.lig_id = lig_id;
                 }
                 for &m_idx in matched_indices.iter().rev() {
                     buf.remove(m_idx);
@@ -2772,5 +2805,108 @@ mod tests {
         // mark2 sits at base_origin + 250 + 20 = pen(500) - 230 (NOT pen - 730!)
         assert_eq!(buf[2].x_offset, -230);
         assert_eq!(buf[2].y_offset, 750);
+    }
+
+    #[test]
+    fn resolve_attachments_propagates_base_offset_and_ligature_marks() {
+        let mut buf = vec![
+            GlyphSlot {
+                gid: 10,
+                cluster: 0,
+                cluster_span: 1,
+                mask: MASK_GLOBAL,
+                x_advance: 500,
+                x_offset: 30,
+                y_offset: 40,
+                attach_to: None,
+                lig_comp: 0,
+                lig_id: 0,
+            },
+            GlyphSlot {
+                gid: 20,
+                cluster: 0,
+                cluster_span: 1,
+                mask: MASK_GLOBAL,
+                x_advance: 0,
+                x_offset: 100,
+                y_offset: 200,
+                attach_to: Some(0),
+                lig_comp: 0,
+                lig_id: 0,
+            },
+        ];
+        resolve_attachments(&mut buf);
+        assert_eq!(buf[1].x_offset, 30 + 100 - 500);
+        assert_eq!(buf[1].y_offset, 240);
+
+        let gdef = GdefData {
+            glyph_class: ClassDef::Ranges(vec![(10, 11, 1), (20, 21, 3)]),
+            mark_attach_class: ClassDef::Empty,
+            mark_glyph_sets: Vec::new(),
+        };
+        let lig = LigatureSubst {
+            cov: Coverage::List(vec![10]),
+            sets: vec![vec![LigatureRule {
+                lig_glyph: 50,
+                components: vec![11],
+            }]],
+        };
+        let mut lbuf = vec![
+            GlyphSlot {
+                gid: 10,
+                cluster: 0,
+                cluster_span: 1,
+                mask: MASK_GLOBAL,
+                x_advance: 400,
+                x_offset: 0,
+                y_offset: 0,
+                attach_to: None,
+                lig_comp: 0,
+                lig_id: 0,
+            },
+            GlyphSlot {
+                gid: 20,
+                cluster: 0,
+                cluster_span: 1,
+                mask: MASK_GLOBAL,
+                x_advance: 0,
+                x_offset: 0,
+                y_offset: 0,
+                attach_to: None,
+                lig_comp: 0,
+                lig_id: 0,
+            },
+            GlyphSlot {
+                gid: 11,
+                cluster: 1,
+                cluster_span: 1,
+                mask: MASK_GLOBAL,
+                x_advance: 400,
+                x_offset: 0,
+                y_offset: 0,
+                attach_to: None,
+                lig_comp: 0,
+                lig_id: 0,
+            },
+            GlyphSlot {
+                gid: 21,
+                cluster: 1,
+                cluster_span: 1,
+                mask: MASK_GLOBAL,
+                x_advance: 0,
+                x_offset: 0,
+                y_offset: 0,
+                attach_to: None,
+                lig_comp: 0,
+                lig_id: 0,
+            },
+        ];
+        assert_eq!(lig.apply(&gdef, &mut lbuf, 0, FLAG_IGNORE_MARKS, None), Some(1));
+        assert_eq!(lbuf.len(), 3);
+        assert_eq!(lbuf[0].gid, 50);
+        assert_eq!(lbuf[1].lig_comp, 0);
+        assert_eq!(lbuf[2].lig_comp, 1);
+        assert_eq!(lbuf[1].lig_id, lbuf[0].lig_id);
+        assert_eq!(lbuf[2].lig_id, lbuf[0].lig_id);
     }
 }
