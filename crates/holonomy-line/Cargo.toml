@@ -12,4 +12,6 @@ workspace = true
 
 [dependencies]
 holonomy-seal = { path = "../holonomy-seal" }
+
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true

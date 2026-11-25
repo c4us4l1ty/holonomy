@@ -31,15 +31,19 @@ jobs:
     permissions:
       contents: read
       issues: write
-    needs: [fmt, clippy, test, gates, sync, filesystem, portability]
+    needs: [fmt, clippy, test, gates, sync, filesystem, portability, xvfb, cross-os]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install optional qualification tools
         run: |
-          if ! command -v rsync >/dev/null 2>&1 || ! command -v mkfs.ext4 >/dev/null 2>&1; then
+          if ! command -v rsync >/dev/null 2>&1 \
+            || ! command -v mkfs.ext4 >/dev/null 2>&1 \
+            || ! command -v Xvfb >/dev/null 2>&1 \
+            || ! command -v xdotool >/dev/null 2>&1 \
+            || ! command -v xwd >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y rsync e2fsprogs
+            sudo apt-get install -y rsync e2fsprogs xvfb x11-apps xdotool
           fi
       - name: Reproduce each command and post output to the diag issue
         env:
@@ -68,6 +72,8 @@ jobs:
               "cargo test --locked -p holonomy-text --release --test keystroke_fuzz -- --exact --ignored --nocapture a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement" \
               "cargo run --locked -p xtask -- gates --check" \
               "cargo test --locked -p holonomy-line --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored --nocapture" \
+              "cargo test --locked -p holonomy-gui --release --test persist -- --ignored --nocapture" \
+              "scripts/qualify-x11-gui.sh" \
               "cargo build --locked --release -p holonomy-gui --bin holonomy && HOLONOMY_BINARY=$(pwd)/target/release/holonomy scripts/qualify-l9-portability.sh" \
               "scripts/qualify-ext4-enospc.sh"; do
               echo "== $cmd"
@@ -269,6 +275,14 @@ jobs:
           grep 'HOLONOMY_PERSIST order' "$RUNNER_TEMP/persist.log" > "$RUNNER_TEMP/persist.txt"
           grep 'HOLONOMY_PERSIST erase' "$RUNNER_TEMP/persist.log" >> "$RUNNER_TEMP/persist.txt"
           cat "$RUNNER_TEMP/persist.txt"
+      # L-1 / L-2 / L-3 release benchmarks: 60-year (21,900 witness) scrub + 30 M-word cold open.
+      - name: Measure 60-year witness scrub and 30 M-word cold open (L-1, L-2, L-3)
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-gui --release --test persist -- --ignored --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/persist-scale.log"
+          grep -E 'HOLONOMY_(60YR_SCRUB|COLD_OPEN_30M)' "$RUNNER_TEMP/persist-scale.log" \
+            | tee -a "$RUNNER_TEMP/persist.txt"
       # The step above prints a test's `--nocapture` output, and this repository's job logs are not
       # retrievable from the environment the audit runs in. So the numbers go where the other
       # measurements go: the audit issue, base64 because the workflow is watched for plaintext.
@@ -277,10 +291,95 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          { echo '### OQ-29 / OQ-30 — what a reopen and a deletion do to a document';
+          { echo '### OQ-29 / OQ-30 / L-1 / L-2 — persistence & 60yr/30M scale';
             echo '```text'; cat "$RUNNER_TEMP/persist.txt"; echo '```'; } \
             > "$RUNNER_TEMP/persist-comment.md"
           gh issue comment 51 --body-file "$RUNNER_TEMP/persist-comment.md"
+
+  xvfb:
+    name: X11 GUI live Xvfb qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Ensure Xvfb, xdotool, and xwd are installed
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-apps xdotool
+      - name: Launch holonomy-gui on Xvfb and verify framebuffer + persisted container
+        run: |
+          set -o pipefail
+          scripts/qualify-x11-gui.sh 2>&1 | tee "$RUNNER_TEMP/xvfb.log"
+          grep 'HOLONOMY_XVFB_CAPTURE' "$RUNNER_TEMP/xvfb.log" > "$RUNNER_TEMP/xvfb.txt"
+      - name: Record Xvfb GUI evidence in the audit issue
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { echo '### X11 GUI live Xvfb qualification'; echo '```text'; cat "$RUNNER_TEMP/xvfb.txt"; echo '```'; } \
+            > "$RUNNER_TEMP/xvfb-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/xvfb-comment.md"
+
+  cross-os:
+    name: cross-OS build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run clippy, workspace tests, and release build
+        shell: bash
+        run: |
+          set +e
+          {
+            echo "=== cross-os clippy (${{ matrix.os }}) ==="
+            cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1
+            CLIPPY_RC=${PIPESTATUS[0]}
+            echo "clippy_rc=$CLIPPY_RC"
+            if [ "$CLIPPY_RC" -eq 0 ]; then
+              echo "=== cross-os test (${{ matrix.os }}) ==="
+              cargo test --locked --workspace 2>&1
+              TEST_RC=${PIPESTATUS[0]}
+            else
+              TEST_RC=1
+            fi
+            echo "test_rc=$TEST_RC"
+            if [ "$CLIPPY_RC" -eq 0 ] && [ "$TEST_RC" -eq 0 ]; then
+              echo "=== cross-os release build (${{ matrix.os }}) ==="
+              cargo build --locked --release -p holonomy-gui --bin holonomy --bin holonomy-gui 2>&1
+              BUILD_RC=${PIPESTATUS[0]}
+            else
+              BUILD_RC=1
+            fi
+            echo "build_rc=$BUILD_RC"
+            exit $(( CLIPPY_RC || TEST_RC || BUILD_RC ))
+          } | tee "$RUNNER_TEMP/cross-os.log"
+          exit ${PIPESTATUS[0]}
+      - name: Report cross-OS failure diagnostics to issue 51
+        if: failure() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          {
+            echo "### cross-os failure (${{ matrix.os }})"
+            echo '```text'
+            tail -c 24000 "$RUNNER_TEMP/cross-os.log" || true
+            echo '```'
+          } > "$RUNNER_TEMP/cross-os-err.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/cross-os-err.md"
 
   sync:
     name: L-10 rsync transfer measurement

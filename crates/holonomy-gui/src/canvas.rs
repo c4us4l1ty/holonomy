@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use holonomy_eye::{Fixed, FontSet, GlyphBitmap, Point, Shaper, Style, View};
+use holonomy_eye::{
+    Clusters, Fixed, FontSet, GlyphBitmap, Picture, PictureCluster, Point, Shaper, Style, View,
+};
 use holonomy_line::WitnessSummary;
 use holonomy_seal::{
     probe_capability, CanarySet, LockCapability, PassphraseInput, ReaperGuard, SchedClass,
@@ -17,13 +19,14 @@ use holonomy_seal::{
 };
 use holonomy_shell::{Editor, Effect, Intent, Rgba8, QUIET_MD_THEME};
 use holonomy_text::{
-    Alignment, FontFamily, Heading, ListKind, ResidentSet, StylePatch, TriState, Typing,
+    Alignment, FontFamily, Heading, ListKind, ResidentSet, SegmentSink, SpineDiffHunk,
+    SpineDiffKind, StylePatch, TriState, Typing,
 };
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::panel::Facts;
-use crate::store::{self, Document};
-use crate::x11::{DesktopEvent, X11Error, X11Window};
+use crate::platform::{open_desktop_window, DesktopEvent, DesktopWindow, MAX_CLIPBOARD_BYTES};
+use crate::store::{self, Document, HistorySearchHit};
 use crate::{App, Key, Keymap, Modifiers, SealWipeBridge, Surface};
 
 const STATUS_BAR_HEIGHT_PX: i32 = 24;
@@ -199,7 +202,8 @@ impl FrameBuffer {
     }
 }
 
-/// Draws a single line of text at `baseline_y` using `FontSet` at `(zoom_milli = 1000, dpi = 96)`.
+/// Draws a single line of text at `baseline_y` using `FontSet` OpenType `GSUB`/`GPOS` shaping at
+/// `(zoom_milli = 1000, dpi = 96)`.
 #[allow(clippy::too_many_arguments)]
 fn draw_ui_text(
     fb: &mut FrameBuffer,
@@ -211,16 +215,23 @@ fn draw_ui_text(
     color: Rgba8,
     clip: Rect,
 ) -> i32 {
+    let clusters: Vec<&str> = Clusters::new(text).map(|(_, c)| c).collect();
+    if clusters.is_empty() {
+        return x;
+    }
+    let shaped = fonts.shape_run(&clusters, style);
     let mut pen_64ths = i64::from(x) * 64;
-    let mut tmp = [0u8; 4];
-    for ch in text.chars() {
-        let s = ch.encode_utf8(&mut tmp);
-        let adv = fonts.advance(s, style).sixtyfourths();
-        let px = ((pen_64ths + 32) >> 6) as i32;
-        if let Some(bmp) = fonts.rasterize_char(style, 1_000, 96, ch) {
+    for (variant, g) in shaped {
+        let xo = fonts.scale_units(variant, g.x_offset, style).sixtyfourths();
+        let yo = (fonts.scale_units(variant, g.y_offset, style).sixtyfourths() + 32) >> 6;
+        let adv = fonts
+            .scale_units(variant, g.x_advance, style)
+            .sixtyfourths();
+        let px = ((pen_64ths + xo + 32) >> 6) as i32;
+        if let Some(bmp) = fonts.rasterize_glyph(variant, g.glyph_id, style, 1_000, 96) {
             fb.blend_glyph(
                 px + bmp.bearing_x,
-                baseline_y - bmp.bearing_y,
+                baseline_y - (yo as i32) - bmp.bearing_y,
                 &bmp,
                 color,
                 clip,
@@ -523,6 +534,157 @@ impl Surface for PixelSurface {
         }
     }
 
+    fn line_clusters(&mut self, y: Fixed, text: &str, origin: u64, clusters: &[PictureCluster]) {
+        if clusters.is_empty() {
+            return;
+        }
+        let dy = self.page_origin_y + self.to_px(y);
+        let mut run_start = 0usize;
+        while run_start < clusters.len() {
+            let style = clusters[run_start].style;
+            let mut run_end = run_start + 1;
+            while run_end < clusters.len() && clusters[run_end].style == style {
+                run_end += 1;
+            }
+            let run = &clusters[run_start..run_end];
+            self.painted_clusters += run.len();
+
+            let line_h_px = self.to_px(self.fonts.line_height(style)).max(1);
+            let ascent_px = self.to_px(self.fonts.ascent(style));
+            let baseline_y = dy + ascent_px;
+
+            if style.blockquote() > 0 && run[0].x <= Fixed::units(24) {
+                for level in 0..i32::from(style.blockquote().min(4)) {
+                    self.fb.fill_rect_clipped(
+                        Rect::new(
+                            self.page_origin_x - 14 - level * 8,
+                            dy + 2,
+                            3,
+                            (line_h_px - 4).max(4),
+                        ),
+                        QUIET_MD_THEME.quote_bar,
+                        self.canvas_clip,
+                    );
+                }
+            }
+
+            if style.is_horizontal_rule() {
+                if run[0].x <= Fixed::units(16) {
+                    self.fb.fill_rect_clipped(
+                        Rect::new(
+                            self.page_origin_x,
+                            dy + line_h_px / 2,
+                            self.page_measure_px,
+                            1,
+                        ),
+                        QUIET_MD_THEME.line_divider,
+                        self.canvas_clip,
+                    );
+                }
+                run_start = run_end;
+                continue;
+            }
+
+            let run_left = run[0].x;
+            let run_right = run.last().map_or(run_left, PictureCluster::end);
+            let run_dx = self.page_origin_x + self.to_px(run_left);
+            let run_adv_px = (self.to_px(run_right) - self.to_px(run_left)).max(0);
+
+            if style.is_code_span() && run_adv_px > 0 {
+                self.fb.fill_rect_clipped(
+                    Rect::new(run_dx, dy + 1, run_adv_px, (line_h_px - 2).max(4)),
+                    QUIET_MD_THEME.code_bg,
+                    self.canvas_clip,
+                );
+            }
+
+            let ink = if style.link_id().is_some() {
+                QUIET_MD_THEME.link
+            } else {
+                QUIET_MD_THEME.text
+            };
+
+            let is_rtl = run.len() >= 2 && run[0].byte > run[run.len() - 1].byte;
+            let slices: Vec<&str> = if is_rtl {
+                run.iter()
+                    .rev()
+                    .map(|c| {
+                        let from = usize::try_from(c.byte.saturating_sub(origin)).unwrap_or(0);
+                        text.get(from..from + c.len).unwrap_or_default()
+                    })
+                    .collect()
+            } else {
+                run.iter()
+                    .map(|c| {
+                        let from = usize::try_from(c.byte.saturating_sub(origin)).unwrap_or(0);
+                        text.get(from..from + c.len).unwrap_or_default()
+                    })
+                    .collect()
+            };
+
+            let shaped = self.fonts.shape_run(&slices, style);
+            let mut last_cluster = usize::MAX;
+            let mut pen_in_cluster_64 = 0i64;
+            for (variant, g) in shaped {
+                if g.cluster >= run.len() {
+                    continue;
+                }
+                if g.cluster != last_cluster {
+                    last_cluster = g.cluster;
+                    pen_in_cluster_64 = 0;
+                }
+                let span = g.cluster_span.max(1).min(run.len() - g.cluster);
+                let vis_idx = if is_rtl {
+                    run.len() - (g.cluster + span)
+                } else {
+                    g.cluster
+                };
+                let base_x = run[vis_idx].x;
+                let xo_log = self.fonts.scale_units(variant, g.x_offset, style);
+                let yo_log = self.fonts.scale_units(variant, g.y_offset, style);
+                let adv_log = self.fonts.scale_units(variant, g.x_advance, style);
+
+                let gx_64 = self.view.to_device(base_x + xo_log).sixtyfourths() + pen_in_cluster_64;
+                let gy_off = ((self.view.to_device(yo_log).sixtyfourths() + 32) >> 6) as i32;
+                let gx = self.page_origin_x + (((gx_64 + 32) >> 6) as i32);
+
+                if let Some(bmp) = self.fonts.rasterize_glyph(
+                    variant,
+                    g.glyph_id,
+                    style,
+                    self.view.zoom_milli(),
+                    self.view.dpi(),
+                ) {
+                    self.fb.blend_glyph(
+                        gx + bmp.bearing_x,
+                        baseline_y - gy_off - bmp.bearing_y,
+                        &bmp,
+                        ink,
+                        self.canvas_clip,
+                    );
+                }
+                pen_in_cluster_64 += self.view.to_device(adv_log).sixtyfourths();
+            }
+
+            if style.is_underline() && run_adv_px > 0 {
+                self.fb.fill_rect_clipped(
+                    Rect::new(run_dx, baseline_y + 2, run_adv_px, 1),
+                    ink,
+                    self.canvas_clip,
+                );
+            }
+            if style.is_strikethrough() && run_adv_px > 0 {
+                let mid = baseline_y - (ascent_px / 3).max(2);
+                self.fb.fill_rect_clipped(
+                    Rect::new(run_dx, mid, run_adv_px, 1),
+                    ink,
+                    self.canvas_clip,
+                );
+            }
+            run_start = run_end;
+        }
+    }
+
     fn caret(&mut self, x: Fixed, y: Fixed, height: Fixed) {
         let dx = self.page_origin_x + self.to_px(x);
         let dy = self.page_origin_y + self.to_px(y);
@@ -677,12 +839,16 @@ fn draw_toolbar_button(
 
 /// Renders the fixed `40 px` top Ribbon (`UI-SPEC.md` §3, Law `U0`) directly from `app.editor().toolbar_state()`
 /// and returns hit boxes for every clickable toolbar control.
-fn render_toolbar(
-    app: &mut App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>,
+fn render_toolbar<S, R>(
+    app: &mut App<S, R, FontSet, PixelSurface>,
     dot_state: SecurityDotState,
     read_only_history: bool,
     history_open: bool,
-) -> Vec<ToolbarHit> {
+) -> Vec<ToolbarHit>
+where
+    S: holonomy_text::SegmentSink,
+    R: holonomy_text::SegmentSource,
+{
     let tb = app.editor().toolbar_state();
     let zoom_pct = (app.editor().view().zoom_milli() / 10).clamp(50, 300);
     let surface = app.surface_mut();
@@ -1045,22 +1211,57 @@ fn render_security_overlay(surface: &mut PixelSurface, facts: &Facts) {
     }
 }
 
-/// Interactive state for the Block 8 read-only history timeline drawer.
-#[derive(Debug, Clone)]
+/// Read-only segment sink used by historical timeline viewports (`Block 8`) so historical
+/// `Editor` instances never allocate or append segments.
+#[derive(Debug, Default, Clone, Copy)]
+struct ReadOnlySink;
+
+impl SegmentSink for ReadOnlySink {
+    fn append_segment(&mut self, _plaintext: &[u8]) -> Result<holonomy_text::Appended, String> {
+        Err("history view is read-only".to_owned())
+    }
+}
+
+/// Interactive state for the Block 8 read-only history timeline scrubber & diff viewer.
 struct HistoryDrawerState {
     witnesses: Vec<WitnessSummary>,
     selected_idx: usize,
-    preview_text: String,
+    diff_base_idx: usize,
+    diff_hunks: Vec<SpineDiffHunk>,
+    diff_summary: String,
+    preview_text: Zeroizing<String>,
     preview_len: u64,
     bookmark_msg: String,
+    bookmark_input: Option<String>,
+    search_input: Option<String>,
+    search_hits: Vec<HistorySearchHit>,
+    search_cursor: usize,
+    history_editor: Option<Editor<ReadOnlySink, store::DocumentSource, FontSet>>,
+    scrubbing: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryButton {
+    ScrubTrack(Rect),
     SelectWitness(usize),
-    AddBookmark,
+    SelectBookmark(u64),
+    SelectSearchHit(usize),
+    StartBookmark,
+    StartSearch,
+    NextSearchHit,
+    SetDiffBase,
+    DiffPrev,
     RestoreSelected,
     CloseLive,
+}
+
+fn scrub_index_for_x(track: Rect, x: i32, count: usize) -> usize {
+    if count <= 1 {
+        return 0;
+    }
+    let span = (track.w - 1).max(1);
+    let rel = (x - track.x).clamp(0, span);
+    ((rel as i64 * (count as i64 - 1) + i64::from(span) / 2) / i64::from(span)) as usize
 }
 
 fn render_history_drawer(
@@ -1072,8 +1273,8 @@ fn render_history_drawer(
     let fonts = surface.fonts().clone();
     let fb = surface.framebuffer_mut();
     let top = i32::from(QUIET_MD_THEME.toolbar_height_px);
-    let drawer_w = (i32::from(w) / 3).clamp(280, 380);
-    let drawer_h = (i32::from(h) - top - STATUS_BAR_HEIGHT_PX).max(120);
+    let drawer_w = (i32::from(w) / 3).clamp(300, 410);
+    let drawer_h = (i32::from(h) - top - STATUS_BAR_HEIGHT_PX).max(160);
     let drawer = Rect::new(i32::from(w) - drawer_w, top, drawer_w, drawer_h);
 
     fb.fill_rect_clipped(drawer, QUIET_MD_THEME.bg_body, drawer);
@@ -1082,34 +1283,106 @@ fn render_history_drawer(
     let mut hits = Vec::new();
     let pad_x = drawer.x + 14;
     let mut y = drawer.y + 24;
+    let total = state.witnesses.len();
+    let cur_seq = state
+        .witnesses
+        .get(state.selected_idx)
+        .map_or(0, |w| w.sequence);
+    let title = format!("Timeline Scrubber (#{cur_seq} / {total})");
     draw_ui_text(
         fb,
         &fonts,
         pad_x,
         y,
-        "Timeline & Bookmarks (Read-Only)",
+        &title,
         Style::at(940).bold(),
         QUIET_MD_THEME.text,
         drawer,
     );
-    y += 12;
+    y += 10;
 
-    // Action row: Bookmark, Restore, Live
+    // Interactive scrubber track across all witnesses with bookmark + search-hit markers.
+    let track = Rect::new(pad_x, y, drawer_w - 28, 22);
+    let rail = Rect::new(track.x, track.y + 9, track.w, 4);
+    fb.fill_rect_clipped(rail, QUIET_MD_THEME.code_gutter, drawer);
+    fb.stroke_rect(rail, QUIET_MD_THEME.line_border, drawer);
+
+    let seq_to_x = |seq: u64| -> Option<i32> {
+        if total <= 1 {
+            return Some(track.x + track.w / 2);
+        }
+        let idx = state
+            .witnesses
+            .binary_search_by_key(&seq, |w| w.sequence)
+            .ok()?;
+        let rel = (idx as i64 * i64::from((track.w - 4).max(1))) / (total as i64 - 1);
+        Some(track.x + rel as i32)
+    };
+    for hit in &state.search_hits {
+        if let Some(hx) = seq_to_x(hit.witness_sequence) {
+            fb.fill_rect_clipped(
+                Rect::new(hx, track.y + 3, 2, 16),
+                QUIET_MD_THEME.link,
+                drawer,
+            );
+        }
+    }
+    for bm in bookmarks {
+        if let Some(bx) = seq_to_x(bm.witness_sequence) {
+            fb.fill_rect_clipped(
+                Rect::new(bx, track.y + 2, 3, 18),
+                Rgba8::rgb(0xb4, 0x53, 0x09),
+                drawer,
+            );
+        }
+    }
+    let knob_x = if total <= 1 {
+        track.x
+    } else {
+        track.x
+            + ((state.selected_idx as i64 * i64::from((track.w - 10).max(1))) / (total as i64 - 1))
+                as i32
+    };
+    let knob = Rect::new(knob_x, track.y + 3, 10, 16);
+    fb.fill_rect_clipped(knob, QUIET_MD_THEME.link, drawer);
+    hits.push((track, HistoryButton::ScrubTrack(track)));
+    y += 28;
+
+    // Action row 1: +Bookmark, Search, Restore, Live
     let (bm_rect, nx) = draw_toolbar_button(
         fb,
         &fonts,
         pad_x,
         y,
-        "+Bookmark",
-        ButtonHighlight::Off,
+        "+Mark",
+        if state.bookmark_input.is_some() {
+            ButtonHighlight::Active
+        } else {
+            ButtonHighlight::Off
+        },
         false,
         drawer,
     );
-    hits.push((bm_rect, HistoryButton::AddBookmark));
-    let (rs_rect, nx2) = draw_toolbar_button(
+    hits.push((bm_rect, HistoryButton::StartBookmark));
+    let (sr_rect, nx2) = draw_toolbar_button(
         fb,
         &fonts,
         nx + 4,
+        y,
+        "Search",
+        if state.search_input.is_some() {
+            ButtonHighlight::Active
+        } else {
+            ButtonHighlight::Off
+        },
+        false,
+        drawer,
+    );
+    hits.push((sr_rect, HistoryButton::StartSearch));
+    let (rs_rect, nx3) = draw_toolbar_button(
+        fb,
+        &fonts,
+        nx2 + 4,
         y,
         "Restore",
         ButtonHighlight::Active,
@@ -1120,7 +1393,7 @@ fn render_history_drawer(
     let (lv_rect, _) = draw_toolbar_button(
         fb,
         &fonts,
-        nx2 + 4,
+        nx3 + 4,
         y,
         "Live",
         ButtonHighlight::Off,
@@ -1128,30 +1401,172 @@ fn render_history_drawer(
         drawer,
     );
     hits.push((lv_rect, HistoryButton::CloseLive));
-    y += 34;
+    y += 28;
+
+    // Action row 2: Diff base selectors
+    let (sb_rect, dx1) = draw_toolbar_button(
+        fb,
+        &fonts,
+        pad_x,
+        y,
+        "PinBase",
+        ButtonHighlight::Off,
+        false,
+        drawer,
+    );
+    hits.push((sb_rect, HistoryButton::SetDiffBase));
+    let (dp_rect, dx2) = draw_toolbar_button(
+        fb,
+        &fonts,
+        dx1 + 4,
+        y,
+        "DiffPrev",
+        ButtonHighlight::Off,
+        false,
+        drawer,
+    );
+    hits.push((dp_rect, HistoryButton::DiffPrev));
+    if !state.search_hits.is_empty() {
+        let (nh_rect, _) = draw_toolbar_button(
+            fb,
+            &fonts,
+            dx2 + 4,
+            y,
+            "NextHit",
+            ButtonHighlight::Active,
+            false,
+            drawer,
+        );
+        hits.push((nh_rect, HistoryButton::NextSearchHit));
+    }
+    y += 28;
+
+    // Inline bookmark or history search input box when active.
+    if let Some(ref draft_bm) = state.bookmark_input {
+        let box_rect = Rect::new(pad_x, y, drawer_w - 28, 24);
+        fb.fill_rect_clipped(box_rect, QUIET_MD_THEME.code_bg, drawer);
+        fb.stroke_rect(box_rect, QUIET_MD_THEME.link, drawer);
+        draw_ui_text(
+            fb,
+            &fonts,
+            box_rect.x + 6,
+            box_rect.y + 16,
+            &format!("Bookmark name: {draft_bm}| (Enter save)"),
+            Style::at(800),
+            QUIET_MD_THEME.text,
+            box_rect,
+        );
+        y += 28;
+    } else if let Some(ref query) = state.search_input {
+        let box_rect = Rect::new(pad_x, y, drawer_w - 28, 24);
+        fb.fill_rect_clipped(box_rect, QUIET_MD_THEME.code_bg, drawer);
+        fb.stroke_rect(box_rect, QUIET_MD_THEME.link, drawer);
+        draw_ui_text(
+            fb,
+            &fonts,
+            box_rect.x + 6,
+            box_rect.y + 16,
+            &format!("Find across history: {query}| (Enter)"),
+            Style::at(800),
+            QUIET_MD_THEME.text,
+            box_rect,
+        );
+        y += 28;
+    }
+
+    if !state.diff_summary.is_empty() {
+        draw_ui_text(
+            fb,
+            &fonts,
+            pad_x,
+            y + 12,
+            &state.diff_summary,
+            Style::at(780),
+            QUIET_MD_THEME.text_caption,
+            drawer,
+        );
+        y += 18;
+    }
 
     if !state.bookmark_msg.is_empty() {
         draw_ui_text(
             fb,
             &fonts,
             pad_x,
-            y + 10,
+            y + 12,
             &state.bookmark_msg,
-            Style::at(800),
+            Style::at(780),
             QUIET_MD_THEME.link,
             drawer,
         );
-        y += 20;
+        y += 18;
     }
 
-    let max_rows = ((drawer_h - (y - drawer.y) - 120) / 22).max(2) as usize;
-    let total = state.witnesses.len();
+    // Named bookmark quick-jump strip (up to 3 recent bookmarks).
+    if !bookmarks.is_empty() {
+        let mut bx = pad_x;
+        for bm in bookmarks.iter().rev().take(3) {
+            let tag = format!("@{}:#{}", bm.name, bm.witness_sequence);
+            let (bm_hit, nx_bm) = draw_toolbar_button(
+                fb,
+                &fonts,
+                bx,
+                y,
+                &tag,
+                if bm.witness_sequence == cur_seq {
+                    ButtonHighlight::Active
+                } else {
+                    ButtonHighlight::Off
+                },
+                false,
+                drawer,
+            );
+            hits.push((bm_hit, HistoryButton::SelectBookmark(bm.witness_sequence)));
+            bx = nx_bm + 4;
+            if bx + 70 >= drawer.x + drawer_w {
+                break;
+            }
+        }
+        y += 26;
+    }
+
+    // Matching history search hits when present (up to 4 compact rows).
+    if !state.search_hits.is_empty() {
+        for (h_idx, hit) in state.search_hits.iter().enumerate().take(4) {
+            let row_rect = Rect::new(drawer.x + 8, y, drawer_w - 16, 18);
+            if h_idx == state.search_cursor {
+                fb.fill_rect_clipped(row_rect, Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 16), drawer);
+            }
+            let txt = format!(
+                "Hit #{} · {}x @ byte {}",
+                hit.witness_sequence,
+                hit.count,
+                hit.first_offset.unwrap_or(0)
+            );
+            draw_ui_text(
+                fb,
+                &fonts,
+                pad_x,
+                y + 13,
+                &txt,
+                Style::at(780),
+                QUIET_MD_THEME.link,
+                drawer,
+            );
+            hits.push((row_rect, HistoryButton::SelectSearchHit(h_idx)));
+            y += 19;
+        }
+    }
+
+    let max_rows = ((drawer_h - (y - drawer.y) - 108) / 21).max(2) as usize;
     let start = state.selected_idx.saturating_sub(max_rows / 2);
     let end = (start + max_rows).min(total);
     for (idx, w_sum) in state.witnesses.iter().enumerate().take(end).skip(start) {
         let row_rect = Rect::new(drawer.x + 8, y, drawer_w - 16, 20);
         if idx == state.selected_idx {
             fb.fill_rect_clipped(row_rect, Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 16), drawer);
+        } else if idx == state.diff_base_idx {
+            fb.fill_rect_clipped(row_rect, Rgba8::rgba_pct(0x16, 0xa3, 0x4a, 12), drawer);
         }
         let bm_tag = bookmarks
             .iter()
@@ -1159,9 +1574,14 @@ fn render_history_drawer(
             .find(|b| b.witness_sequence == w_sum.sequence)
             .map(|b| format!(" [{}]", b.name))
             .unwrap_or_default();
+        let base_tag = if idx == state.diff_base_idx {
+            " (base)"
+        } else {
+            ""
+        };
         let label = format!(
-            "#{} · {} segs{}",
-            w_sum.sequence, w_sum.segment_count, bm_tag
+            "#{} · {} segs{}{}",
+            w_sum.sequence, w_sum.segment_count, base_tag, bm_tag
         );
         draw_ui_text(
             fb,
@@ -1169,7 +1589,7 @@ fn render_history_drawer(
             pad_x,
             y + 15,
             &label,
-            Style::at(840),
+            Style::at(820),
             if idx == state.selected_idx {
                 QUIET_MD_THEME.link
             } else {
@@ -1178,11 +1598,11 @@ fn render_history_drawer(
             drawer,
         );
         hits.push((row_rect, HistoryButton::SelectWitness(idx)));
-        y += 22;
+        y += 21;
     }
 
     // Excerpt preview box
-    let prev_rect = Rect::new(drawer.x + 10, drawer.y + drawer_h - 104, drawer_w - 20, 94);
+    let prev_rect = Rect::new(drawer.x + 10, drawer.y + drawer_h - 98, drawer_w - 20, 88);
     fb.fill_rect_clipped(prev_rect, QUIET_MD_THEME.code_bg, drawer);
     fb.stroke_rect(prev_rect, QUIET_MD_THEME.line_border, drawer);
     let hdr = format!("Snapshot ({} bytes):", state.preview_len);
@@ -1190,9 +1610,9 @@ fn render_history_drawer(
         fb,
         &fonts,
         prev_rect.x + 8,
-        prev_rect.y + 16,
+        prev_rect.y + 15,
         &hdr,
-        Style::at(800).bold(),
+        Style::at(780).bold(),
         QUIET_MD_THEME.text_caption,
         prev_rect,
     );
@@ -1201,9 +1621,9 @@ fn render_history_drawer(
             fb,
             &fonts,
             prev_rect.x + 8,
-            prev_rect.y + 36 + (line_no as i32) * 18,
+            prev_rect.y + 34 + (line_no as i32) * 17,
             line,
-            Style::at(820),
+            Style::at(800),
             QUIET_MD_THEME.text,
             prev_rect,
         );
@@ -1361,13 +1781,13 @@ where
     Ok(())
 }
 
-/// Interactive graphical passphrase / file-path prompt rendered right inside the X11 window when
+/// Interactive graphical passphrase / file-path prompt rendered right inside the window when
 /// `holonomy-gui` is launched without a pre-supplied stdin passphrase (`UI-SPEC.md` §5.1–§5.2).
 fn prompt_gui_document(
-    x11: &mut X11Window,
+    x11: &mut dyn DesktopWindow,
     fonts: &FontSet,
     initial_path: Option<&Path>,
-) -> Result<Option<(PathBuf, Document)>, X11Error> {
+) -> Result<Option<(PathBuf, Document)>, Box<dyn std::error::Error>> {
     let mut path_buf = initial_path
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "notes.wavefunction".to_owned());
@@ -1643,25 +2063,55 @@ pub enum DesktopEnd {
     WipeUnconfirmed(GuiWipeUnconfirmed, usize),
 }
 
-/// Runs the pure-`libc` X11 desktop window for Holonomy (`quiet-md` layout, live `ToolbarState`,
-/// embedded `Inter`/`JetBrains Mono` A8 rasterization, clipboard, security dot/panel, Block 8
-/// timeline drawer, autosave, and emergency wipe reaper).
+/// Runs the native desktop window for Holonomy (`X11` on Linux, `Cocoa`/`X11` on macOS,
+/// `Win32` on Windows): `quiet-md` layout, live `ToolbarState`, embedded `Inter`/`JetBrains Mono`
+/// A8 rasterization, clipboard, security dot/panel, Block 8 timeline scrubber, autosave, and
+/// emergency wipe reaper.
 ///
 /// # Errors
 ///
-/// Returns [`X11Error`] if the X11 display cannot be opened or communicates an error.
-pub fn run_x11_desktop(
+/// Returns an error if the platform display subsystem cannot be opened or communicates an error.
+pub fn run_desktop(
     initial_path: Option<&Path>,
     deadman: Option<Duration>,
 ) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
-    let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px)?;
     let title = match initial_path {
         Some(p) => format!("Holonomy \u{2014} {}", p.display()),
         None => "Holonomy".to_owned(),
     };
-    let mut x11 = X11Window::open(None, &title, 1_120, 780)?;
+    let win = open_desktop_window(&title, 1_120, 780)?;
+    run_desktop_with_window(win, initial_path, deadman)
+}
 
-    let Some((doc_path, document)) = prompt_gui_document(&mut x11, &fonts, initial_path)? else {
+/// Runs the pure-`libc` X11 desktop window for Holonomy (`quiet-md` layout, live `ToolbarState`,
+/// embedded `Inter`/`JetBrains Mono` A8 rasterization, clipboard, security dot/panel, Block 8
+/// timeline scrubber, autosave, and emergency wipe reaper).
+///
+/// # Errors
+///
+/// Returns an error if the X11 display cannot be opened or communicates an error.
+#[cfg(unix)]
+pub fn run_x11_desktop(
+    initial_path: Option<&Path>,
+    deadman: Option<Duration>,
+) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
+    let title = match initial_path {
+        Some(p) => format!("Holonomy \u{2014} {}", p.display()),
+        None => "Holonomy".to_owned(),
+    };
+    let x11 = crate::x11::X11Window::open(None, &title, 1_120, 780)?;
+    run_desktop_with_window(Box::new(x11), initial_path, deadman)
+}
+
+fn run_desktop_with_window(
+    mut x11: Box<dyn DesktopWindow>,
+    initial_path: Option<&Path>,
+    deadman: Option<Duration>,
+) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
+    let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px)?;
+
+    let Some((doc_path, document)) = prompt_gui_document(x11.as_mut(), &fonts, initial_path)?
+    else {
         return Ok(DesktopEnd::Cancelled);
     };
 
@@ -1687,6 +2137,7 @@ pub fn run_x11_desktop(
     let surface = PixelSurface::new(fonts.clone(), initial_view, win_w, win_h);
     let (lw, lh) = surface.logical_editor_extent();
 
+    let spine_len = spine.len();
     let mut editor = Editor::new(
         Typing::resume(document.sink(), spine, store::CAPACITY),
         residency,
@@ -1695,7 +2146,9 @@ pub fn run_x11_desktop(
         lh,
     );
     editor.set_view(initial_view);
-    let _ = editor.reflow();
+    if spine_len <= 2 * 1024 * 1024 {
+        let _ = editor.reflow();
+    }
 
     let keymap = Keymap::new(lh);
     let mut app = App::new(editor, keymap, surface);
@@ -1723,15 +2176,25 @@ pub fn run_x11_desktop(
 
     loop {
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+            return Ok(finish_gui_wipe(
+                &mut app,
+                &document,
+                &arenas,
+                reaper,
+                x11.as_mut(),
+            ));
         }
 
         if pending_paint || app.dirty() {
-            app.mark_dirty();
-            let _ = app.draw();
+            if let Some(ref mut hist) = history_drawer {
+                render_history_viewport(app.surface_mut(), hist);
+            } else {
+                app.mark_dirty();
+                let _ = app.draw();
 
-            if app.document_len() == 0 && history_drawer.is_none() {
-                app.surface_mut().draw_empty_placeholder();
+                if app.document_len() == 0 {
+                    app.surface_mut().draw_empty_placeholder();
+                }
             }
 
             let dot_state = SecurityDotState::from_cap(lock_cap, reaper.has_tripped());
@@ -1751,6 +2214,11 @@ pub fn run_x11_desktop(
                 .unwrap_or("document");
             let left = if !status_msg.is_empty() {
                 format!("{name} \u{00B7} {status_msg}")
+            } else if let Some(ref h) = history_drawer {
+                format!(
+                    "{name} \u{00B7} HISTORY READ-ONLY \u{00B7} {}",
+                    h.diff_summary
+                )
             } else {
                 format!(
                     "{name} \u{00B7} {} B \u{00B7} {segs} segs \u{00B7} {wits} witnesses \u{00B7} {save_tag}",
@@ -1825,7 +2293,13 @@ pub fn run_x11_desktop(
         });
         let events = x11.poll_events(poll_ms)?;
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+            return Ok(finish_gui_wipe(
+                &mut app,
+                &document,
+                &arenas,
+                reaper,
+                x11.as_mut(),
+            ));
         }
         if events.is_empty() {
             // Autosave after 1.5s typing pause (`D-64`, matches TUI loop).
@@ -1841,7 +2315,13 @@ pub fn run_x11_desktop(
         last_activity = Instant::now();
         tripwire.beat();
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+            return Ok(finish_gui_wipe(
+                &mut app,
+                &document,
+                &arenas,
+                reaper,
+                x11.as_mut(),
+            ));
         }
 
         for ev in events {
@@ -1860,12 +2340,24 @@ pub fn run_x11_desktop(
                     app.surface_mut().set_viewport(cur_view, width, height);
                     let (lw, lh) = app.surface().logical_editor_extent();
                     let _ = app.resize(lw, lh);
+                    if let Some(ref mut h) = history_drawer {
+                        if let Some(ref mut hed) = h.history_editor {
+                            hed.set_view(cur_view);
+                            hed.resize(lw, lh);
+                        }
+                    }
                     pending_paint = true;
                 }
                 DesktopEvent::Scroll { delta_lines } => {
                     let line_px = i64::from(QUIET_MD_THEME.body_line_px) * i64::from(delta_lines);
-                    app.editor().scroll_by(Fixed::units(line_px));
-                    app.mark_dirty();
+                    if let Some(ref mut h) = history_drawer {
+                        if let Some(ref mut hed) = h.history_editor {
+                            hed.scroll_by(Fixed::units(line_px));
+                        }
+                    } else {
+                        app.editor().scroll_by(Fixed::units(line_px));
+                        app.mark_dirty();
+                    }
                     pending_paint = true;
                 }
                 DesktopEvent::MouseDown { x, y, modifiers } => {
@@ -1889,7 +2381,10 @@ pub fn run_x11_desktop(
                                 history_drawer = if history_drawer.is_some() {
                                     None
                                 } else {
-                                    Some(build_history_state(&document))
+                                    let (lw, lh) = app.surface().logical_editor_extent();
+                                    let fonts = app.surface().fonts().clone();
+                                    let view = app.editor().view();
+                                    Some(build_history_state(&document, fonts, lw, lh, view))
                                 };
                             }
                             other if history_drawer.is_none() => {
@@ -1897,6 +2392,14 @@ pub fn run_x11_desktop(
                             }
                             other @ (ToolbarAction::ZoomIn | ToolbarAction::ZoomOut) => {
                                 let _ = apply_toolbar_action(&mut app, other);
+                                if let Some(ref mut h) = history_drawer {
+                                    let view = app.editor().view();
+                                    let (lw, lh) = app.surface().logical_editor_extent();
+                                    if let Some(ref mut hed) = h.history_editor {
+                                        hed.set_view(view);
+                                        hed.resize(lw, lh);
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -1909,13 +2412,28 @@ pub fn run_x11_desktop(
                         .find(|(r, _)| r.contains(px, py))
                         .copied()
                     {
-                        handle_history_button(
-                            &mut app,
-                            &document,
-                            &mut history_drawer,
-                            btn,
-                            &mut status_msg,
-                        );
+                        let (lw, lh) = app.surface().logical_editor_extent();
+                        let fonts = app.surface().fonts().clone();
+                        let view = app.editor().view();
+                        if let HistoryButton::ScrubTrack(track) = btn {
+                            if let Some(ref mut h) = history_drawer {
+                                h.scrubbing = true;
+                                let idx = scrub_index_for_x(track, px, h.witnesses.len());
+                                select_history_index(&document, h, idx, &fonts, lw, lh, view);
+                            }
+                        } else {
+                            handle_history_button(
+                                &mut app,
+                                &document,
+                                &mut history_drawer,
+                                btn,
+                                &fonts,
+                                lw,
+                                lh,
+                                view,
+                                &mut status_msg,
+                            );
+                        }
                         pending_paint = true;
                         continue;
                     }
@@ -1935,7 +2453,23 @@ pub fn run_x11_desktop(
                     }
                 }
                 DesktopEvent::MouseDrag { x, y } => {
-                    if history_drawer.is_none() {
+                    if let Some(ref mut h) = history_drawer {
+                        if h.scrubbing {
+                            if let Some((_, HistoryButton::ScrubTrack(track))) = history_hits
+                                .iter()
+                                .find(|(_, b)| matches!(b, HistoryButton::ScrubTrack(_)))
+                                .copied()
+                            {
+                                let idx = scrub_index_for_x(track, i32::from(x), h.witnesses.len());
+                                let (lw, lh) = app.surface().logical_editor_extent();
+                                let fonts = app.surface().fonts().clone();
+                                let view = app.editor().view();
+                                select_history_index(&document, h, idx, &fonts, lw, lh, view);
+                                pending_paint = true;
+                            }
+                        }
+                        let _ = y;
+                    } else {
                         let Some(pt) = app.surface().canvas_point(x, y) else {
                             continue;
                         };
@@ -1944,7 +2478,11 @@ pub fn run_x11_desktop(
                         pending_paint = true;
                     }
                 }
-                DesktopEvent::MouseUp => {}
+                DesktopEvent::MouseUp => {
+                    if let Some(ref mut h) = history_drawer {
+                        h.scrubbing = false;
+                    }
+                }
                 DesktopEvent::ClipboardPasted(bytes) => {
                     if history_drawer.is_none() {
                         let Ok(text) = std::str::from_utf8(&bytes) else {
@@ -1963,7 +2501,13 @@ pub fn run_x11_desktop(
                             }
                             Key::Character('l') => {
                                 tripwire.fire(TripReason::Manual);
-                                return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+                                return Ok(finish_gui_wipe(
+                                    &mut app,
+                                    &document,
+                                    &arenas,
+                                    reaper,
+                                    x11.as_mut(),
+                                ));
                             }
                             Key::Character('s') => {
                                 status_msg = if save_gui(&mut app) {
@@ -1987,22 +2531,28 @@ pub fn run_x11_desktop(
                                 history_drawer = if history_drawer.is_some() {
                                     None
                                 } else {
-                                    Some(build_history_state(&document))
+                                    let (lw, lh) = app.surface().logical_editor_extent();
+                                    let fonts = app.surface().fonts().clone();
+                                    let view = app.editor().view();
+                                    Some(build_history_state(&document, fonts, lw, lh, view))
                                 };
                                 pending_paint = true;
                                 continue;
                             }
                             Key::Character('m') => {
-                                let ts = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
-                                let w_seq = document.witness_count().saturating_sub(1);
-                                let name = format!("bookmark-{w_seq}");
-                                let _ = document.add_bookmark(w_seq, ts, &name);
-                                status_msg = format!("bookmarked witness #{w_seq}");
-                                if let Some(h) = &mut history_drawer {
-                                    h.bookmark_msg = status_msg.clone();
+                                if let Some(ref mut h) = history_drawer {
+                                    h.search_input = None;
+                                    h.bookmark_input = Some(String::new());
+                                } else {
+                                    let ts = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs()
+                                        as i64;
+                                    let w_seq = document.witness_count().saturating_sub(1);
+                                    let name = format!("bookmark-{w_seq}");
+                                    let _ = document.add_bookmark(w_seq, ts, &name);
+                                    status_msg = format!("bookmarked witness #{w_seq}");
                                 }
                                 pending_paint = true;
                                 continue;
@@ -2015,9 +2565,17 @@ pub fn run_x11_desktop(
                                 pending_paint = true;
                                 continue;
                             }
+                            Key::Character('f') if history_drawer.is_some() => {
+                                if let Some(ref mut h) = history_drawer {
+                                    h.bookmark_input = None;
+                                    h.search_input = Some(String::new());
+                                }
+                                pending_paint = true;
+                                continue;
+                            }
                             Key::Character('c') => {
                                 if let Ok(Some(text)) =
-                                    app.editor().copy_selection(crate::x11::MAX_CLIPBOARD_BYTES)
+                                    app.editor().copy_selection(MAX_CLIPBOARD_BYTES)
                                 {
                                     let z = Zeroizing::new(text);
                                     let _ = x11.set_clipboard(z.as_bytes());
@@ -2028,7 +2586,7 @@ pub fn run_x11_desktop(
                             }
                             Key::Character('x') if history_drawer.is_none() => {
                                 if let Ok(Some(text)) =
-                                    app.editor().copy_selection(crate::x11::MAX_CLIPBOARD_BYTES)
+                                    app.editor().copy_selection(MAX_CLIPBOARD_BYTES)
                                 {
                                     let z = Zeroizing::new(text);
                                     let _ = x11.set_clipboard(z.as_bytes());
@@ -2056,14 +2614,22 @@ pub fn run_x11_desktop(
                         }
                     }
 
-                    if key == Key::Escape
-                        && (find_bar.take().is_some()
+                    if key == Key::Escape {
+                        if let Some(ref mut h) = history_drawer {
+                            if h.bookmark_input.take().is_some() || h.search_input.take().is_some()
+                            {
+                                pending_paint = true;
+                                continue;
+                            }
+                        }
+                        if find_bar.take().is_some()
                             || show_security
-                            || history_drawer.take().is_some())
-                    {
-                        show_security = false;
-                        pending_paint = true;
-                        continue;
+                            || history_drawer.take().is_some()
+                        {
+                            show_security = false;
+                            pending_paint = true;
+                            continue;
+                        }
                     }
 
                     let close_find = if let Some(ref mut find) = find_bar {
@@ -2080,17 +2646,10 @@ pub fn run_x11_desktop(
                     }
 
                     if let Some(ref mut h) = history_drawer {
-                        match key {
-                            Key::Up if h.selected_idx > 0 => {
-                                h.selected_idx -= 1;
-                                refresh_history_preview(&document, h);
-                            }
-                            Key::Down if h.selected_idx + 1 < h.witnesses.len() => {
-                                h.selected_idx += 1;
-                                refresh_history_preview(&document, h);
-                            }
-                            _ => {}
-                        }
+                        let (lw, lh) = app.surface().logical_editor_extent();
+                        let fonts = app.surface().fonts().clone();
+                        let view = app.editor().view();
+                        handle_history_key(&document, h, key, modifiers, &fonts, lw, lh, view);
                         pending_paint = true;
                         continue;
                     }
@@ -2109,6 +2668,7 @@ pub fn run_x11_desktop(
         }
     }
 
+    x11.clear_clipboard();
     Ok(if !app.has_pending() {
         DesktopEnd::NothingToWrite
     } else if save_gui(&mut app) {
@@ -2148,7 +2708,9 @@ fn finish_gui_wipe(
     document: &Document,
     arenas: &Arc<SecretArenas>,
     reaper: ReaperGuard,
+    win: &mut dyn DesktopWindow,
 ) -> DesktopEnd {
+    win.clear_clipboard();
     // SAFETY: GUI loop stops reading/modifying document & editor allocations before joining reaper.
     let _ = unsafe { document.arm_reaper(arenas) };
     // SAFETY: GUI loop does not touch editor buffers after this until reaper joins.
@@ -2183,64 +2745,355 @@ fn finish_gui_wipe(
     }
 }
 
-fn build_history_state(document: &Document) -> HistoryDrawerState {
+fn build_history_state(
+    document: &Document,
+    fonts: FontSet,
+    lw: Fixed,
+    lh: Fixed,
+    view: View,
+) -> HistoryDrawerState {
     let witnesses = document.witness_history();
     let selected_idx = witnesses.len().saturating_sub(1);
+    let diff_base_idx = selected_idx.saturating_sub(1);
     let mut state = HistoryDrawerState {
         witnesses,
         selected_idx,
-        preview_text: String::new(),
+        diff_base_idx,
+        diff_hunks: Vec::new(),
+        diff_summary: String::new(),
+        preview_text: Zeroizing::new(String::new()),
         preview_len: 0,
         bookmark_msg: String::new(),
+        bookmark_input: None,
+        search_input: None,
+        search_hits: Vec::new(),
+        search_cursor: 0,
+        history_editor: None,
+        scrubbing: false,
     };
-    refresh_history_preview(document, &mut state);
+    refresh_history_state(document, &mut state, &fonts, lw, lh, view);
     state
 }
 
-fn refresh_history_preview(document: &Document, state: &mut HistoryDrawerState) {
+fn select_history_index(
+    document: &Document,
+    state: &mut HistoryDrawerState,
+    idx: usize,
+    fonts: &FontSet,
+    lw: Fixed,
+    lh: Fixed,
+    view: View,
+) {
+    if idx >= state.witnesses.len() {
+        return;
+    }
+    let was_prev = state.diff_base_idx + 1 == state.selected_idx;
+    state.selected_idx = idx;
+    if was_prev {
+        state.diff_base_idx = idx.saturating_sub(1);
+    }
+    refresh_history_state(document, state, fonts, lw, lh, view);
+}
+
+fn refresh_history_state(
+    document: &Document,
+    state: &mut HistoryDrawerState,
+    fonts: &FontSet,
+    lw: Fixed,
+    lh: Fixed,
+    view: View,
+) {
     let Some(w) = state.witnesses.get(state.selected_idx) else {
         return;
     };
-    if let Ok(sp) = document.spine_at_witness(w.sequence) {
+    let w_seq = w.sequence;
+    let base_seq = state
+        .witnesses
+        .get(state.diff_base_idx)
+        .map_or(w_seq, |b| b.sequence);
+    if let Ok(sp) = document.spine_at_witness(w_seq) {
         state.preview_len = sp.len();
-        state.preview_text = document
-            .read_witness_excerpt(w.sequence, 0, sp.len().min(320))
-            .unwrap_or_default();
+        state.preview_text = Zeroizing::new(
+            document
+                .read_witness_excerpt(w_seq, 0, sp.len().min(320))
+                .unwrap_or_default(),
+        );
+        if let Ok(residency) = ResidentSet::new(
+            document.source(),
+            (store::BUDGET / 2).max(2 * 1024 * 1024),
+            store::SLACK,
+        ) {
+            let mut hed = Editor::new(
+                Typing::resume(ReadOnlySink, sp, store::CAPACITY),
+                residency,
+                fonts.clone(),
+                lw,
+                lh,
+            );
+            hed.set_view(view);
+            state.history_editor = Some(hed);
+        }
+    }
+    if let Ok(hunks) = document.diff_witnesses(base_seq, w_seq) {
+        let mut added = 0u64;
+        let mut removed = 0u64;
+        for h in &hunks {
+            added += h.new_range.1.saturating_sub(h.new_range.0);
+            removed += h.old_range.1.saturating_sub(h.old_range.0);
+        }
+        state.diff_summary = if hunks.is_empty() {
+            format!("no diff vs #{base_seq}")
+        } else {
+            format!(
+                "+{added} B / -{removed} B · {} hunks (vs #{base_seq})",
+                hunks.len()
+            )
+        };
+        state.diff_hunks = hunks;
+    } else {
+        state.diff_hunks.clear();
+        state.diff_summary = format!("witness #{w_seq}");
     }
 }
 
+fn render_history_viewport(surface: &mut PixelSurface, hist: &mut HistoryDrawerState) {
+    surface.begin();
+    let Some(ref mut hed) = hist.history_editor else {
+        return;
+    };
+    let Ok(frame) = hed.frame() else {
+        return;
+    };
+    let picture: Picture = frame.picture();
+    let origin = frame.origin();
+    let text = Zeroizing::new(frame.text().to_owned());
+
+    surface.size(picture.width, picture.height);
+    for (index, line) in picture.lines.iter().enumerate() {
+        for cluster in picture.clusters_on(index) {
+            let c_start = cluster.byte;
+            let c_end = cluster.byte + cluster.len as u64;
+            for hunk in &hist.diff_hunks {
+                if hunk.kind == SpineDiffKind::Removed {
+                    continue;
+                }
+                if c_end > hunk.new_range.0 && c_start < hunk.new_range.1 {
+                    let dx = surface.page_origin_x + surface.to_px(cluster.x);
+                    let dy = surface.page_origin_y + surface.to_px(line.top);
+                    let dw = (surface.to_px(cluster.end()) - surface.to_px(cluster.x)).max(1);
+                    let dh = surface.to_px(line.height).max(1);
+                    let tint = match hunk.kind {
+                        SpineDiffKind::Added => Rgba8::rgba_pct(0x16, 0xa3, 0x4a, 20),
+                        SpineDiffKind::Replaced => Rgba8::rgba_pct(0xd9, 0x77, 0x06, 20),
+                        SpineDiffKind::Removed => continue,
+                    };
+                    surface.fb.fill_rect_clipped(
+                        Rect::new(dx, dy, dw, dh),
+                        tint,
+                        surface.canvas_clip,
+                    );
+                    break;
+                }
+            }
+        }
+        surface.line_clusters(line.top, &text, origin, picture.clusters_on(index));
+    }
+}
+
+fn jump_to_search_hit(
+    document: &Document,
+    h: &mut HistoryDrawerState,
+    cursor: usize,
+    fonts: &FontSet,
+    lw: Fixed,
+    lh: Fixed,
+    view: View,
+) {
+    let Some(hit) = h.search_hits.get(cursor).copied() else {
+        return;
+    };
+    h.search_cursor = cursor;
+    if let Ok(idx) = h
+        .witnesses
+        .binary_search_by_key(&hit.witness_sequence, |w| w.sequence)
+    {
+        select_history_index(document, h, idx, fonts, lw, lh, view);
+        if let Some(offset) = hit.first_offset {
+            if let Some(ref mut hed) = h.history_editor {
+                let _ = hed.select_range(offset, offset);
+                let _ = hed.apply(Intent::RevealCaret);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_history_key(
+    document: &Document,
+    h: &mut HistoryDrawerState,
+    key: Key,
+    modifiers: Modifiers,
+    fonts: &FontSet,
+    lw: Fixed,
+    lh: Fixed,
+    view: View,
+) {
+    if let Some(mut name) = h.bookmark_input.take() {
+        match key {
+            Key::Enter => {
+                let final_name = if name.trim().is_empty() {
+                    let w_seq = h.witnesses.get(h.selected_idx).map_or(0, |w| w.sequence);
+                    format!("mark-w{w_seq}")
+                } else {
+                    name.trim().to_owned()
+                };
+                if let Some(w) = h.witnesses.get(h.selected_idx) {
+                    let ts = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    match document.add_bookmark(w.sequence, ts, &final_name) {
+                        Ok(_) => h.bookmark_msg = format!("saved bookmark '{final_name}'"),
+                        Err(e) => h.bookmark_msg = format!("bookmark refused: {e}"),
+                    }
+                }
+            }
+            Key::Backspace => {
+                name.pop();
+                h.bookmark_input = Some(name);
+            }
+            Key::Character(ch) if !modifiers.control && !modifiers.alt && name.len() < 48 => {
+                name.push(ch);
+                h.bookmark_input = Some(name);
+            }
+            _ => {
+                h.bookmark_input = Some(name);
+            }
+        }
+        return;
+    }
+
+    if let Some(mut query) = h.search_input.take() {
+        match key {
+            Key::Enter => {
+                if !query.is_empty() {
+                    match document.search_history(&query) {
+                        Ok(hits) => {
+                            h.bookmark_msg = format!("{} witnesses match '{query}'", hits.len());
+                            h.search_hits = hits;
+                            h.search_cursor = 0;
+                            if !h.search_hits.is_empty() {
+                                jump_to_search_hit(document, h, 0, fonts, lw, lh, view);
+                            }
+                        }
+                        Err(e) => h.bookmark_msg = format!("search error: {e}"),
+                    }
+                }
+            }
+            Key::Backspace => {
+                query.pop();
+                h.search_input = Some(query);
+            }
+            Key::Character(ch) if !modifiers.control && !modifiers.alt && query.len() < 96 => {
+                query.push(ch);
+                h.search_input = Some(query);
+            }
+            _ => {
+                h.search_input = Some(query);
+            }
+        }
+        return;
+    }
+
+    let step = if modifiers.shift { 10 } else { 1 };
+    match key {
+        Key::Up | Key::Left if h.selected_idx > 0 => {
+            let next = h.selected_idx.saturating_sub(step);
+            select_history_index(document, h, next, fonts, lw, lh, view);
+        }
+        Key::Down | Key::Right if h.selected_idx + 1 < h.witnesses.len() => {
+            let next = (h.selected_idx + step).min(h.witnesses.len() - 1);
+            select_history_index(document, h, next, fonts, lw, lh, view);
+        }
+        Key::PageUp => {
+            if let Some(ref mut hed) = h.history_editor {
+                hed.scroll_by(Fixed::ZERO - lh);
+            }
+        }
+        Key::PageDown => {
+            if let Some(ref mut hed) = h.history_editor {
+                hed.scroll_by(lh);
+            }
+        }
+        Key::Character('/') => {
+            h.search_input = Some(String::new());
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_history_button(
     app: &mut App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>,
     document: &Document,
     drawer: &mut Option<HistoryDrawerState>,
     btn: HistoryButton,
+    fonts: &FontSet,
+    lw: Fixed,
+    lh: Fixed,
+    view: View,
     status: &mut String,
 ) {
     match btn {
         HistoryButton::CloseLive => *drawer = None,
+        HistoryButton::ScrubTrack(_) => {}
         HistoryButton::SelectWitness(idx) => {
-            let Some(h) = drawer else {
-                return;
-            };
-            if idx < h.witnesses.len() {
-                h.selected_idx = idx;
-                refresh_history_preview(document, h);
+            if let Some(h) = drawer {
+                select_history_index(document, h, idx, fonts, lw, lh, view);
             }
         }
-        HistoryButton::AddBookmark => {
-            let Some(h) = drawer else {
-                return;
-            };
-            let Some(w) = h.witnesses.get(h.selected_idx) else {
-                return;
-            };
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            let name = format!("mark-w{}", w.sequence);
-            if document.add_bookmark(w.sequence, ts, &name).is_ok() {
-                h.bookmark_msg = format!("saved bookmark '{name}'");
+        HistoryButton::SelectBookmark(seq) => {
+            if let Some(h) = drawer {
+                if let Ok(idx) = h.witnesses.binary_search_by_key(&seq, |w| w.sequence) {
+                    select_history_index(document, h, idx, fonts, lw, lh, view);
+                }
+            }
+        }
+        HistoryButton::SelectSearchHit(cursor) => {
+            if let Some(h) = drawer {
+                jump_to_search_hit(document, h, cursor, fonts, lw, lh, view);
+            }
+        }
+        HistoryButton::StartBookmark => {
+            if let Some(h) = drawer {
+                h.search_input = None;
+                h.bookmark_input = Some(String::new());
+            }
+        }
+        HistoryButton::StartSearch => {
+            if let Some(h) = drawer {
+                h.bookmark_input = None;
+                h.search_input = Some(String::new());
+            }
+        }
+        HistoryButton::NextSearchHit => {
+            if let Some(h) = drawer {
+                if !h.search_hits.is_empty() {
+                    let next = (h.search_cursor + 1) % h.search_hits.len();
+                    jump_to_search_hit(document, h, next, fonts, lw, lh, view);
+                }
+            }
+        }
+        HistoryButton::SetDiffBase => {
+            if let Some(h) = drawer {
+                h.diff_base_idx = h.selected_idx;
+                refresh_history_state(document, h, fonts, lw, lh, view);
+            }
+        }
+        HistoryButton::DiffPrev => {
+            if let Some(h) = drawer {
+                h.diff_base_idx = h.selected_idx.saturating_sub(1);
+                refresh_history_state(document, h, fonts, lw, lh, view);
             }
         }
         HistoryButton::RestoreSelected => {
@@ -2254,8 +3107,11 @@ fn handle_history_button(
             let Ok(next_spine) = document.spine_at_witness(w_seq) else {
                 return;
             };
+            let next_len = next_spine.len();
             if app.editor().restore_spine(next_spine).is_ok() {
-                let _ = app.editor().reflow();
+                if next_len <= 2 * 1024 * 1024 {
+                    let _ = app.editor().reflow();
+                }
                 app.mark_dirty();
                 *status = format!("restored from witness #{w_seq}");
                 *drawer = None;
@@ -2362,21 +3218,68 @@ fn handle_find_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holonomy_seal::generate_container_id;
-    use std::fs;
+    use holonomy_text::{Appended, SegmentId, SegmentSource};
+    use std::sync::Mutex;
 
-    type GuiApp = App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>;
+    #[derive(Debug, Clone, Default)]
+    struct MemStore(Arc<Mutex<Vec<Vec<u8>>>>);
 
-    struct TempDoc(PathBuf);
-
-    impl Drop for TempDoc {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
+    impl SegmentSink for MemStore {
+        fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+            let mut segments = self.0.lock().map_err(|_| "poisoned")?;
+            let id = segments.len() as u64;
+            segments.push(plaintext.to_vec());
+            Ok(Appended {
+                segment: SegmentId::new(id),
+                witness_sequence: id + 1,
+                segment_root: [0u8; 32],
+                bytes_written: plaintext.len() as u64,
+            })
         }
     }
 
+    impl SegmentSource for MemStore {
+        fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+            let segments = self.0.lock().map_err(|_| "poisoned")?;
+            segments
+                .get(usize::try_from(segment.get()).unwrap_or(usize::MAX))
+                .cloned()
+                .ok_or_else(|| format!("no {segment}"))
+        }
+    }
+
+    type MemApp = App<MemStore, MemStore, FontSet, PixelSurface>;
+
+    fn open_mem_app(view: View, w: u16, h: u16) -> MemApp {
+        let store = MemStore::default();
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
+        let residency =
+            ResidentSet::new(store.clone(), store::BUDGET, store::SLACK).expect("residency");
+        let surface = PixelSurface::new(fonts.clone(), view, w, h);
+        let (lw, lh) = surface.logical_editor_extent();
+        let typing = Typing::new(store, store::CAPACITY);
+        let mut editor = Editor::new(typing, residency, fonts, lw, lh);
+        editor.set_view(view);
+        let _ = editor.reflow();
+        App::new(editor, Keymap::new(lh), surface)
+    }
+
+    #[cfg(unix)]
+    type GuiApp = App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>;
+
+    #[cfg(unix)]
+    struct TempDoc(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for TempDoc {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
     fn temp_doc(label: &str) -> (TempDoc, Document) {
-        let id = generate_container_id().expect("entropy");
+        let id = holonomy_seal::generate_container_id().expect("entropy");
         let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
         let path = std::env::temp_dir().join(format!("holonomy-canvas-{label}-{hex}.wavefunction"));
         let doc = Document::create_with(&path, b"canvas-test-pass", store::test_params())
@@ -2384,6 +3287,7 @@ mod tests {
         (TempDoc(path), doc)
     }
 
+    #[cfg(unix)]
     fn open_gui_app(doc: &Document, view: View, w: u16, h: u16) -> GuiApp {
         let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
         let spine = doc.spine().expect("spine");
@@ -2405,8 +3309,7 @@ mod tests {
 
     #[test]
     fn pixel_surface_renders_placeholder_and_styled_clusters() {
-        let (_tmp, doc) = temp_doc("render");
-        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
         assert!(app.draw().expect("initial empty draw"));
         app.surface_mut().draw_empty_placeholder();
         let bg = rgba_to_xrgb(QUIET_MD_THEME.bg_body);
@@ -2430,8 +3333,7 @@ mod tests {
 
     #[test]
     fn toolbar_reflects_mixed_selection_and_applies_actions() {
-        let (_tmp, doc) = temp_doc("toolbar-u0");
-        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
         for ch in "hello world".chars() {
             app.press(Key::Character(ch), Modifiers::none())
                 .expect("type");
@@ -2471,9 +3373,8 @@ mod tests {
 
     #[test]
     fn pixel_surface_pointer_hit_test_matches_painted_caret_across_zooms_and_dpis() {
-        let (_tmp, doc) = temp_doc("pointer-l8");
         let view = View::new(1_250, 144).expect("valid view");
-        let mut app = open_gui_app(&doc, view, 1_120, 760);
+        let mut app = open_mem_app(view, 1_120, 760);
         for ch in "Single geometry L-8 check".chars() {
             app.press(Key::Character(ch), Modifiers::none())
                 .expect("type");
@@ -2501,6 +3402,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn narrow_toolbar_collapses_overflow_and_overlays_render_cleanly() {
         let (_tmp, doc) = temp_doc("overlays");
@@ -2524,13 +3426,22 @@ mod tests {
 
         let facts = Facts::gather_with(app.residency(), &doc, LockCapability::None, None);
         render_security_overlay(app.surface_mut(), &facts);
-        let hist = build_history_state(&doc);
+        let (lw, lh) = app.surface().logical_editor_extent();
+        let fonts = app.surface().fonts().clone();
+        let mut hist = build_history_state(&doc, fonts, lw, lh, View::IDENTITY);
+        render_history_viewport(app.surface_mut(), &mut hist);
         let hist_hits = render_history_drawer(app.surface_mut(), &hist, &doc.bookmarks());
         assert!(
             hist_hits
                 .iter()
                 .any(|(_, b)| *b == HistoryButton::RestoreSelected),
             "history drawer must expose Restore button"
+        );
+        assert!(
+            hist_hits
+                .iter()
+                .any(|(_, b)| matches!(b, HistoryButton::ScrubTrack(_))),
+            "history drawer must expose interactive scrubber track"
         );
         render_status_strip(
             app.surface_mut(),
@@ -2539,10 +3450,174 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn block8_timeline_scrubber_diffs_bookmarks_history_search_and_restores() {
+        let (_tmp, doc) = temp_doc("block8-scrubber");
+        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+
+        for ch in "chapter one draft ".chars() {
+            app.press(Key::Character(ch), Modifiers::none())
+                .expect("type 1");
+        }
+        assert!(app
+            .press(Key::Character('s'), Modifiers::control())
+            .expect("save 1")
+            .iter()
+            .any(|e| matches!(e, Effect::Saved)));
+
+        for ch in "added secret clue ".chars() {
+            app.press(Key::Character(ch), Modifiers::none())
+                .expect("type 2");
+        }
+        assert!(app
+            .press(Key::Character('s'), Modifiers::control())
+            .expect("save 2")
+            .iter()
+            .any(|e| matches!(e, Effect::Saved)));
+
+        for ch in "final epilogue".chars() {
+            app.press(Key::Character(ch), Modifiers::none())
+                .expect("type 3");
+        }
+        assert!(app
+            .press(Key::Character('s'), Modifiers::control())
+            .expect("save 3")
+            .iter()
+            .any(|e| matches!(e, Effect::Saved)));
+
+        let (lw, lh) = app.surface().logical_editor_extent();
+        let fonts = app.surface().fonts().clone();
+        let view = app.editor().view();
+        let mut hist = build_history_state(&doc, fonts.clone(), lw, lh, view);
+        assert!(hist.witnesses.len() >= 3);
+
+        // Render drawer & scrub via ScrubTrack back to witness #1 ("chapter one draft ").
+        render_history_viewport(app.surface_mut(), &mut hist);
+        let hits = render_history_drawer(app.surface_mut(), &hist, &doc.bookmarks());
+        let track = hits
+            .iter()
+            .find_map(|(_, b)| match *b {
+                HistoryButton::ScrubTrack(r) => Some(r),
+                _ => None,
+            })
+            .expect("scrubber track present");
+        let target_idx = 1.min(hist.witnesses.len() - 1);
+        select_history_index(&doc, &mut hist, target_idx, &fonts, lw, lh, view);
+        let scrub_x = track.x;
+        assert_eq!(scrub_index_for_x(track, scrub_x, hist.witnesses.len()), 0);
+
+        // Inline bookmark naming saves directly to authenticated Document bookmarks.
+        let mut drawer_opt = Some(hist);
+        let mut status = String::new();
+        handle_history_button(
+            &mut app,
+            &doc,
+            &mut drawer_opt,
+            HistoryButton::StartBookmark,
+            &fonts,
+            lw,
+            lh,
+            view,
+            &mut status,
+        );
+        {
+            let h = drawer_opt.as_mut().expect("drawer active");
+            assert!(h.bookmark_input.is_some());
+            for ch in "milestone".chars() {
+                handle_history_key(
+                    &doc,
+                    h,
+                    Key::Character(ch),
+                    Modifiers::none(),
+                    &fonts,
+                    lw,
+                    lh,
+                    view,
+                );
+            }
+            handle_history_key(&doc, h, Key::Enter, Modifiers::none(), &fonts, lw, lh, view);
+        }
+        assert!(
+            doc.bookmarks().iter().any(|b| b.name == "milestone"),
+            "inline bookmark name must persist"
+        );
+
+        // Inline search_history locates "clue" across historical witnesses and jumps scrubber.
+        handle_history_button(
+            &mut app,
+            &doc,
+            &mut drawer_opt,
+            HistoryButton::StartSearch,
+            &fonts,
+            lw,
+            lh,
+            view,
+            &mut status,
+        );
+        {
+            let h = drawer_opt.as_mut().expect("drawer active");
+            for ch in "clue".chars() {
+                handle_history_key(
+                    &doc,
+                    h,
+                    Key::Character(ch),
+                    Modifiers::none(),
+                    &fonts,
+                    lw,
+                    lh,
+                    view,
+                );
+            }
+            handle_history_key(&doc, h, Key::Enter, Modifiers::none(), &fonts, lw, lh, view);
+            assert!(!h.search_hits.is_empty(), "search_history must find 'clue'");
+            assert!(
+                !h.diff_hunks.is_empty(),
+                "diff_witnesses must populate hunks"
+            );
+            render_history_viewport(app.surface_mut(), h);
+            assert!(app.surface().painted_clusters() > 0);
+        }
+
+        // Restore selected witness (contains "clue") and verify live editor updates cleanly.
+        let selected_len = drawer_opt.as_ref().unwrap().preview_len;
+        handle_history_button(
+            &mut app,
+            &doc,
+            &mut drawer_opt,
+            HistoryButton::RestoreSelected,
+            &fonts,
+            lw,
+            lh,
+            view,
+            &mut status,
+        );
+        assert!(drawer_opt.is_none());
+        assert_eq!(app.document_len(), selected_len);
+    }
+
+    #[test]
+    fn desktop_app_idle_draw_performs_zero_repaints() {
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
+        for ch in "idle invariance check".chars() {
+            app.press(Key::Character(ch), Modifiers::none())
+                .expect("type");
+        }
+        assert!(app.draw().expect("paint changed frame"));
+        let snapshot = app.surface().pixels().to_vec();
+        for _ in 0..32 {
+            assert!(
+                !app.draw().expect("idle tick"),
+                "idle desktop tick must skip repaint (`L-5`)"
+            );
+            assert!(!app.dirty());
+        }
+        assert_eq!(app.surface().pixels(), snapshot.as_slice());
+    }
+
     #[test]
     fn selection_cut_copies_and_removes_selected_range() {
-        let (_tmp, doc) = temp_doc("cut");
-        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
         for ch in "alpha beta".chars() {
             app.press(Key::Character(ch), Modifiers::none())
                 .expect("type");
@@ -2550,7 +3625,7 @@ mod tests {
         app.editor().select_range(0, 6).expect("select 'alpha '");
         let cut = app
             .editor()
-            .copy_selection(crate::x11::MAX_CLIPBOARD_BYTES)
+            .copy_selection(MAX_CLIPBOARD_BYTES)
             .expect("copy")
             .expect("selection non-empty");
         assert_eq!(cut, "alpha ");

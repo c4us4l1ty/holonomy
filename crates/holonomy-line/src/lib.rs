@@ -14,7 +14,7 @@ mod mmr;
 pub use format::LineHeader;
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -56,28 +56,28 @@ const MAX_MANIFEST_CIPHERTEXT_BYTES: u32 = MAX_MANIFEST_BYTES + AEAD_TAG_BYTES;
 // Test-only hooks exercise short writes and failed durability barriers through the same
 // append path used in production. The thread-local scope keeps unrelated parallel tests from
 // sharing failpoints or counters.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppendIoWrite {
     offset: u64,
     bytes: usize,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppendIoSync {
     bytes_written: u64,
     succeeded: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppendIoTruncate {
     length: u64,
     succeeded: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AppendIoSnapshot {
     writes: Vec<AppendIoWrite>,
@@ -86,7 +86,7 @@ struct AppendIoSnapshot {
     bytes_written: u64,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct AppendIoState {
     fail_after_write_bytes: Option<u64>,
     fail_on_sync: Option<usize>,
@@ -94,16 +94,16 @@ struct AppendIoState {
     snapshot: AppendIoSnapshot,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static APPEND_IO_STATE: std::cell::RefCell<Option<AppendIoState>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct AppendIoProbeGuard;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl AppendIoProbeGuard {
     fn install(
         fail_after_write_bytes: Option<u64>,
@@ -134,7 +134,7 @@ impl AppendIoProbeGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for AppendIoProbeGuard {
     fn drop(&mut self) {
         APPEND_IO_STATE.with(|slot| *slot.borrow_mut() = None);
@@ -579,13 +579,14 @@ impl WorldLine {
     /// active spine manifest when one has been committed.
     pub fn open(path: impl AsRef<Path>, key: DEMKey) -> Result<Self, LineError> {
         let path = path.as_ref().to_path_buf();
-        let mut file = open_worldline_file(&path, true, false)?;
+        let file = open_worldline_file(&path, true, false)?;
         let _read_lock = FileReadLock::acquire(&file)?;
         validate_regular_file(&file)?;
         let file_identity = file_identity(&file)?;
-        let header = LineHeader::read_from(&mut file)?;
+        let mut reader = BufReader::with_capacity(64 * 1024, &file);
+        let header = LineHeader::read_from(&mut reader)?;
         let epoch = header.epoch_id();
-        let scan = scan_records(&mut file, &header, &epoch, &key)?;
+        let scan = scan_records(&mut reader, &header, &epoch, &key)?;
         Ok(Self {
             path,
             header,
@@ -854,6 +855,11 @@ impl WorldLine {
             last_segment_tag: self.last_segment_tag,
             next_segment_seq: self.mmr.count(),
             new_descriptors: Vec::new(),
+            new_witnesses: Vec::new(),
+            last_witness_tag: self.last_witness_tag,
+            next_witness_seq: self.next_witness_sequence,
+            has_manifest: self.manifest.is_some(),
+            unwitnessed_segments: 0,
             bytes_written: 0,
             committed_end: self.committed_end,
             failed: false,
@@ -872,8 +878,56 @@ impl WorldLine {
             self.poisoned = true;
             return Err(LineError::ReopenRequired);
         }
-        if tx.new_descriptors.is_empty() && explicit_manifest.is_none() {
+        if tx.new_descriptors.is_empty()
+            && tx.new_witnesses.is_empty()
+            && explicit_manifest.is_none()
+        {
             return Ok(self.current_receipt());
+        }
+        if tx.unwitnessed_segments == 0
+            && !tx.new_witnesses.is_empty()
+            && explicit_manifest.is_none()
+        {
+            let result = (|| -> Result<AppendReceipt, LineError> {
+                self.segments
+                    .try_reserve(tx.new_descriptors.len())
+                    .map_err(|_| LineError::ResourceExhausted)?;
+                self.witnesses
+                    .try_reserve(tx.new_witnesses.len())
+                    .map_err(|_| LineError::ResourceExhausted)?;
+                if sync_append_file(&tx.file).is_err() {
+                    return Err(LineError::DurabilityUncertain);
+                }
+                let committed_end = tx.file.stream_position()?;
+                let witness_sequence = tx.next_witness_seq.saturating_sub(1);
+                self.segments.append(&mut tx.new_descriptors);
+                self.witnesses.append(&mut tx.new_witnesses);
+                self.mmr = tx.mmr;
+                self.last_segment_tag = tx.last_segment_tag;
+                self.last_witness_tag = tx.last_witness_tag;
+                self.next_witness_sequence = tx.next_witness_seq;
+                self.committed_end = committed_end;
+                self.observed_len = committed_end;
+                self.recovery = RecoveryInfo {
+                    trailing_bytes: 0,
+                    last_committed_offset: committed_end,
+                };
+                self.poisoned = false;
+                Ok(AppendReceipt {
+                    witness_sequence,
+                    segment_count: self.mmr.count(),
+                    bytes_appended: tx.bytes_written,
+                    segment_root: self.mmr.root(),
+                })
+            })();
+            if result.is_err() {
+                self.poisoned = true;
+            }
+            return result;
+        }
+        if tx.next_witness_seq == u64::MAX {
+            self.poisoned = true;
+            return Err(LineError::TooManySegments);
         }
         let pending_lengths: Vec<u32> = tx
             .new_descriptors
@@ -928,6 +982,9 @@ impl WorldLine {
             self.segments
                 .try_reserve(tx.new_descriptors.len())
                 .map_err(|_| LineError::ResourceExhausted)?;
+            self.witnesses
+                .try_reserve(tx.new_witnesses.len() + 1)
+                .map_err(|_| LineError::ResourceExhausted)?;
 
             let mut new_manifest_descriptor = None;
             let manifest_ref = if let Some(slabs) = &next_manifest {
@@ -941,7 +998,7 @@ impl WorldLine {
                     &self.epoch,
                     &self.key,
                     manifest_sequence,
-                    &self.last_witness_tag,
+                    &tx.last_witness_tag,
                     slabs,
                 )?;
                 let record_offset = tx.file.stream_position()?;
@@ -961,7 +1018,7 @@ impl WorldLine {
                     ciphertext_len: encoded.ciphertext_len,
                     nonce: encoded.nonce,
                     tag: encoded.tag,
-                    previous_witness_tag: self.last_witness_tag,
+                    previous_witness_tag: tx.last_witness_tag,
                 });
                 Some(ManifestRef {
                     sequence: manifest_sequence,
@@ -973,13 +1030,13 @@ impl WorldLine {
             };
 
             sync_append_file(&tx.file)?;
-            let witness_sequence = self.next_witness_sequence;
+            let witness_sequence = tx.next_witness_seq;
             let (witness_frame, witness_tag) = encode_witness_record(
                 &self.header,
                 &self.epoch,
                 &self.key,
                 witness_sequence,
-                &self.last_witness_tag,
+                &tx.last_witness_tag,
                 &tx.last_segment_tag,
                 &tx.mmr,
                 manifest_ref,
@@ -1001,6 +1058,7 @@ impl WorldLine {
             if let Some(descriptor) = new_manifest_descriptor {
                 self.manifests.push(descriptor);
             }
+            self.witnesses.append(&mut tx.new_witnesses);
             self.witnesses.push(WitnessSummary {
                 sequence: witness_sequence,
                 segment_count: tx.mmr.count(),
@@ -1287,11 +1345,13 @@ impl WorldLine {
         let mut compacted = WorldLine::create(&temporary, new_header, new_key.duplicate())?;
         let mut publication =
             CompactionPublication::new(temporary, destination.clone(), compacted.file_identity);
+        let mut tx = compacted.start_streaming_tx()?;
         for &sequence in retain_segments {
             let plaintext = self.open_segment(sequence)?;
-            compacted.append_segments(&[&plaintext[..]])?;
+            tx.push_segment(&plaintext[..])?;
             // `plaintext` drops and zeroizes before the next old segment is opened.
         }
+        compacted.finish_streaming_tx(tx, None)?;
         compacted.verify()?;
         publication.publish()?;
         compacted.path = destination;
@@ -1335,6 +1395,8 @@ impl WorldLine {
         let mut compacted = WorldLine::create(&temporary, new_header, new_key.duplicate())?;
         let mut publication =
             CompactionPublication::new(temporary, destination.clone(), compacted.file_identity);
+        let mut tx = compacted.start_streaming_tx()?;
+        let mut slabs = Vec::with_capacity(source_manifest.slabs.len());
         for slab in &source_manifest.slabs {
             let plaintext = self.open_segment(slab.segment)?;
             let start = slab.start as usize;
@@ -1342,17 +1404,19 @@ impl WorldLine {
                 .checked_add(slab.len as usize)
                 .ok_or(LineError::InvalidRecord)?;
             let slice = plaintext.get(start..end).ok_or(LineError::InvalidRecord)?;
-            compacted.append_segments(&[slice])?;
+            slabs.push(tx.push_segment(slice)?);
             // `plaintext` drops and zeroizes before the next slab's segment is opened.
         }
-        if !source_manifest.styles.is_empty() || !source_manifest.links.is_empty() {
-            let preserved = LineManifest {
-                slabs: compacted.document_slabs(),
+        let manifest = if !source_manifest.styles.is_empty() || !source_manifest.links.is_empty() {
+            Some(LineManifest {
+                slabs,
                 styles: source_manifest.styles,
                 links: source_manifest.links,
-            };
-            compacted.commit_full_manifest(&preserved)?;
-        }
+            })
+        } else {
+            None
+        };
+        compacted.finish_streaming_tx(tx, manifest.as_ref())?;
         compacted.verify()?;
         publication.publish()?;
         compacted.path = destination;
@@ -1380,7 +1444,7 @@ impl WorldLine {
         if actual_len < self.committed_end {
             return Err(LineError::ConcurrentModification);
         }
-        let mut reader = file.try_clone()?;
+        let mut reader = BufReader::with_capacity(64 * 1024, file.try_clone()?);
         let disk_header =
             LineHeader::read_from(&mut reader).map_err(|_| LineError::ConcurrentModification)?;
         let disk_epoch = disk_header.epoch_id();
@@ -1691,13 +1755,13 @@ impl WorldLine {
 }
 
 fn write_append_bytes(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let mut offset = file.stream_position()?;
 
     while !bytes.is_empty() {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let allowed = append_test_write_limit(bytes.len())?;
-        #[cfg(not(test))]
+        #[cfg(not(all(test, unix)))]
         let allowed = bytes.len();
 
         match file.write(&bytes[..allowed]) {
@@ -1708,7 +1772,7 @@ fn write_append_bytes(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
                 ));
             }
             Ok(written) => {
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 {
                     record_append_test_write(offset, written);
                     offset = offset.saturating_add(written as u64);
@@ -1723,7 +1787,7 @@ fn write_append_bytes(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
 }
 
 fn sync_append_file(file: &File) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let (event_index, injected_failure) = APPEND_IO_STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(state) = slot.as_mut() else {
@@ -1737,7 +1801,7 @@ fn sync_append_file(file: &File) -> io::Result<()> {
         });
         (Some(index), fail)
     });
-    #[cfg(not(test))]
+    #[cfg(not(all(test, unix)))]
     let injected_failure = false;
 
     let result = if injected_failure {
@@ -1746,7 +1810,7 @@ fn sync_append_file(file: &File) -> io::Result<()> {
         file.sync_all()
     };
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(index) = event_index {
         APPEND_IO_STATE.with(|slot| {
             slot.borrow_mut()
@@ -1761,7 +1825,7 @@ fn sync_append_file(file: &File) -> io::Result<()> {
 }
 
 fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let (event_index, injected_failure) = APPEND_IO_STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(state) = slot.as_mut() else {
@@ -1775,7 +1839,7 @@ fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
         });
         (Some(index), fail)
     });
-    #[cfg(not(test))]
+    #[cfg(not(all(test, unix)))]
     let injected_failure = false;
 
     let result = if injected_failure {
@@ -1784,7 +1848,7 @@ fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
         file.set_len(length)
     };
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(index) = event_index {
         APPEND_IO_STATE.with(|slot| {
             slot.borrow_mut()
@@ -1798,7 +1862,7 @@ fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn append_test_write_limit(requested: usize) -> io::Result<usize> {
     APPEND_IO_STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -1813,7 +1877,7 @@ fn append_test_write_limit(requested: usize) -> io::Result<usize> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn record_append_test_write(offset: u64, bytes: usize) {
     APPEND_IO_STATE.with(|slot| {
         if let Some(state) = slot.borrow_mut().as_mut() {
@@ -2170,6 +2234,11 @@ pub struct StreamingTx {
     last_segment_tag: [u8; 32],
     next_segment_seq: u64,
     new_descriptors: Vec<SegmentDescriptor>,
+    new_witnesses: Vec<WitnessSummary>,
+    last_witness_tag: [u8; 32],
+    next_witness_seq: u64,
+    has_manifest: bool,
+    unwitnessed_segments: usize,
     bytes_written: u64,
     committed_end: u64,
     failed: bool,
@@ -2181,6 +2250,68 @@ impl StreamingTx {
     #[must_use]
     pub fn next_segment_sequence(&self) -> u64 {
         self.next_segment_seq
+    }
+
+    /// Writes an authenticated witness checkpoint covering all segments pushed so far in this
+    /// open streaming transaction without re-scanning the world-line (`O(1)` per witness).
+    ///
+    /// Returns an error if an explicit structural manifest is already active on the stream or if
+    /// writing the witness fails. Durability is finalized when [`WorldLine::finish_streaming_tx`]
+    /// syncs the file.
+    pub fn commit_witness(&mut self) -> Result<AppendReceipt, LineError> {
+        if self.failed {
+            return Err(LineError::ReopenRequired);
+        }
+        if self.has_manifest {
+            return Err(LineError::InvalidManifest(
+                "cannot checkpoint implicit witness when an active manifest exists",
+            ));
+        }
+        if self.next_witness_seq == u64::MAX {
+            return Err(LineError::TooManySegments);
+        }
+
+        let res = (|| -> Result<AppendReceipt, LineError> {
+            let witness_sequence = self.next_witness_seq;
+            let (witness_frame, witness_tag) = encode_witness_record(
+                &self.header,
+                &self.epoch,
+                &self.key,
+                witness_sequence,
+                &self.last_witness_tag,
+                &self.last_segment_tag,
+                &self.mmr,
+                None,
+            )?;
+            write_append_bytes(&mut self.file, &witness_frame)?;
+            self.bytes_written = self
+                .bytes_written
+                .checked_add(witness_frame.len() as u64)
+                .ok_or(LineError::ResourceExhausted)?;
+            self.new_witnesses
+                .try_reserve(1)
+                .map_err(|_| LineError::ResourceExhausted)?;
+            self.new_witnesses.push(WitnessSummary {
+                sequence: witness_sequence,
+                segment_count: self.mmr.count(),
+                manifest_sequence: None,
+            });
+            self.last_witness_tag = witness_tag;
+            self.next_witness_seq = witness_sequence
+                .checked_add(1)
+                .ok_or(LineError::TooManySegments)?;
+            self.unwitnessed_segments = 0;
+            Ok(AppendReceipt {
+                witness_sequence,
+                segment_count: self.mmr.count(),
+                bytes_appended: self.bytes_written,
+                segment_root: self.mmr.root(),
+            })
+        })();
+        if res.is_err() {
+            self.failed = true;
+        }
+        res
     }
 
     /// Seals and writes one non-empty `<= 64 KiB` plaintext segment immediately to the log,
@@ -2235,6 +2366,7 @@ impl StreamingTx {
             self.mmr.append(encoded.leaf)?;
             self.last_segment_tag = encoded.tag;
             self.next_segment_seq = sequence.checked_add(1).ok_or(LineError::TooManySegments)?;
+            self.unwitnessed_segments += 1;
             Ok(LineSlab {
                 segment: sequence,
                 start: 0,

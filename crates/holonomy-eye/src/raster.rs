@@ -12,6 +12,7 @@ use holonomy_text::FontFamily;
 
 use crate::face::{Face, FaceError, ReadAt, TableDirectory};
 use crate::geom::Fixed;
+use crate::opentype::ShapedGlyph;
 use crate::shaper::Shaper;
 use crate::style::Style;
 
@@ -744,6 +745,66 @@ impl FontSet {
         &self.font(variant).face
     }
 
+    /// Scales font design `units` for `variant` to logical units at `style`.
+    #[must_use]
+    pub fn scale_units(&self, variant: FontVariant, units: i32, style: Style) -> Fixed {
+        self.font(variant)
+            .face
+            .scaled_signed(units, self.scaled_style(style))
+    }
+
+    /// Picks the best single [`FontVariant`] covering a cluster.
+    fn cluster_variant(&self, style: Style, cluster: &str) -> FontVariant {
+        let mut chosen = match style.family() {
+            FontFamily::Mono => FontVariant::Mono,
+            FontFamily::Sans | FontFamily::Serif => {
+                if style.is_bold() {
+                    FontVariant::Bold
+                } else if style.is_italic() {
+                    FontVariant::Italic
+                } else {
+                    FontVariant::Regular
+                }
+            }
+        };
+        for ch in cluster.chars() {
+            if ch == '\n' || ch == '\r' || ch.is_control() {
+                continue;
+            }
+            if self.font(chosen).face.glyph(ch).is_none()
+                && self.font(FontVariant::Regular).face.glyph(ch).is_some()
+            {
+                chosen = FontVariant::Regular;
+                break;
+            }
+        }
+        chosen
+    }
+
+    /// Shapes a contiguous run of `clusters` at `style` using each face's OpenType
+    /// `GDEF`/`GSUB`/`GPOS` tables, returning `(variant, glyph)` pairs in run order.
+    #[must_use]
+    pub fn shape_run(&self, clusters: &[&str], style: Style) -> Vec<(FontVariant, ShapedGlyph)> {
+        if clusters.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(clusters.len());
+        let mut i = 0usize;
+        while i < clusters.len() {
+            let v = self.cluster_variant(style, clusters[i]);
+            let start = i;
+            i += 1;
+            while i < clusters.len() && self.cluster_variant(style, clusters[i]) == v {
+                i += 1;
+            }
+            for mut g in self.font(v).face.shape(&clusters[start..i]) {
+                g.cluster += start;
+                out.push((v, g));
+            }
+        }
+        out
+    }
+
     /// Returns the cached or newly rasterized A8 bitmap for `ch` at `style` and device scale
     /// `(zoom_milli, dpi)`.
     #[must_use]
@@ -758,6 +819,20 @@ impl FontSet {
             return None;
         }
         let (variant, gid) = self.resolve_variant(style, ch);
+        self.rasterize_glyph(variant, gid, style, zoom_milli, dpi)
+    }
+
+    /// Returns the cached or newly rasterized A8 bitmap for an already-shaped `(variant, gid)` at
+    /// `style` and device scale `(zoom_milli, dpi)`.
+    #[must_use]
+    pub fn rasterize_glyph(
+        &self,
+        variant: FontVariant,
+        gid: u16,
+        style: Style,
+        zoom_milli: i64,
+        dpi: i64,
+    ) -> Option<Arc<GlyphBitmap>> {
         if gid == 0 {
             return None;
         }
@@ -821,18 +896,45 @@ impl Shaper for FontSet {
             return Fixed::ZERO;
         }
         let effective = self.scaled_style(style);
-        let mut total_64ths = 0i64;
-        for ch in cluster.chars() {
-            let (variant, gid) = self.resolve_variant(style, ch);
+        let mut chars = cluster.chars();
+        let Some(first) = chars.next() else {
+            return Fixed::ZERO;
+        };
+        if chars.next().is_none() && (first as u32) < 0x0600 {
+            let (variant, gid) = self.resolve_variant(style, first);
             let face = &self.font(variant).face;
             let adv = if gid != 0 {
-                i64::from(face.advance_units(ch))
+                i64::from(face.advance_units(first))
             } else {
-                i64::from(self.0.regular.face.advance_units(ch))
+                i64::from(self.0.regular.face.advance_units(first))
             };
-            total_64ths += face.scaled(adv, effective).sixtyfourths();
+            return face.scaled(adv, effective);
         }
-        Fixed::from_64ths(total_64ths)
+        let variant = self.cluster_variant(style, cluster);
+        self.font(variant).face.advance(cluster, effective)
+    }
+
+    fn shape_clusters(&self, clusters: &[&str], style: Style, out: &mut Vec<Fixed>) {
+        out.clear();
+        if clusters.is_empty() {
+            return;
+        }
+        out.reserve(clusters.len());
+        let effective = self.scaled_style(style);
+        let mut sub_out = Vec::new();
+        let mut i = 0usize;
+        while i < clusters.len() {
+            let v = self.cluster_variant(style, clusters[i]);
+            let start = i;
+            i += 1;
+            while i < clusters.len() && self.cluster_variant(style, clusters[i]) == v {
+                i += 1;
+            }
+            self.font(v)
+                .face
+                .shape_clusters(&clusters[start..i], effective, &mut sub_out);
+            out.extend_from_slice(&sub_out);
+        }
     }
 
     fn line_height(&self, style: Style) -> Fixed {

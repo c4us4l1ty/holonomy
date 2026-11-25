@@ -16,14 +16,14 @@ use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::platform::DesktopWindow;
+pub use crate::platform::{DesktopEvent, MAX_CLIPBOARD_BYTES};
 use crate::{Key, Modifiers};
 
 /// Maximum core-protocol request size without `BIG-REQUESTS` (`65,535 * 4` bytes).
 pub const MAX_REQUEST_BYTES: usize = 65_535 * 4;
 /// Fixed wire size of every core X11 event packet (`32` bytes).
 pub const EVENT_BYTES: usize = 32;
-/// Maximum clipboard paste size accepted into the editor in a single paste (`4 KiB`).
-pub const MAX_CLIPBOARD_BYTES: usize = 4_096;
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
@@ -768,56 +768,6 @@ impl KeyboardMap {
     }
 }
 
-/// High-level input/window events dispatched from the X11 server to the GUI loop.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DesktopEvent {
-    /// Key press translated through [`KeyboardMap`].
-    Key {
-        /// Key symbol.
-        key: Key,
-        /// Active modifier flags.
-        modifiers: Modifiers,
-    },
-    /// Left mouse press (`x, y` in window coordinates).
-    MouseDown {
-        /// Window-relative X pixel.
-        x: i16,
-        /// Window-relative Y pixel.
-        y: i16,
-        /// Active modifiers (`Shift` extends selection).
-        modifiers: Modifiers,
-    },
-    /// Left mouse drag motion (`x, y` in window coordinates).
-    MouseDrag {
-        /// Window-relative X pixel.
-        x: i16,
-        /// Window-relative Y pixel.
-        y: i16,
-    },
-    /// Left mouse release.
-    MouseUp,
-    /// Mouse scroll wheel delta (`lines < 0` scrolls up, `> 0` scrolls down).
-    Scroll {
-        /// Scroll direction in logical steps (`-1` up, `+1` down).
-        delta_lines: i32,
-    },
-    /// Window resized to `(width, height)` pixels.
-    Resize {
-        /// Window width (`px`).
-        width: u16,
-        /// Window height (`px`).
-        height: u16,
-    },
-    /// Window content must be pushed to the X server again.
-    Expose,
-    /// Window manager asked to close (`WM_DELETE_WINDOW`).
-    CloseRequested,
-    /// Window lost keyboard focus.
-    FocusOut,
-    /// Clipboard UTF-8 contents arrived in response to `request_clipboard`.
-    ClipboardPasted(Zeroizing<Vec<u8>>),
-}
-
 /// Errors returned while connecting to X11 or communicating over the display socket.
 #[derive(Debug)]
 pub enum X11Error {
@@ -952,7 +902,7 @@ impl X11Window {
             ))
         })?;
         let sock_path = format!("/tmp/.X11-unix/X{number}");
-        let mut stream = connect_x11_socket(&sock_path)?;
+        let stream = connect_x11_socket(&sock_path)?;
         stream.set_read_timeout(Some(SETUP_TIMEOUT))?;
         stream.set_write_timeout(Some(SETUP_TIMEOUT))?;
 
@@ -965,6 +915,24 @@ impl X11Window {
         } else {
             Vec::new()
         };
+        Self::open_stream(stream, &cookie, title, width, height)
+    }
+
+    /// Performs X11 setup, atom interning, window/GC creation, and keyboard mapping over an
+    /// already-connected [`UnixStream`] (`cookie` may be empty for cookie-less connections).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`X11Error`] on handshake refusal, unsupported pixel formats, or socket error.
+    pub fn open_stream(
+        mut stream: UnixStream,
+        cookie: &[u8],
+        title: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<Self, X11Error> {
+        stream.set_read_timeout(Some(SETUP_TIMEOUT))?;
+        stream.set_write_timeout(Some(SETUP_TIMEOUT))?;
 
         let mut init = Vec::with_capacity(32 + cookie.len());
         init.extend_from_slice(&[0x6C, 0]);
@@ -982,7 +950,7 @@ impl X11Window {
             while (init.len() & 3) != 0 {
                 init.push(0);
             }
-            init.extend_from_slice(&cookie);
+            init.extend_from_slice(cookie);
             while (init.len() & 3) != 0 {
                 init.push(0);
             }
@@ -1232,6 +1200,7 @@ impl X11Window {
     ///
     /// Returns [`X11Error`] if the X server closes or the socket errors.
     pub fn poll_events(&mut self, timeout_ms: i32) -> Result<Vec<DesktopEvent>, X11Error> {
+        self.parse_buffered_packets()?;
         if self.events.is_empty() {
             let mut pfd = libc::pollfd {
                 fd: self.stream.as_raw_fd(),
@@ -1731,6 +1700,44 @@ impl Drop for X11Window {
     }
 }
 
+impl DesktopWindow for X11Window {
+    fn size(&self) -> (u16, u16) {
+        X11Window::size(self)
+    }
+
+    fn dpi(&self) -> i64 {
+        X11Window::dpi(self)
+    }
+
+    fn present_argb(
+        &mut self,
+        pixels: &[u32],
+        width: u16,
+        height: u16,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        X11Window::present_argb(self, pixels, width, height).map_err(Into::into)
+    }
+
+    fn poll_events(
+        &mut self,
+        timeout_ms: i32,
+    ) -> Result<Vec<DesktopEvent>, Box<dyn std::error::Error>> {
+        X11Window::poll_events(self, timeout_ms).map_err(Into::into)
+    }
+
+    fn set_clipboard(&mut self, utf8: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        X11Window::set_clipboard(self, utf8).map_err(Into::into)
+    }
+
+    fn request_clipboard(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        X11Window::request_clipboard(self).map_err(Into::into)
+    }
+
+    fn clear_clipboard(&mut self) {
+        X11Window::clear_clipboard(self);
+    }
+}
+
 fn connect_x11_socket(path: &str) -> Result<UnixStream, X11Error> {
     if let Ok(stream) = UnixStream::connect(path) {
         return Ok(stream);
@@ -2010,5 +2017,274 @@ mod tests {
             map.translate(9, 0),
             Some((Key::Backspace, Modifiers::default()))
         );
+    }
+
+    #[test]
+    fn full_x11_wire_protocol_loopback_handshake_render_events_and_clipboard() {
+        let (client_sock, mut server_sock) = UnixStream::pair().expect("unix stream pair");
+        let cookie = [0x42u8; COOKIE_BYTES];
+
+        let server = std::thread::spawn(move || {
+            let mut hdr = [0u8; 12];
+            server_sock.read_exact(&mut hdr).expect("client setup hdr");
+            assert_eq!(hdr[0], 0x6C);
+            let n_len = u16::from_le_bytes([hdr[6], hdr[7]]) as usize;
+            let d_len = u16::from_le_bytes([hdr[8], hdr[9]]) as usize;
+            assert_eq!(n_len, COOKIE_NAME.len());
+            assert_eq!(d_len, COOKIE_BYTES);
+            let n_pad = (n_len + 3) & !3;
+            let d_pad = (d_len + 3) & !3;
+            let mut auth = vec![0u8; n_pad + d_pad];
+            server_sock.read_exact(&mut auth).expect("auth payload");
+            assert_eq!(&auth[..n_len], COOKIE_NAME.as_bytes());
+            assert_eq!(&auth[n_pad..n_pad + d_len], &cookie);
+
+            // Build valid LSBFirst 24-depth / 32-bpp server setup reply:
+            // body: 32 fixed + 0 vendor + 8 (1 format) + 40 screen = 80 bytes (20 words).
+            let mut body = vec![0u8; 80];
+            body[4..8].copy_from_slice(&0x0020_0000u32.to_le_bytes()); // resource_id_base
+            body[8..12].copy_from_slice(&0x001F_FFFFu32.to_le_bytes()); // resource_id_mask
+            body[16..18].copy_from_slice(&0u16.to_le_bytes()); // vendor len
+            body[18..20].copy_from_slice(&65_535u16.to_le_bytes()); // max_req_words
+            body[20] = 1; // screens
+            body[21] = 1; // formats
+            body[22] = 0; // image_byte_order = LSBFirst
+            body[26] = 8; // min_keycode
+            body[27] = 10; // max_keycode
+                           // Format 0 at offset 32: depth=24, bpp=32, scanline_pad=32
+            body[32] = 24;
+            body[33] = 32;
+            body[34] = 32;
+            // Screen 0 at offset 40:
+            body[40..44].copy_from_slice(&0x0000_0100u32.to_le_bytes()); // root
+            body[48..52].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes()); // white
+            body[60..62].copy_from_slice(&1280u16.to_le_bytes()); // root_width
+            body[62..64].copy_from_slice(&800u16.to_le_bytes()); // root_height
+            body[64..66].copy_from_slice(&338u16.to_le_bytes()); // mm_width (~96 dpi)
+            body[72..76].copy_from_slice(&0x21u32.to_le_bytes()); // root_visual
+            body[78] = 24; // root_depth
+
+            let mut setup_rep = vec![1u8, 0, 11, 0, 0, 0, 20, 0];
+            setup_rep.extend_from_slice(&body);
+            server_sock.write_all(&setup_rep).expect("send setup");
+
+            let read_req = |sock: &mut UnixStream| -> Option<(u8, u8, Vec<u8>)> {
+                let mut h = [0u8; 4];
+                if sock.read_exact(&mut h).is_err() {
+                    return None;
+                }
+                let words = u16::from_le_bytes([h[2], h[3]]) as usize;
+                let mut rest = vec![0u8; (words - 1) * 4];
+                sock.read_exact(&mut rest).expect("read req body");
+                Some((h[0], h[1], rest))
+            };
+
+            let send_reply = |sock: &mut UnixStream, seq: u16, b1: u8, payload: &[u8]| {
+                assert_eq!(payload.len() % 4, 0);
+                let mut pkt = vec![0u8; 32 + payload.len().saturating_sub(24)];
+                pkt[0] = 1;
+                pkt[1] = b1;
+                pkt[2..4].copy_from_slice(&seq.to_le_bytes());
+                let extra = payload.len().saturating_sub(24) / 4;
+                pkt[4..8].copy_from_slice(&(extra as u32).to_le_bytes());
+                let copy_len = payload.len().min(pkt.len() - 8);
+                pkt[8..8 + copy_len].copy_from_slice(&payload[..copy_len]);
+                sock.write_all(&pkt).expect("send reply");
+            };
+
+            let mut seq = 0u16;
+            let mut next_atom = 100u32;
+            let mut wm_protocols_atom = 0u32;
+            let mut wm_delete_atom = 0u32;
+            let mut clipboard_atom = 0u32;
+            let mut utf8_atom = 0u32;
+            let mut sel_prop_atom = 0u32;
+            let mut put_image_bytes = 0usize;
+            let mut saw_create_win = false;
+            let mut saw_map_win = false;
+            let mut saw_set_sel_owner = false;
+            let mut saw_convert_sel = false;
+
+            while let Some((opcode, b1, rest)) = read_req(&mut server_sock) {
+                seq = seq.wrapping_add(1);
+                match opcode {
+                    op::INTERN_ATOM => {
+                        let name_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+                        let name = std::str::from_utf8(&rest[4..4 + name_len]).unwrap();
+                        let atom = next_atom;
+                        next_atom += 1;
+                        match name {
+                            "WM_PROTOCOLS" => wm_protocols_atom = atom,
+                            "WM_DELETE_WINDOW" => wm_delete_atom = atom,
+                            "CLIPBOARD" => clipboard_atom = atom,
+                            "UTF8_STRING" => utf8_atom = atom,
+                            "HOLONOMY_SELECTION" => sel_prop_atom = atom,
+                            _ => {}
+                        }
+                        let mut p = vec![0u8; 24];
+                        p[0..4].copy_from_slice(&atom.to_le_bytes());
+                        send_reply(&mut server_sock, seq, 0, &p);
+                    }
+                    op::GET_KEYBOARD_MAPPING => {
+                        // 3 keycodes (8..=10), 2 keysyms per keycode -> 24 bytes after 24-byte hdr.
+                        let mut p = vec![0u8; 48];
+                        let syms: [u32; 6] =
+                            [u32::from(b'a'), u32::from(b'A'), 0xff08, 0, 0xff0d, 0];
+                        for (i, s) in syms.iter().enumerate() {
+                            p[24 + i * 4..24 + i * 4 + 4].copy_from_slice(&s.to_le_bytes());
+                        }
+                        send_reply(&mut server_sock, seq, 2, &p);
+                    }
+                    op::CREATE_WINDOW => saw_create_win = true,
+                    op::MAP_WINDOW => saw_map_win = true,
+                    op::GET_INPUT_FOCUS => {
+                        send_reply(&mut server_sock, seq, 0, &[0u8; 24]);
+                        // Push batch of synthetic server events onto wire right after sync!
+                        // 1. KeyPress keycode 8 ('a')
+                        let mut kp = [0u8; 32];
+                        kp[0] = event_code::KEY_PRESS;
+                        kp[1] = 8;
+                        server_sock.write_all(&kp).unwrap();
+                        // 2. ButtonPress left @ (50, 60) + MotionNotify (80, 90) + ButtonRelease
+                        let mut bp = [0u8; 32];
+                        bp[0] = event_code::BUTTON_PRESS;
+                        bp[1] = 1;
+                        bp[24..26].copy_from_slice(&50i16.to_le_bytes());
+                        bp[26..28].copy_from_slice(&60i16.to_le_bytes());
+                        server_sock.write_all(&bp).unwrap();
+                        let mut mv = [0u8; 32];
+                        mv[0] = event_code::MOTION_NOTIFY;
+                        mv[24..26].copy_from_slice(&80i16.to_le_bytes());
+                        mv[26..28].copy_from_slice(&90i16.to_le_bytes());
+                        server_sock.write_all(&mv).unwrap();
+                        let mut br = [0u8; 32];
+                        br[0] = event_code::BUTTON_RELEASE;
+                        br[1] = 1;
+                        server_sock.write_all(&br).unwrap();
+                        // 3. ConfigureNotify resize 900x700 + Expose
+                        let mut cfg = [0u8; 32];
+                        cfg[0] = event_code::CONFIGURE_NOTIFY;
+                        cfg[20..22].copy_from_slice(&900u16.to_le_bytes());
+                        cfg[22..24].copy_from_slice(&700u16.to_le_bytes());
+                        server_sock.write_all(&cfg).unwrap();
+                        let mut exp = [0u8; 32];
+                        exp[0] = event_code::EXPOSE;
+                        exp[12..14].copy_from_slice(&900u16.to_le_bytes());
+                        exp[14..16].copy_from_slice(&700u16.to_le_bytes());
+                        server_sock.write_all(&exp).unwrap();
+                        // 4. ClientMessage WM_DELETE_WINDOW with SendEvent bit 0x80 set!
+                        let mut cm = [0u8; 32];
+                        cm[0] = event_code::CLIENT_MESSAGE | event_code::SEND_EVENT_FLAG;
+                        cm[1] = 32;
+                        cm[8..12].copy_from_slice(&wm_protocols_atom.to_le_bytes());
+                        cm[12..16].copy_from_slice(&wm_delete_atom.to_le_bytes());
+                        server_sock.write_all(&cm).unwrap();
+                    }
+                    op::PUT_IMAGE => {
+                        put_image_bytes += rest.len().saturating_sub(20);
+                        let _ = b1;
+                    }
+                    op::SET_SELECTION_OWNER => {
+                        saw_set_sel_owner = true;
+                        // Trigger a SelectionRequest back to client to verify answer_selection_request!
+                        let mut sr = [0u8; 32];
+                        sr[0] = event_code::SELECTION_REQUEST;
+                        sr[8..12].copy_from_slice(&0x999u32.to_le_bytes()); // requestor
+                        sr[12..16].copy_from_slice(&clipboard_atom.to_le_bytes());
+                        sr[16..20].copy_from_slice(&utf8_atom.to_le_bytes());
+                        sr[20..24].copy_from_slice(&sel_prop_atom.to_le_bytes());
+                        server_sock.write_all(&sr).unwrap();
+                    }
+                    op::CONVERT_SELECTION => {
+                        saw_convert_sel = true;
+                        let mut sn = [0u8; 32];
+                        sn[0] = event_code::SELECTION_NOTIFY | event_code::SEND_EVENT_FLAG;
+                        sn[12..16].copy_from_slice(&clipboard_atom.to_le_bytes());
+                        sn[16..20].copy_from_slice(&utf8_atom.to_le_bytes());
+                        sn[20..24].copy_from_slice(&sel_prop_atom.to_le_bytes());
+                        server_sock.write_all(&sn).unwrap();
+                    }
+                    op::GET_PROPERTY => {
+                        let pasted = b"clipboard-hello";
+                        let padded_len = (pasted.len() + 3) & !3;
+                        let mut p = vec![0u8; 24 + padded_len];
+                        p[0..4].copy_from_slice(&utf8_atom.to_le_bytes());
+                        p[8..12].copy_from_slice(&(pasted.len() as u32).to_le_bytes());
+                        p[24..24 + pasted.len()].copy_from_slice(pasted);
+                        send_reply(&mut server_sock, seq, 8, &p);
+                    }
+                    _ => {}
+                }
+            }
+            (
+                saw_create_win,
+                saw_map_win,
+                put_image_bytes,
+                saw_set_sel_owner,
+                saw_convert_sel,
+            )
+        });
+
+        let mut win = X11Window::open_stream(client_sock, &cookie, "Holonomy Test", 640, 480)
+            .expect("handshake + window setup succeeds");
+        assert_eq!(win.size(), (640, 480));
+
+        // Present framebuffer large enough to exercise scanline PutImage framing (> 300 KB).
+        let pixels = vec![0x001F_2225u32; 640 * 480];
+        win.present_argb(&pixels, 640, 480)
+            .expect("present_argb succeeds");
+
+        let mut got = Vec::new();
+        for _ in 0..8 {
+            got.extend(win.poll_events(100).expect("poll"));
+            if got
+                .iter()
+                .any(|e| matches!(e, DesktopEvent::CloseRequested))
+            {
+                break;
+            }
+        }
+        assert!(got.contains(&DesktopEvent::Key {
+            key: Key::Character('a'),
+            modifiers: Modifiers::none()
+        }));
+        assert!(got.contains(&DesktopEvent::MouseDown {
+            x: 50,
+            y: 60,
+            modifiers: Modifiers::none()
+        }));
+        assert!(got.contains(&DesktopEvent::MouseUp));
+        assert!(got.contains(&DesktopEvent::Resize {
+            width: 900,
+            height: 700
+        }));
+        assert!(got.contains(&DesktopEvent::Expose));
+        assert!(got.contains(&DesktopEvent::CloseRequested));
+
+        // Exercise clipboard ownership + selection request/notify round-trip + clear.
+        win.set_clipboard(b"secret-clip").expect("set clipboard");
+        let _ = win.poll_events(100).expect("answer SelectionRequest");
+        win.request_clipboard().expect("request clipboard");
+        let mut pasted = Vec::new();
+        for _ in 0..4 {
+            let evs = win.poll_events(100).expect("read SelectionNotify");
+            pasted.extend(evs);
+            if pasted
+                .iter()
+                .any(|e| matches!(e, DesktopEvent::ClipboardPasted(_)))
+            {
+                break;
+            }
+        }
+        assert!(pasted.iter().any(|e| matches!(
+            e,
+            DesktopEvent::ClipboardPasted(b) if b.as_slice() == b"clipboard-hello"
+        )));
+        win.clear_clipboard();
+        drop(win);
+
+        let (cw, mw, put_bytes, sel_own, conv_sel) = server.join().expect("server thread");
+        assert!(cw && mw && sel_own && conv_sel);
+        assert_eq!(put_bytes, 640 * 480 * 4);
     }
 }

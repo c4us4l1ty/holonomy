@@ -75,6 +75,7 @@ pub enum LockError {
     /// The OS refused; usually an `RLIMIT_MEMLOCK` limit.
     Refused,
     /// A syscall returned an unexpected error.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Syscall(i32),
 }
 
@@ -276,6 +277,13 @@ unsafe fn windows_virtual_unlock(ptr: *mut core::ffi::c_void, len: usize) {
 
 /// Whether `memfd_secret(2)` is usable right now — probed, not assumed, on Linux x86_64 and
 /// aarch64. It returns false on other targets and when the syscall is unavailable or blocked.
+#[cfg_attr(
+    not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )),
+    allow(dead_code)
+)]
 pub fn memfd_secret_available() -> bool {
     #[cfg(all(
         target_os = "linux",

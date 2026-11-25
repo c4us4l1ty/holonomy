@@ -1,6 +1,8 @@
 //! Block 10 integration tests: streaming `.txt`/`.md` import, explicit plaintext-egress export,
 //! and one-way v5.1.0 -> v6 `.wavefunction` container migration.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::io::{BufReader, Cursor, Write};
 use std::path::PathBuf;

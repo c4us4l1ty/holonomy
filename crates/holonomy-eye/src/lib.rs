@@ -57,6 +57,7 @@ mod face;
 mod geom;
 mod heights;
 mod layout;
+mod opentype;
 mod picture;
 pub mod raster;
 mod shaper;
@@ -73,6 +74,7 @@ pub use crate::layout::{
     layout_styled, layout_styled_continuing, layout_styled_from, layout_styled_in_paragraph,
     layout_window, Caret, Layout, Line, Placed,
 };
+pub use crate::opentype::ShapedGlyph;
 pub use crate::picture::{Picture, PictureCluster, PictureLine, SelectionSpan};
 pub use crate::raster::{
     rasterize_outline, FontOutlines, FontSet, FontVariant, GlyphBitmap, GlyphOutline,

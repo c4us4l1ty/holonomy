@@ -28,7 +28,7 @@
 //! nothing older (D-64).
 
 use holonomy_eye::Fixed;
-use holonomy_gui::canvas::{run_x11_desktop, DesktopEnd, GuiWipeUnconfirmed};
+use holonomy_gui::canvas::{run_desktop, DesktopEnd, GuiWipeUnconfirmed};
 use holonomy_gui::panel::{self, Facts};
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
@@ -57,115 +57,321 @@ const ESCAPE_GRACE_MILLIS: i32 = 25;
 
 type Window = App<store::DocumentSink, store::DocumentSource, CellShaper, CellSurface>;
 
-/// The terminal in raw mode, restored when it is dropped.
-struct RawMode {
-    saved: libc::termios,
-}
+#[cfg(unix)]
+mod sys_console {
+    use std::io::Write;
 
-impl RawMode {
-    fn enable() -> std::io::Result<Self> {
-        // SAFETY: `tcgetattr`/`tcsetattr` are called with a valid fd (0 is the tty this process was
-        // started on) and a fully initialised `termios` this function owns.
-        unsafe {
-            let mut current: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut current) != 0 {
-                return Err(std::io::Error::last_os_error());
+    /// The terminal in raw mode, restored when it is dropped.
+    pub(super) struct RawMode {
+        saved: libc::termios,
+    }
+
+    impl RawMode {
+        pub(super) fn enable() -> std::io::Result<Self> {
+            // SAFETY: `tcgetattr`/`tcsetattr` operate on stdin (fd 0) with a local `termios`.
+            unsafe {
+                let mut current: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(libc::STDIN_FILENO, &mut current) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let saved = current;
+                current.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+                current.c_iflag &= !(libc::IXON | libc::ICRNL);
+                current.c_cc[libc::VMIN] = 1;
+                current.c_cc[libc::VTIME] = 0;
+                if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &current) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(Self { saved })
             }
-            let saved = current;
-            current.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-            current.c_iflag &= !(libc::IXON | libc::ICRNL);
-            current.c_cc[libc::VMIN] = 1;
-            current.c_cc[libc::VTIME] = 0;
-            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &current) != 0 {
-                return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    impl Drop for RawMode {
+        fn drop(&mut self) {
+            // SAFETY: restoring the exact `termios` read in `enable`, on the same fd.
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.saved);
             }
-            Ok(Self { saved })
+            print!("\x1b[0m\x1b[2J\x1b[1;1H");
+            let _ = std::io::stdout().flush();
         }
     }
-}
 
-impl Drop for RawMode {
-    fn drop(&mut self) {
-        // SAFETY: restoring the exact `termios` read in `enable`, on the same fd.
-        unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.saved);
-        }
-        print!("\x1b[0m\x1b[2J\x1b[1;1H");
-        let _ = std::io::stdout().flush();
-    }
-}
-
-/// The terminal's size in cells, or a sane 80×24 when it cannot be asked.
-fn size() -> (usize, usize) {
-    // SAFETY: `ioctl` with `TIOCGWINSZ` writes a `winsize` this function owns.
-    let size = unsafe {
-        let mut size: libc::winsize = std::mem::zeroed();
-        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) == 0 {
-            Some((usize::from(size.ws_col), usize::from(size.ws_row)))
-        } else {
-            None
-        }
-    };
-    match size {
-        Some((columns, rows)) if columns >= 20 && rows >= 4 => (columns, rows),
-        _ => (80, 24),
-    }
-}
-
-/// Whether a byte is waiting, within `millis`. `false` on a timeout is the autosave's cue.
-fn readable(millis: i32) -> bool {
-    // SAFETY: a `pollfd` for fd 0, which this process owns for its whole life.
-    unsafe {
-        let mut descriptor = libc::pollfd {
-            fd: libc::STDIN_FILENO,
-            events: libc::POLLIN,
-            revents: 0,
+    /// The terminal's size in cells, or 80×24 when it cannot be asked.
+    pub(super) fn size() -> (usize, usize) {
+        // SAFETY: `ioctl` with `TIOCGWINSZ` writes a local `winsize`.
+        let size = unsafe {
+            let mut size: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) == 0 {
+                Some((usize::from(size.ws_col), usize::from(size.ws_row)))
+            } else {
+                None
+            }
         };
-        matches!(libc::poll(&mut descriptor, 1, millis), count if count > 0)
+        match size {
+            Some((columns, rows)) if columns >= 20 && rows >= 4 => (columns, rows),
+            _ => (80, 24),
+        }
+    }
+
+    /// Whether a byte is waiting on stdin within `millis`.
+    pub(super) fn readable(millis: i32) -> bool {
+        // SAFETY: `pollfd` points to valid stack storage over fd 0.
+        unsafe {
+            let mut descriptor = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            matches!(libc::poll(&mut descriptor, 1, millis), count if count > 0)
+        }
+    }
+
+    /// Whether stdin refers to an interactive TTY.
+    pub(super) fn stdin_is_tty() -> bool {
+        // SAFETY: `isatty` checks stdin fd without dereferencing pointers.
+        unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+    }
+
+    /// Turns terminal echo off for a one-line prompt when `stdin` is a tty.
+    pub(super) struct EchoGuard {
+        saved: Option<libc::termios>,
+    }
+
+    impl EchoGuard {
+        pub(super) fn acquire() -> std::io::Result<Self> {
+            // SAFETY: `isatty`/`tcgetattr`/`tcsetattr` operate on stdin with a local `termios`.
+            unsafe {
+                if libc::isatty(libc::STDIN_FILENO) == 0 {
+                    return Ok(Self { saved: None });
+                }
+                let mut current: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(libc::STDIN_FILENO, &mut current) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let saved = current;
+                current.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+                current.c_iflag &= !libc::ICRNL;
+                current.c_cc[libc::VMIN] = 1;
+                current.c_cc[libc::VTIME] = 0;
+                if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &current) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(Self { saved: Some(saved) })
+            }
+        }
+    }
+
+    impl Drop for EchoGuard {
+        fn drop(&mut self) {
+            if let Some(saved) = &self.saved {
+                // SAFETY: restoring the exact `termios` captured in `acquire`.
+                unsafe {
+                    libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, saved);
+                }
+            }
+        }
     }
 }
 
-/// Turns terminal echo off for a one-line prompt when `stdin` is a tty, without clearing the
-/// screen on drop (used by `verify` and `compact`).
-struct EchoGuard {
-    saved: Option<libc::termios>,
-}
+#[cfg(windows)]
+mod sys_console {
+    use std::ffi::c_void;
+    use std::io::Write;
 
-impl EchoGuard {
-    fn acquire() -> std::io::Result<Self> {
-        // SAFETY: `isatty`/`tcgetattr`/`tcsetattr` operate on `STDIN_FILENO` with a zeroed local
-        // `termios`.
+    type Handle = *mut c_void;
+    const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+    const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+    const INVALID_HANDLE_VALUE: Handle = (-1isize) as Handle;
+    const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+    const ENABLE_LINE_INPUT: u32 = 0x0002;
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+    const FILE_TYPE_CHAR: u32 = 0x0002;
+    const WAIT_OBJECT_0: u32 = 0;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ConsoleScreenBufferInfo {
+        dw_size: Coord,
+        dw_cursor_position: Coord,
+        w_attributes: u16,
+        sr_window: SmallRect,
+        dw_maximum_window_size: Coord,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n_std_handle: u32) -> Handle;
+        fn GetConsoleMode(h_console_handle: Handle, lp_mode: *mut u32) -> i32;
+        fn SetConsoleMode(h_console_handle: Handle, dw_mode: u32) -> i32;
+        fn GetConsoleScreenBufferInfo(
+            h_console_output: Handle,
+            lp_console_screen_buffer_info: *mut ConsoleScreenBufferInfo,
+        ) -> i32;
+        fn WaitForSingleObject(h_handle: Handle, dw_milliseconds: u32) -> u32;
+        fn GetFileType(h_file: Handle) -> u32;
+    }
+
+    pub(super) struct RawMode {
+        in_handle: Handle,
+        saved_in: u32,
+        out_handle: Handle,
+        saved_out: Option<u32>,
+    }
+
+    impl RawMode {
+        pub(super) fn enable() -> std::io::Result<Self> {
+            // SAFETY: queries standard console handles and saves/updates Windows VT console modes.
+            unsafe {
+                let in_handle = GetStdHandle(STD_INPUT_HANDLE);
+                if in_handle.is_null() || in_handle == INVALID_HANDLE_VALUE {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut saved_in = 0u32;
+                if GetConsoleMode(in_handle, &mut saved_in) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let raw_in = (saved_in
+                    & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
+                    | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                if SetConsoleMode(in_handle, raw_in) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let out_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+                let mut saved_out = None;
+                let mut cur_out = 0u32;
+                if !out_handle.is_null()
+                    && out_handle != INVALID_HANDLE_VALUE
+                    && GetConsoleMode(out_handle, &mut cur_out) != 0
+                {
+                    saved_out = Some(cur_out);
+                    let _ =
+                        SetConsoleMode(out_handle, cur_out | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                }
+                Ok(Self {
+                    in_handle,
+                    saved_in,
+                    out_handle,
+                    saved_out,
+                })
+            }
+        }
+    }
+
+    impl Drop for RawMode {
+        fn drop(&mut self) {
+            // SAFETY: restores captured console input/output modes.
+            unsafe {
+                let _ = SetConsoleMode(self.in_handle, self.saved_in);
+                if let Some(m) = self.saved_out {
+                    let _ = SetConsoleMode(self.out_handle, m);
+                }
+            }
+            print!("\x1b[0m\x1b[2J\x1b[1;1H");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    pub(super) fn size() -> (usize, usize) {
+        // SAFETY: reads console window rectangle from `STD_OUTPUT_HANDLE`.
         unsafe {
-            if libc::isatty(libc::STDIN_FILENO) == 0 {
+            let out = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut info = ConsoleScreenBufferInfo::default();
+            if !out.is_null()
+                && out != INVALID_HANDLE_VALUE
+                && GetConsoleScreenBufferInfo(out, &mut info) != 0
+            {
+                let cols =
+                    usize::try_from(info.sr_window.right - info.sr_window.left + 1).unwrap_or(80);
+                let rows =
+                    usize::try_from(info.sr_window.bottom - info.sr_window.top + 1).unwrap_or(24);
+                if cols >= 20 && rows >= 4 {
+                    return (cols, rows);
+                }
+            }
+        }
+        (80, 24)
+    }
+
+    pub(super) fn readable(millis: i32) -> bool {
+        // SAFETY: waits on `STD_INPUT_HANDLE` up to `millis`.
+        unsafe {
+            let h = GetStdHandle(STD_INPUT_HANDLE);
+            if h.is_null() || h == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            WaitForSingleObject(h, millis.max(0) as u32) == WAIT_OBJECT_0
+        }
+    }
+
+    pub(super) fn stdin_is_tty() -> bool {
+        // SAFETY: checks `GetFileType` + `GetConsoleMode` on `STD_INPUT_HANDLE`.
+        unsafe {
+            let h = GetStdHandle(STD_INPUT_HANDLE);
+            if h.is_null() || h == INVALID_HANDLE_VALUE || GetFileType(h) != FILE_TYPE_CHAR {
+                return false;
+            }
+            let mut mode = 0u32;
+            GetConsoleMode(h, &mut mode) != 0
+        }
+    }
+
+    pub(super) struct EchoGuard {
+        saved: Option<(Handle, u32)>,
+    }
+
+    impl EchoGuard {
+        pub(super) fn acquire() -> std::io::Result<Self> {
+            if !stdin_is_tty() {
                 return Ok(Self { saved: None });
             }
-            let mut current: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut current) != 0 {
-                return Err(std::io::Error::last_os_error());
+            // SAFETY: stdin is a console handle; disables echo + line input for prompt.
+            unsafe {
+                let h = GetStdHandle(STD_INPUT_HANDLE);
+                let mut cur = 0u32;
+                if GetConsoleMode(h, &mut cur) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let _ = SetConsoleMode(h, cur & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT));
+                Ok(Self {
+                    saved: Some((h, cur)),
+                })
             }
-            let saved = current;
-            current.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-            current.c_iflag &= !libc::ICRNL;
-            current.c_cc[libc::VMIN] = 1;
-            current.c_cc[libc::VTIME] = 0;
-            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &current) != 0 {
-                return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    impl Drop for EchoGuard {
+        fn drop(&mut self) {
+            if let Some((h, cur)) = self.saved {
+                // SAFETY: restores original console mode on drop.
+                unsafe {
+                    let _ = SetConsoleMode(h, cur);
+                }
             }
-            Ok(Self { saved: Some(saved) })
         }
     }
 }
 
-impl Drop for EchoGuard {
-    fn drop(&mut self) {
-        if let Some(saved) = &self.saved {
-            // SAFETY: restoring the exact `termios` captured in `acquire`.
-            unsafe {
-                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, saved);
-            }
-        }
-    }
-}
+use sys_console::{readable, size, stdin_is_tty, EchoGuard, RawMode};
 
 /// Removes one UTF-8 scalar value from the tail of a raw input buffer, so Backspace on a
 /// multi-byte character never leaves orphaned continuation bytes behind.
@@ -230,7 +436,7 @@ fn read_passphrase_from(
 /// raw and normalized buffers are both pre-allocated and zeroized on drop (`AUDIT OQ-28`).
 fn prompt(verb: &str, path: &Path) -> std::io::Result<PassphraseInput> {
     let mut stdout = std::io::stdout();
-    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
+    let is_tty = stdin_is_tty();
     if is_tty {
         write!(stdout, "{} {} (passphrase): ", verb, path.display())?;
         stdout.flush()?;
@@ -252,6 +458,7 @@ fn window(
     let spine = document.spine()?;
     let residency = ResidentSet::new(document.source(), store::BUDGET, store::SLACK)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let spine_len = spine.len();
     let mut editor = Editor::new(
         Typing::resume(document.sink(), spine, store::CAPACITY),
         residency,
@@ -259,12 +466,12 @@ fn window(
         Fixed::units(columns as i64),
         Fixed::units(rows as i64),
     );
-    // D-53: nothing measured the document, so the scroll limit was the first screen and Page Down
-    // could not leave it. `Editor::reflow` is written for exactly this moment — it faults one leaf
-    // at a time, so opening a long document costs its leaf count and not its text — and no caller
-    // was making it. A document that cannot be measured yet is still openable, so a refusal here is
-    // the frame's answer, not the window's: the panel reports what a reader can see.
-    let _ = editor.reflow();
+    // D-53 + L-1/L-2: measure normal documents upfront so Page Down knows total height; on huge
+    // multi-million-word documents (> 2 MiB), let `frame()` bootstrap only the visible viewport so
+    // cold-open latency and resident memory stay bounded.
+    if spine_len <= 2 * 1024 * 1024 {
+        let _ = editor.reflow();
+    }
     Ok(App::new(
         editor,
         Keymap::new(Fixed::units(rows as i64)),
@@ -1102,7 +1309,7 @@ fn parse_migrate_args(args: &[String]) -> Option<MigrateArgs> {
 
 fn prompt_raw_line(verb: &str, path: &Path) -> std::io::Result<Zeroizing<String>> {
     let mut stdout = std::io::stdout();
-    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
+    let is_tty = stdin_is_tty();
     if is_tty {
         write!(stdout, "{} {} (passphrase): ", verb, path.display())?;
         stdout.flush()?;
@@ -1294,7 +1501,7 @@ fn run_gui_command(
     doc: Option<&Path>,
     deadman: Option<Duration>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match run_x11_desktop(doc, deadman)? {
+    match run_desktop(doc, deadman)? {
         DesktopEnd::Saved | DesktopEnd::NothingToWrite | DesktopEnd::Cancelled => Ok(()),
         DesktopEnd::SaveFailed => {
             eprintln!(

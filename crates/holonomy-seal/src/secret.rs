@@ -9,6 +9,7 @@
 //! For Windows/macOS or low-`RLIMIT` environments the report records the degraded rung rather
 //! than pretending.
 
+use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{compiler_fence, Ordering};
@@ -43,8 +44,14 @@ impl<const N: usize> LockedSecret<N> {
     pub fn new(mut bytes: [u8; N]) -> Self {
         let input = Zeroizing::new(bytes);
         bytes.zeroize();
-        let raw = Box::into_raw(Box::new(PageAlignedCell(UnsafeCell::new([0u8; N]))));
-        let ptr = NonNull::new(raw).expect("Box::into_raw is non-null");
+        let layout = Layout::new::<PageAlignedCell<N>>();
+        // SAFETY: `PageAlignedCell<N>` has `align(65536)` and `size >= 65536` (non-zero);
+        // `alloc_zeroed` allocates the zero-initialized 64 KiB cell directly on the heap so no
+        // 64 KiB aligned temporary is ever placed on the thread stack.
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) };
+        let Some(ptr) = NonNull::new(raw.cast::<PageAlignedCell<N>>()) else {
+            std::alloc::handle_alloc_error(layout);
+        };
         // SAFETY: `ptr` owns a live `#[repr(C, align(65536))]` heap allocation whose field `0`
         // starts at offset `0`.
         let byte_ptr = unsafe { (*ptr.as_ptr()).0.get().cast::<u8>() };
@@ -125,8 +132,8 @@ impl<const N: usize> Drop for LockedSecret<N> {
             arenas.unregister(slot);
         }
         // Order is the invariant: contents destroyed *while still locked*, then `munlock` via
-        // dropping `guard`, and only then reconstruct and free the heap allocation so
-        // `AuditAllocator::dealloc` observes all-zero bytes.
+        // dropping `guard`, and only then free the heap allocation so `AuditAllocator::dealloc`
+        // observes all-zero bytes.
         let ptr = self.byte_ptr();
         for offset in 0..N {
             // SAFETY: `ptr` owns `N` writable bytes and `unregister` completed above.
@@ -134,8 +141,14 @@ impl<const N: usize> Drop for LockedSecret<N> {
         }
         compiler_fence(Ordering::SeqCst);
         drop(self.guard.take());
-        // SAFETY: `self.ptr` came from `Box::into_raw` in `Self::new` and is dropped once here.
-        unsafe { drop(Box::from_raw(self.ptr.as_ptr())) };
+        // SAFETY: `self.ptr` was allocated via `std::alloc::alloc_zeroed` with
+        // `Layout::new::<PageAlignedCell<N>>()` in `Self::new` and is freed once here.
+        unsafe {
+            std::alloc::dealloc(
+                self.ptr.as_ptr().cast::<u8>(),
+                Layout::new::<PageAlignedCell<N>>(),
+            );
+        }
     }
 }
 
