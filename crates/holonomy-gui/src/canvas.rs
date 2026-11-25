@@ -2176,7 +2176,13 @@ fn run_desktop_with_window(
 
     loop {
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper, x11.as_mut()));
+            return Ok(finish_gui_wipe(
+                &mut app,
+                &document,
+                &arenas,
+                reaper,
+                x11.as_mut(),
+            ));
         }
 
         if pending_paint || app.dirty() {
@@ -2287,7 +2293,13 @@ fn run_desktop_with_window(
         });
         let events = x11.poll_events(poll_ms)?;
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper, x11.as_mut()));
+            return Ok(finish_gui_wipe(
+                &mut app,
+                &document,
+                &arenas,
+                reaper,
+                x11.as_mut(),
+            ));
         }
         if events.is_empty() {
             // Autosave after 1.5s typing pause (`D-64`, matches TUI loop).
@@ -2303,7 +2315,13 @@ fn run_desktop_with_window(
         last_activity = Instant::now();
         tripwire.beat();
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
-            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper, x11.as_mut()));
+            return Ok(finish_gui_wipe(
+                &mut app,
+                &document,
+                &arenas,
+                reaper,
+                x11.as_mut(),
+            ));
         }
 
         for ev in events {

@@ -2901,7 +2901,10 @@ mod tests {
                 lig_id: 0,
             },
         ];
-        assert_eq!(lig.apply(&gdef, &mut lbuf, 0, FLAG_IGNORE_MARKS, None), Some(1));
+        assert_eq!(
+            lig.apply(&gdef, &mut lbuf, 0, FLAG_IGNORE_MARKS, None),
+            Some(1)
+        );
         assert_eq!(lbuf.len(), 3);
         assert_eq!(lbuf[0].gid, 50);
         assert_eq!(lbuf[1].lig_comp, 0);
