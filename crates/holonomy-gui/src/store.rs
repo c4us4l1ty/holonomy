@@ -493,13 +493,18 @@ impl Document {
             .start_streaming_tx()
             .map_err(|err| StoreError::Line(err.to_string()))?;
         for entry in entries {
-            let step = tx.push_segment(entry.as_ref()).and_then(|_| tx.commit_witness());
+            let step = match tx.push_segment(entry.as_ref()) {
+                Ok(_) => tx.commit_witness(),
+                Err(err) => Err(err),
+            };
             if let Err(err) = step {
                 let _ = line.line.abort_streaming_tx(tx);
                 return Err(StoreError::Line(err.to_string()));
             }
         }
-        line.line.finish_streaming_tx(tx, None).map_err(|err| StoreError::Line(err.to_string()))?;
+        line.line
+            .finish_streaming_tx(tx, None)
+            .map_err(|err| StoreError::Line(err.to_string()))?;
         Ok(())
     }
 

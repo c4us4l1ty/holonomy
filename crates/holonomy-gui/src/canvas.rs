@@ -839,12 +839,16 @@ fn draw_toolbar_button(
 
 /// Renders the fixed `40 px` top Ribbon (`UI-SPEC.md` §3, Law `U0`) directly from `app.editor().toolbar_state()`
 /// and returns hit boxes for every clickable toolbar control.
-fn render_toolbar(
-    app: &mut App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>,
+fn render_toolbar<S, R>(
+    app: &mut App<S, R, FontSet, PixelSurface>,
     dot_state: SecurityDotState,
     read_only_history: bool,
     history_open: bool,
-) -> Vec<ToolbarHit> {
+) -> Vec<ToolbarHit>
+where
+    S: holonomy_text::SegmentSink,
+    R: holonomy_text::SegmentSource,
+{
     let tb = app.editor().toolbar_state();
     let zoom_pct = (app.editor().view().zoom_milli() / 10).clamp(50, 300);
     let surface = app.surface_mut();
@@ -3182,21 +3186,68 @@ fn handle_find_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holonomy_seal::generate_container_id;
-    use std::fs;
+    use holonomy_text::{Appended, SegmentId, SegmentSource};
+    use std::sync::Mutex;
 
-    type GuiApp = App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>;
+    #[derive(Debug, Clone, Default)]
+    struct MemStore(Arc<Mutex<Vec<Vec<u8>>>>);
 
-    struct TempDoc(PathBuf);
-
-    impl Drop for TempDoc {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
+    impl SegmentSink for MemStore {
+        fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+            let mut segments = self.0.lock().map_err(|_| "poisoned")?;
+            let id = segments.len() as u64;
+            segments.push(plaintext.to_vec());
+            Ok(Appended {
+                segment: SegmentId::new(id),
+                witness_sequence: id + 1,
+                segment_root: [0u8; 32],
+                bytes_written: plaintext.len() as u64,
+            })
         }
     }
 
+    impl SegmentSource for MemStore {
+        fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+            let segments = self.0.lock().map_err(|_| "poisoned")?;
+            segments
+                .get(usize::try_from(segment.get()).unwrap_or(usize::MAX))
+                .cloned()
+                .ok_or_else(|| format!("no {segment}"))
+        }
+    }
+
+    type MemApp = App<MemStore, MemStore, FontSet, PixelSurface>;
+
+    fn open_mem_app(view: View, w: u16, h: u16) -> MemApp {
+        let store = MemStore::default();
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
+        let residency =
+            ResidentSet::new(store.clone(), store::BUDGET, store::SLACK).expect("residency");
+        let surface = PixelSurface::new(fonts.clone(), view, w, h);
+        let (lw, lh) = surface.logical_editor_extent();
+        let typing = Typing::new(store, store::CAPACITY);
+        let mut editor = Editor::new(typing, residency, fonts, lw, lh);
+        editor.set_view(view);
+        let _ = editor.reflow();
+        App::new(editor, Keymap::new(lh), surface)
+    }
+
+    #[cfg(unix)]
+    type GuiApp = App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>;
+
+    #[cfg(unix)]
+    struct TempDoc(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for TempDoc {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
     fn temp_doc(label: &str) -> (TempDoc, Document) {
-        let id = generate_container_id().expect("entropy");
+        let id = holonomy_seal::generate_container_id().expect("entropy");
         let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
         let path = std::env::temp_dir().join(format!("holonomy-canvas-{label}-{hex}.wavefunction"));
         let doc = Document::create_with(&path, b"canvas-test-pass", store::test_params())
@@ -3204,6 +3255,7 @@ mod tests {
         (TempDoc(path), doc)
     }
 
+    #[cfg(unix)]
     fn open_gui_app(doc: &Document, view: View, w: u16, h: u16) -> GuiApp {
         let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
         let spine = doc.spine().expect("spine");
@@ -3225,8 +3277,7 @@ mod tests {
 
     #[test]
     fn pixel_surface_renders_placeholder_and_styled_clusters() {
-        let (_tmp, doc) = temp_doc("render");
-        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
         assert!(app.draw().expect("initial empty draw"));
         app.surface_mut().draw_empty_placeholder();
         let bg = rgba_to_xrgb(QUIET_MD_THEME.bg_body);
@@ -3250,8 +3301,7 @@ mod tests {
 
     #[test]
     fn toolbar_reflects_mixed_selection_and_applies_actions() {
-        let (_tmp, doc) = temp_doc("toolbar-u0");
-        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
         for ch in "hello world".chars() {
             app.press(Key::Character(ch), Modifiers::none())
                 .expect("type");
@@ -3291,9 +3341,8 @@ mod tests {
 
     #[test]
     fn pixel_surface_pointer_hit_test_matches_painted_caret_across_zooms_and_dpis() {
-        let (_tmp, doc) = temp_doc("pointer-l8");
         let view = View::new(1_250, 144).expect("valid view");
-        let mut app = open_gui_app(&doc, view, 1_120, 760);
+        let mut app = open_mem_app(view, 1_120, 760);
         for ch in "Single geometry L-8 check".chars() {
             app.press(Key::Character(ch), Modifiers::none())
                 .expect("type");
@@ -3321,6 +3370,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn narrow_toolbar_collapses_overflow_and_overlays_render_cleanly() {
         let (_tmp, doc) = temp_doc("overlays");
@@ -3368,6 +3418,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn block8_timeline_scrubber_diffs_bookmarks_history_search_and_restores() {
         let (_tmp, doc) = temp_doc("block8-scrubber");
@@ -3515,8 +3566,7 @@ mod tests {
 
     #[test]
     fn desktop_app_idle_draw_performs_zero_repaints() {
-        let (_tmp, doc) = temp_doc("idle-l5");
-        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
         for ch in "idle invariance check".chars() {
             app.press(Key::Character(ch), Modifiers::none())
                 .expect("type");
@@ -3535,8 +3585,7 @@ mod tests {
 
     #[test]
     fn selection_cut_copies_and_removes_selected_range() {
-        let (_tmp, doc) = temp_doc("cut");
-        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
         for ch in "alpha beta".chars() {
             app.press(Key::Character(ch), Modifiers::none())
                 .expect("type");

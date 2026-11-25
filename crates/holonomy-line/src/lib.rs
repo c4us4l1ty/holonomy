@@ -2288,7 +2288,9 @@ impl StreamingTx {
                 .bytes_written
                 .checked_add(witness_frame.len() as u64)
                 .ok_or(LineError::ResourceExhausted)?;
-            self.new_witnesses.try_reserve(1).map_err(|_| LineError::ResourceExhausted)?;
+            self.new_witnesses
+                .try_reserve(1)
+                .map_err(|_| LineError::ResourceExhausted)?;
             self.new_witnesses.push(WitnessSummary {
                 sequence: witness_sequence,
                 segment_count: self.mmr.count(),

@@ -98,6 +98,18 @@ impl CovMask {
     }
 
     #[inline]
+    fn contains(&self, gid: u16) -> bool {
+        let word = usize::from(gid >> 6) & 15;
+        let bit = gid & 63;
+        (self.0[word] & (1u64 << bit)) != 0
+    }
+
+    #[inline]
+    fn count_ones(&self) -> usize {
+        self.0.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    #[inline]
     fn intersects(&self, other: &Self) -> bool {
         let mut any = 0u64;
         for i in 0..16 {
@@ -309,7 +321,9 @@ impl ShapingTables {
                         if !lookup.trigger_mask.intersects(&buf_mask) {
                             continue;
                         }
-                        if gsub.apply_gsub_lookup(idx, &self.gdef, &mut buf, MASK_GLOBAL, 0) {
+                        let gdef = &self.gdef;
+                        let mask = MASK_GLOBAL;
+                        if gsub.apply_gsub_lookup(idx, gdef, &mut buf, &buf_mask, mask, 0) {
                             gsub_mutated = true;
                             buf_mask = buffer_mask(&buf);
                         }
@@ -338,7 +352,8 @@ impl ShapingTables {
                             if !lookup.trigger_mask.intersects(&buf_mask) {
                                 continue;
                             }
-                            if gsub.apply_gsub_lookup(idx, &self.gdef, &mut buf, mask, 0) {
+                            let gdef = &self.gdef;
+                            if gsub.apply_gsub_lookup(idx, gdef, &mut buf, &buf_mask, mask, 0) {
                                 gsub_mutated = true;
                                 buf_mask = buffer_mask(&buf);
                             }
@@ -373,7 +388,7 @@ impl ShapingTables {
                     if !lookup.trigger_mask.intersects(&buf_mask) {
                         continue;
                     }
-                    if gpos.apply_gpos_lookup(idx, &self.gdef, &mut buf, 0) {
+                    if gpos.apply_gpos_lookup(idx, &self.gdef, &mut buf, &buf_mask, 0) {
                         any_attached = true;
                     }
                 }
@@ -667,6 +682,9 @@ impl GdefData {
 
     #[inline]
     fn is_ignored(&self, gid: u16, flag: u16, mark_filter_set: Option<u16>) -> bool {
+        if flag == 0 {
+            return false;
+        }
         let cls = self.glyph_class(gid);
         if (flag & FLAG_IGNORE_BASE) != 0 && cls == 1 {
             return true;
@@ -875,6 +893,7 @@ struct Lookup {
     flag: u16,
     mark_filtering_set: Option<u16>,
     trigger_mask: CovMask,
+    sub_masks: Vec<(CovMask, CovMask)>,
     subtables: Vec<Subtable>,
 }
 
@@ -960,11 +979,15 @@ impl LayoutTable {
                 None
             };
             let mut subtables = Vec::with_capacity(scount);
+            let mut sub_masks = Vec::with_capacity(scount);
             let mut trigger_mask = CovMask::empty();
             for si in 0..scount {
                 let sub_off = lo + usize::from(u16::at(bytes, lo + 6 + si * 2)?);
                 if let Some(st) = Subtable::parse(bytes, sub_off, ltype, is_gsub) {
-                    trigger_mask.union_with(&st.necessary_mask());
+                    let nec = st.necessary_mask();
+                    let first = st.first_mask();
+                    trigger_mask.union_with(&nec);
+                    sub_masks.push((nec, first));
                     subtables.push(st);
                 }
             }
@@ -972,6 +995,7 @@ impl LayoutTable {
                 flag,
                 mark_filtering_set,
                 trigger_mask,
+                sub_masks,
                 subtables,
             });
         }
@@ -1015,6 +1039,7 @@ impl LayoutTable {
         lookup_idx: u16,
         gdef: &GdefData,
         buf: &mut Vec<GlyphSlot>,
+        buf_mask: &CovMask,
         req_mask: u32,
         depth: usize,
     ) -> bool {
@@ -1024,17 +1049,32 @@ impl LayoutTable {
         let Some(lookup) = self.lookups.get(usize::from(lookup_idx)) else {
             return false;
         };
+        let active: Vec<usize> = lookup
+            .sub_masks
+            .iter()
+            .enumerate()
+            .filter(|(_, (nec, _))| nec.intersects(buf_mask))
+            .map(|(idx, _)| idx)
+            .collect();
+        if active.is_empty() {
+            return false;
+        }
         let flag = lookup.flag;
         let mfs = lookup.mark_filtering_set;
         let mut any_matched = false;
         let mut i = 0usize;
         while i < buf.len() {
-            if (buf[i].mask & req_mask) == 0 || gdef.is_ignored(buf[i].gid, flag, mfs) {
+            let gid = buf[i].gid;
+            if (buf[i].mask & req_mask) == 0 || (flag != 0 && gdef.is_ignored(gid, flag, mfs)) {
                 i += 1;
                 continue;
             }
             let mut matched = false;
-            for sub in &lookup.subtables {
+            for &si in &active {
+                if !lookup.sub_masks[si].1.contains(gid) {
+                    continue;
+                }
+                let sub = &lookup.subtables[si];
                 if let Some(advance_slots) =
                     sub.apply_gsub(self, gdef, buf, i, flag, mfs, req_mask, depth)
                 {
@@ -1056,6 +1096,7 @@ impl LayoutTable {
         lookup_idx: u16,
         gdef: &GdefData,
         buf: &mut [GlyphSlot],
+        buf_mask: &CovMask,
         depth: usize,
     ) -> bool {
         if depth >= MAX_RECURSE_DEPTH {
@@ -1064,18 +1105,33 @@ impl LayoutTable {
         let Some(lookup) = self.lookups.get(usize::from(lookup_idx)) else {
             return false;
         };
+        let active: Vec<usize> = lookup
+            .sub_masks
+            .iter()
+            .enumerate()
+            .filter(|(_, (nec, _))| nec.intersects(buf_mask))
+            .map(|(idx, _)| idx)
+            .collect();
+        if active.is_empty() {
+            return false;
+        }
         let flag = lookup.flag;
         let mfs = lookup.mark_filtering_set;
         let rtl = (flag & FLAG_RIGHT_TO_LEFT) != 0;
         let mut any_attached = false;
         let mut i = 0usize;
         while i < buf.len() {
-            if gdef.is_ignored(buf[i].gid, flag, mfs) {
+            let gid = buf[i].gid;
+            if flag != 0 && gdef.is_ignored(gid, flag, mfs) {
                 i += 1;
                 continue;
             }
             let mut matched = false;
-            for sub in &lookup.subtables {
+            for &si in &active {
+                if !lookup.sub_masks[si].1.contains(gid) {
+                    continue;
+                }
+                let sub = &lookup.subtables[si];
                 if let Some(step) = sub.apply_gpos(self, gdef, buf, i, flag, mfs, rtl, depth) {
                     if matches!(
                         sub,
@@ -1211,16 +1267,15 @@ impl Subtable {
             Self::GsubLigature(s) => {
                 let first_cnt = s.cov.glyph_count_estimate();
                 let mut second_mask = CovMask::empty();
-                let mut second_gids = 0usize;
                 for rules in &s.sets {
                     for rule in rules {
                         if let Some(&g1) = rule.components.first() {
                             second_mask.insert(g1);
-                            second_gids += 1;
                         }
                     }
                 }
-                if second_gids > 0 && second_gids < first_cnt {
+                let second_cnt = second_mask.count_ones();
+                if second_cnt > 0 && second_cnt < first_cnt {
                     second_mask
                 } else {
                     s.cov.to_mask()
@@ -1246,6 +1301,38 @@ impl Subtable {
                         .min_by_key(|c| c.glyph_count_estimate())
                         .map_or_else(CovMask::empty, Coverage::to_mask)
                 }
+            },
+            Self::GposSingle(s) => match s {
+                SinglePos::Fmt1 { cov, .. } | SinglePos::Fmt2 { cov, .. } => cov.to_mask(),
+            },
+            Self::GposPair(p) => match p {
+                PairPos::Fmt1 { cov, .. } | PairPos::Fmt2 { cov, .. } => cov.to_mask(),
+            },
+            Self::GposMarkBase(m) | Self::GposMarkMark(m) => m.mark_cov.to_mask(),
+            Self::GposMarkLig(m) => m.mark_cov.to_mask(),
+        }
+    }
+
+    fn first_mask(&self) -> CovMask {
+        match self {
+            Self::GsubSingle(s) => match s {
+                SingleSubst::Delta { cov, .. } | SingleSubst::Array { cov, .. } => cov.to_mask(),
+            },
+            Self::GsubMultiple(s) => s.cov.to_mask(),
+            Self::GsubAlternate(s) => s.cov.to_mask(),
+            Self::GsubLigature(s) => s.cov.to_mask(),
+            Self::GsubContext(ContextTable::Fmt3 { input, .. }) => match input.first() {
+                Some(first) => first.to_mask(),
+                None => CovMask::empty(),
+            },
+            Self::GsubChainContext(cc) => match cc {
+                ChainContextTable::Fmt1 { cov, .. } | ChainContextTable::Fmt2 { cov, .. } => {
+                    cov.to_mask()
+                }
+                ChainContextTable::Fmt3 { input, .. } => match input.first() {
+                    Some(first) => first.to_mask(),
+                    None => CovMask::empty(),
+                },
             },
             Self::GposSingle(s) => match s {
                 SinglePos::Fmt1 { cov, .. } | SinglePos::Fmt2 { cov, .. } => cov.to_mask(),
@@ -2237,13 +2324,22 @@ impl PairPos {
         flag: u16,
         mfs: Option<u16>,
     ) -> Option<usize> {
-        let mut next = at + 1;
-        while next < buf.len() && gdef.is_ignored(buf[next].gid, flag, mfs) {
-            next += 1;
-        }
-        if next >= buf.len() {
-            return None;
-        }
+        let next = if flag == 0 {
+            if at + 1 < buf.len() {
+                at + 1
+            } else {
+                return None;
+            }
+        } else {
+            let mut n = at + 1;
+            while n < buf.len() && gdef.is_ignored(buf[n].gid, flag, mfs) {
+                n += 1;
+            }
+            if n >= buf.len() {
+                return None;
+            }
+            n
+        };
         let (v1, v2) = self.lookup_pair(buf[at].gid, buf[next].gid)?;
         v1.apply_to(&mut buf[at]);
         v2.apply_to(&mut buf[next]);
