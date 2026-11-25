@@ -4,8 +4,8 @@ set -euo pipefail
 # Real Xvfb qualification gate for `holonomy-gui` (`x11.rs` + `canvas.rs` + `PixelSurface`).
 # Boots a real headless X11 server (`Xvfb`), launches the compiled `holonomy-gui` desktop binary,
 # injects real X11 KeyPress events via `xdotool` (passphrase prompt, typing prose, Ctrl+S save,
-# Ctrl+H history drawer, Ctrl+L emergency wipe), inspects a real `xwd` root framebuffer capture
-# to verify non-background GUI rendering, and verifies the persisted `.wavefunction` container.
+# Ctrl+H history drawer, Ctrl+Q quit), inspects a real `xwd` root framebuffer capture to verify
+# non-background GUI rendering, and verifies the persisted `.wavefunction` container.
 
 for bin in Xvfb xdotool xwd; do
     if ! command -v "$bin" >/dev/null 2>&1; then
@@ -22,6 +22,11 @@ XVFB_PID=""
 GUI_PID=""
 
 cleanup() {
+    local status=$?
+    if [[ $status -ne 0 && -f "$WORKDIR/gui.log" ]]; then
+        echo "=== holonomy-gui stdout/stderr ===" >&2
+        cat "$WORKDIR/gui.log" >&2 || true
+    fi
     if [[ -n "$GUI_PID" ]] && kill -0 "$GUI_PID" 2>/dev/null; then
         kill "$GUI_PID" 2>/dev/null || true
         wait "$GUI_PID" 2>/dev/null || true
@@ -31,30 +36,31 @@ cleanup() {
         wait "$XVFB_PID" 2>/dev/null || true
     fi
     rm -rf "$WORKDIR"
+    exit "$status"
 }
 trap cleanup EXIT
 
-Xvfb "$DISP" -screen 0 1280x900x24 -ac >/dev/null 2>&1 &
+Xvfb "$DISP" -screen 0 1280x900x24 -ac >"$WORKDIR/xvfb.log" 2>&1 &
 XVFB_PID=$!
 
 export DISPLAY="$DISP"
-for _ in $(seq 1 40); do
+for _ in $(seq 1 50); do
     if xdotool getdisplaygeometry >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
 
-cargo build --locked -p holonomy-gui --bin holonomy-gui --bin holonomy
-GUI_BIN="target/debug/holonomy-gui"
-CLI_BIN="target/debug/holonomy"
+cargo build --locked --release -p holonomy-gui --bin holonomy-gui --bin holonomy
+GUI_BIN="target/release/holonomy-gui"
+CLI_BIN="target/release/holonomy"
 
 "$GUI_BIN" "$DOC_PATH" >"$WORKDIR/gui.log" 2>&1 &
 GUI_PID=$!
 
 # Wait for window mapping.
 WIN_ID=""
-for _ in $(seq 1 60); do
+for _ in $(seq 1 80); do
     WIN_ID="$(xdotool search --name 'Holonomy' 2>/dev/null | head -n1 || true)"
     if [[ -n "$WIN_ID" ]]; then
         break
@@ -63,7 +69,7 @@ for _ in $(seq 1 60); do
 done
 if [[ -z "$WIN_ID" ]]; then
     echo "error: holonomy-gui did not map an X11 window on $DISP" >&2
-    cat "$WORKDIR/gui.log" >&2 || true
+    cat "$WORKDIR/xvfb.log" >&2 || true
     exit 1
 fi
 
@@ -71,15 +77,26 @@ xdotool windowfocus --sync "$WIN_ID"
 sleep 0.3
 
 # Create encrypted container via passphrase modal (single entry when path is provided).
-xdotool type --window "$WIN_ID" --delay 25 "xvfb-secret-pass"
-xdotool key --window "$WIN_ID" Return
+xdotool type --clearmodifiers --delay 25 "xvfb-secret-pass"
+xdotool key --clearmodifiers Return
 
-# Wait for Argon2id creation + editor frame render, then type + save + open history drawer.
-sleep 2.5
-xdotool type --window "$WIN_ID" --delay 20 "Hello Xvfb Quiet Markdown"
-xdotool key --window "$WIN_ID" ctrl+s
-sleep 0.4
-xdotool key --window "$WIN_ID" ctrl+h
+# Wait for Argon2id calibration + container creation on disk before typing prose.
+for _ in $(seq 1 150); do
+    if [[ -s "$DOC_PATH" ]]; then
+        break
+    fi
+    sleep 0.1
+done
+if [[ ! -s "$DOC_PATH" ]]; then
+    echo "error: holonomy-gui did not create $DOC_PATH after passphrase submit" >&2
+    exit 1
+fi
+sleep 0.3
+
+xdotool type --clearmodifiers --delay 20 "Hello Xvfb Quiet Markdown"
+xdotool key --clearmodifiers ctrl+s
+sleep 0.3
+xdotool key --clearmodifiers ctrl+h
 sleep 0.3
 
 # Capture actual X11 framebuffer and verify painted non-uniform pixels across toolbar/editor/drawer.
@@ -106,11 +123,11 @@ assert distinct >= 8, f"expected rich painted UI/text framebuffer, got only {dis
 PY
 
 # Close drawer, save, and quit cleanly via Ctrl+Q, then verify and inspect exported plaintext.
-xdotool key --window "$WIN_ID" Escape
+xdotool key --clearmodifiers Escape
 sleep 0.15
-xdotool key --window "$WIN_ID" ctrl+s
-sleep 0.4
-xdotool key --window "$WIN_ID" ctrl+q
+xdotool key --clearmodifiers ctrl+s
+sleep 0.3
+xdotool key --clearmodifiers ctrl+q
 
 wait "$GUI_PID" || true
 GUI_PID=""
@@ -119,8 +136,10 @@ if [[ ! -f "$DOC_PATH" ]]; then
     echo "error: expected persisted document at $DOC_PATH" >&2
     exit 1
 fi
+
 printf 'xvfb-secret-pass\n' | "$CLI_BIN" verify "$DOC_PATH"
 EXPORT_PATH="$WORKDIR/exported.txt"
 printf 'xvfb-secret-pass\n' | "$CLI_BIN" export --format plain "$DOC_PATH" "$EXPORT_PATH"
+cat "$EXPORT_PATH"
 grep -q "Hello Xvfb Quiet Markdown" "$EXPORT_PATH"
-echo "Xvfb GUI qualification passed."
+echo "xvfb: PASS"

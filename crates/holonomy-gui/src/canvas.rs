@@ -2588,7 +2588,8 @@ fn run_desktop_with_window(
 
                     if key == Key::Escape {
                         if let Some(ref mut h) = history_drawer {
-                            if h.bookmark_input.take().is_some() || h.search_input.take().is_some() {
+                            if h.bookmark_input.take().is_some() || h.search_input.take().is_some()
+                            {
                                 pending_paint = true;
                                 continue;
                             }

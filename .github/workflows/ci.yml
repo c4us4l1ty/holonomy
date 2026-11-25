@@ -37,9 +37,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install optional qualification tools
         run: |
-          if ! command -v rsync >/dev/null 2>&1 || ! command -v mkfs.ext4 >/dev/null 2>&1; then
+          if ! command -v rsync >/dev/null 2>&1 || ! command -v mkfs.ext4 >/dev/null 2>&1 || ! command -v Xvfb >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y rsync e2fsprogs
+            sudo apt-get install -y rsync e2fsprogs xvfb x11-apps xdotool
           fi
       - name: Reproduce each command and post output to the diag issue
         env:
@@ -68,6 +68,8 @@ jobs:
               "cargo test --locked -p holonomy-text --release --test keystroke_fuzz -- --exact --ignored --nocapture a_million_random_keystrokes_leave_the_view_the_budget_and_the_undo_stack_in_agreement" \
               "cargo run --locked -p xtask -- gates --check" \
               "cargo test --locked -p holonomy-line --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored --nocapture" \
+              "cargo test --locked -p holonomy-gui --release --test persist -- --ignored --nocapture" \
+              "scripts/qualify-x11-gui.sh" \
               "cargo build --locked --release -p holonomy-gui --bin holonomy && HOLONOMY_BINARY=$(pwd)/target/release/holonomy scripts/qualify-l9-portability.sh" \
               "scripts/qualify-ext4-enospc.sh"; do
               echo "== $cmd"
@@ -322,6 +324,9 @@ jobs:
   cross-os:
     name: cross-OS build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -330,9 +335,47 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
-      - run: cargo build --locked --release -p holonomy-gui --bin holonomy --bin holonomy-gui
+      - name: Run clippy, workspace tests, and release build
+        shell: bash
+        run: |
+          set +e
+          {
+            echo "=== cross-os clippy (${{ matrix.os }}) ==="
+            cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1
+            CLIPPY_RC=${PIPESTATUS[0]}
+            echo "clippy_rc=$CLIPPY_RC"
+            if [ "$CLIPPY_RC" -eq 0 ]; then
+              echo "=== cross-os test (${{ matrix.os }}) ==="
+              cargo test --locked --workspace 2>&1
+              TEST_RC=${PIPESTATUS[0]}
+            else
+              TEST_RC=1
+            fi
+            echo "test_rc=$TEST_RC"
+            if [ "$CLIPPY_RC" -eq 0 ] && [ "$TEST_RC" -eq 0 ]; then
+              echo "=== cross-os release build (${{ matrix.os }}) ==="
+              cargo build --locked --release -p holonomy-gui --bin holonomy --bin holonomy-gui 2>&1
+              BUILD_RC=${PIPESTATUS[0]}
+            else
+              BUILD_RC=1
+            fi
+            echo "build_rc=$BUILD_RC"
+            exit $(( CLIPPY_RC || TEST_RC || BUILD_RC ))
+          } | tee "$RUNNER_TEMP/cross-os.log"
+          exit ${PIPESTATUS[0]}
+      - name: Report cross-OS failure diagnostics to issue 51
+        if: failure() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          {
+            echo "### cross-os failure (${{ matrix.os }})"
+            echo '```text'
+            tail -c 24000 "$RUNNER_TEMP/cross-os.log" || true
+            echo '```'
+          } > "$RUNNER_TEMP/cross-os-err.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/cross-os-err.md"
 
   sync:
     name: L-10 rsync transfer measurement

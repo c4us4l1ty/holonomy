@@ -666,7 +666,7 @@ fn witness_excerpt_trims_split_multibyte_utf8_boundaries() {
     assert_eq!(mid, "tail");
 }
 
-fn fast_temp_path(label: &str) -> TempPath {
+fn fast_temp_path(label: &str) -> Temp {
     let dir = if std::path::Path::new("/dev/shm").is_dir() {
         std::path::PathBuf::from("/dev/shm")
     } else {
@@ -674,7 +674,7 @@ fn fast_temp_path(label: &str) -> TempPath {
     };
     let id = holonomy_seal::generate_container_id().expect("entropy");
     let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
-    TempPath(dir.join(format!("holonomy-persist-{label}-{hex}.wavefunction")))
+    Temp(dir.join(format!("holonomy-persist-{label}-{hex}.wavefunction")))
 }
 
 #[test]
