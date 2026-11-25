@@ -996,13 +996,7 @@ fn export_markdown_streaming<W: Write>(
         while idx < slice.len() {
             if let Some(rel_nl) = slice[idx..].iter().position(|&b| b == b'\n') {
                 line_bytes.extend_from_slice(&slice[idx..idx + rel_nl]);
-                flush_line(
-                    line_start,
-                    &line_bytes,
-                    true,
-                    &mut writer,
-                    &mut bytes_written,
-                )?;
+                flush_line(line_start, &line_bytes, true, writer, &mut bytes_written)?;
                 pos += (rel_nl + 1) as u64;
                 line_start = pos;
                 line_bytes.clear();
@@ -1018,7 +1012,7 @@ fn export_markdown_streaming<W: Write>(
                             line_start,
                             &line_bytes[..cut],
                             false,
-                            &mut writer,
+                            writer,
                             &mut bytes_written,
                         )?;
                         line_start += cut as u64;
@@ -1029,13 +1023,7 @@ fn export_markdown_streaming<W: Write>(
         }
     }
     if !line_bytes.is_empty() {
-        flush_line(
-            line_start,
-            &line_bytes,
-            false,
-            &mut writer,
-            &mut bytes_written,
-        )?;
+        flush_line(line_start, &line_bytes, false, writer, &mut bytes_written)?;
     }
     Ok(bytes_written)
 }
