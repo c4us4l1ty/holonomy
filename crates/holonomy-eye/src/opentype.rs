@@ -117,14 +117,9 @@ pub(crate) struct ShapingTables {
     default_gpos: Vec<u16>,
     default_gsub_mask: CovMask,
     default_nonpair_gpos_mask: CovMask,
-    has_default_lig_or_ctx: bool,
 }
 
 impl ShapingTables {
-    pub(crate) fn empty() -> Self {
-        Self::default()
-    }
-
     pub(crate) fn parse(
         gdef_bytes: Option<&[u8]>,
         gsub_bytes: Option<&[u8]>,
@@ -147,9 +142,6 @@ impl ShapingTables {
             .as_ref()
             .map(|t| t.collect_lookups(*b"latn", &[*b"kern", *b"mark", *b"mkmk", *b"curs"]))
             .unwrap_or_default();
-        let has_default_lig_or_ctx = gsub
-            .as_ref()
-            .is_some_and(|t| t.lookups_have_multi_glyph_gsub(&default_gsub));
 
         let mut default_gsub_mask = CovMask::empty();
         if let Some(ref t) = gsub {
@@ -163,7 +155,10 @@ impl ShapingTables {
         if let Some(ref t) = gpos {
             for &idx in &default_gpos {
                 if let Some(l) = t.lookups.get(usize::from(idx)) {
-                    if l.subtables.iter().any(|s| !matches!(s, Subtable::GposPair(_))) {
+                    if l.subtables
+                        .iter()
+                        .any(|s| !matches!(s, Subtable::GposPair(_)))
+                    {
                         default_nonpair_gpos_mask.union_with(&l.trigger_mask);
                     }
                 }
@@ -178,15 +173,7 @@ impl ShapingTables {
             default_gpos,
             default_gsub_mask,
             default_nonpair_gpos_mask,
-            has_default_lig_or_ctx,
         }
-    }
-
-    /// True if default Latin `GSUB` lookups include ligature (`Type 4`) or contextual rules
-    /// (`Type 5`/`6`) that may merge or rewrite multi-character ASCII runs.
-    #[inline]
-    pub(crate) fn has_default_lig_or_ctx(&self) -> bool {
-        self.has_default_lig_or_ctx
     }
 
     /// Fast O(N) zero-allocation shaping path for pure single-codepoint basic-Latin runs when no
@@ -458,7 +445,10 @@ fn resolve_attachments(buf: &mut [GlyphSlot]) {
 fn detect_script(chars: &[(char, usize)]) -> [u8; 4] {
     for &(ch, _) in chars {
         match ch as u32 {
-            0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF | 0xFB50..=0xFDFF
+            0x0600..=0x06FF
+            | 0x0750..=0x077F
+            | 0x08A0..=0x08FF
+            | 0xFB50..=0xFDFF
             | 0xFE70..=0xFEFF => return *b"arab",
             0x0700..=0x074F => return *b"syrc",
             0x07C0..=0x07FF => return *b"nko ",
@@ -480,7 +470,6 @@ enum JoiningType {
     NonJoining,
     Right,
     Dual,
-    Left,
     JoinCausing,
     Transparent,
 }
@@ -597,14 +586,12 @@ fn compute_joining_masks(chars: &[(char, usize)]) -> Vec<u32> {
             }
         }
 
-        let joins_prev = matches!(
-            prev,
-            Some(JoiningType::Dual | JoiningType::Left | JoiningType::JoinCausing)
-        ) && matches!(jt, JoiningType::Dual | JoiningType::Right);
+        let joins_prev = matches!(prev, Some(JoiningType::Dual | JoiningType::JoinCausing))
+            && matches!(jt, JoiningType::Dual | JoiningType::Right);
         let joins_next = matches!(
             next,
             Some(JoiningType::Dual | JoiningType::Right | JoiningType::JoinCausing)
-        ) && matches!(jt, JoiningType::Dual | JoiningType::Left);
+        ) && matches!(jt, JoiningType::Dual);
 
         let form = match (joins_prev, joins_next) {
             (false, false) => MASK_ISOL,
@@ -772,10 +759,7 @@ impl Coverage {
         match self {
             Self::Empty => 0,
             Self::List(list) => list.len(),
-            Self::Ranges(ranges) => ranges
-                .iter()
-                .map(|&(s, e, _)| usize::from(e - s) + 1)
-                .sum(),
+            Self::Ranges(ranges) => ranges.iter().map(|&(s, e, _)| usize::from(e - s) + 1).sum(),
         }
     }
 
@@ -1024,24 +1008,6 @@ impl LayoutTable {
         out.sort_unstable();
         out.dedup();
         out
-    }
-
-    fn lookups_have_multi_glyph_gsub(&self, indices: &[u16]) -> bool {
-        for &idx in indices {
-            if let Some(lookup) = self.lookups.get(usize::from(idx)) {
-                for sub in &lookup.subtables {
-                    if matches!(
-                        sub,
-                        Subtable::GsubLigature(_)
-                            | Subtable::GsubContext(_)
-                            | Subtable::GsubChainContext(_)
-                    ) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
     }
 
     fn apply_gsub_lookup(
@@ -1503,15 +1469,13 @@ impl LigatureSubst {
                 let lig_id = (at as u16).saturating_add(1);
                 buf[at].lig_id = lig_id;
                 // Reassign intervening marks to components before removing component base glyphs.
-                let mut comp_num = 1u16;
                 let mut prev_pos = at;
-                for &m_idx in &matched_indices {
+                for (comp_num, &m_idx) in (1u16..).zip(matched_indices.iter()) {
                     for slot in buf.iter_mut().take(m_idx).skip(prev_pos + 1) {
                         slot.lig_comp = comp_num - 1;
                         slot.lig_id = lig_id;
                     }
                     prev_pos = m_idx;
-                    comp_num += 1;
                 }
                 for &m_idx in matched_indices.iter().rev() {
                     buf.remove(m_idx);
@@ -1681,7 +1645,10 @@ impl ChainContextTable {
                 let mut p = off + 4;
                 let mut backtrack = Vec::with_capacity(bcnt.min(16));
                 for _ in 0..bcnt {
-                    backtrack.push(Coverage::parse(bytes, off + usize::from(u16::at(bytes, p)?))?);
+                    backtrack.push(Coverage::parse(
+                        bytes,
+                        off + usize::from(u16::at(bytes, p)?),
+                    )?);
                     p += 2;
                 }
                 let icnt = usize::from(u16::at(bytes, p)?);
@@ -1691,14 +1658,20 @@ impl ChainContextTable {
                 }
                 let mut input = Vec::with_capacity(icnt.min(16));
                 for _ in 0..icnt {
-                    input.push(Coverage::parse(bytes, off + usize::from(u16::at(bytes, p)?))?);
+                    input.push(Coverage::parse(
+                        bytes,
+                        off + usize::from(u16::at(bytes, p)?),
+                    )?);
                     p += 2;
                 }
                 let lcnt = usize::from(u16::at(bytes, p)?);
                 p += 2;
                 let mut lookahead = Vec::with_capacity(lcnt.min(16));
                 for _ in 0..lcnt {
-                    lookahead.push(Coverage::parse(bytes, off + usize::from(u16::at(bytes, p)?))?);
+                    lookahead.push(Coverage::parse(
+                        bytes,
+                        off + usize::from(u16::at(bytes, p)?),
+                    )?);
                     p += 2;
                 }
                 let rcnt = usize::from(u16::at(bytes, p)?);
@@ -1738,15 +1711,9 @@ impl ChainContextTable {
             Self::Fmt1 { cov, sets } => {
                 let idx = usize::from(cov.get(buf[at].gid)?);
                 for rule in sets.get(idx)? {
-                    if let Some(mut positions) = match_chain_rule(
-                        gdef,
-                        buf,
-                        at,
-                        rule,
-                        flag,
-                        mfs,
-                        None,
-                    ) {
+                    if let Some(mut positions) =
+                        match_chain_rule(gdef, buf, at, rule, flag, mfs, None)
+                    {
                         apply_nested_gsub(
                             table,
                             gdef,
@@ -1933,8 +1900,8 @@ fn match_chain_rule(
     mfs: Option<u16>,
     classes: Option<(&ClassDef, &ClassDef, &ClassDef)>,
 ) -> Option<Vec<usize>> {
-    let matches_item =
-        |gid: u16, matcher: &ChainMatcher, cls_def: Option<&ClassDef>| match matcher {
+    let matches_item = |gid: u16, matcher: &ChainMatcher, cls_def: Option<&ClassDef>| match matcher
+    {
         ChainMatcher::Glyph(g) => gid == *g,
         ChainMatcher::Class(c) => cls_def.is_some_and(|cd| cd.get(gid) == *c),
     };
@@ -2257,8 +2224,9 @@ impl PairPos {
 
     #[inline]
     fn eval_x_advances(&self, first: u16, second: u16) -> (i32, i32) {
-        self.lookup_pair(first, second)
-            .map_or((0, 0), |(v1, v2)| (i32::from(v1.x_adv), i32::from(v2.x_adv)))
+        self.lookup_pair(first, second).map_or((0, 0), |(v1, v2)| {
+            (i32::from(v1.x_adv), i32::from(v2.x_adv))
+        })
     }
 
     fn apply(
@@ -2547,7 +2515,7 @@ mod tests {
         gsub.extend_from_slice(&12u16.to_be_bytes()); // FeatureList
         gsub.extend_from_slice(&26u16.to_be_bytes()); // LookupList
         gsub.extend_from_slice(&0u16.to_be_bytes()); // ScriptList count=0
-        // FeatureList @12: 1 feature "liga" -> Feature @8 (rel=8 -> abs 20)
+                                                     // FeatureList @12: 1 feature "liga" -> Feature @8 (rel=8 -> abs 20)
         gsub.extend_from_slice(&1u16.to_be_bytes());
         gsub.extend_from_slice(b"liga");
         gsub.extend_from_slice(&8u16.to_be_bytes());

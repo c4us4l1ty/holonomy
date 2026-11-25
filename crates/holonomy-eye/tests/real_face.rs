@@ -222,7 +222,9 @@ fn opentype_gsub_and_gpos_shape_real_fonts() {
     let raw_gt = mono.glyph('>').expect("gt");
     let arrow = mono.shape(&["-", ">"]);
     assert!(
-        arrow.iter().any(|g| g.glyph_id != raw_dash && g.glyph_id != raw_gt),
+        arrow
+            .iter()
+            .any(|g| g.glyph_id != raw_dash && g.glyph_id != raw_gt),
         "JetBrainsMono GSUB `calt` should substitute contextual arrow glyph(s) for `->`: {arrow:?}"
     );
 }

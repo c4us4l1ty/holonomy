@@ -206,12 +206,8 @@ extern "C" fn view_draw_rect(this: Id, _cmd: Sel, _rect: NsRect) {
     // SAFETY: `q.pixels` stays borrowed immutably throughout `CGContextDrawImage`.
     unsafe {
         let space = CGColorSpaceCreateDeviceRGB();
-        let prov = CGDataProviderCreateWithData(
-            null_mut(),
-            q.pixels.as_ptr().cast(),
-            byte_len,
-            null(),
-        );
+        let prov =
+            CGDataProviderCreateWithData(null_mut(), q.pixels.as_ptr().cast(), byte_len, null());
         if !prov.is_null() {
             let img = CGImageCreate(
                 w,
@@ -513,7 +509,9 @@ impl CocoaWindow {
 
         let app: Id = msg!(cls(b"NSApplication\0"), sel(b"sharedApplication\0") => Id);
         if app.is_null() {
-            return Err(CocoaError("NSApplication sharedApplication returned null".to_owned()));
+            return Err(CocoaError(
+                "NSApplication sharedApplication returned null".to_owned(),
+            ));
         }
         let _: Bool = msg!(app, sel(b"setActivationPolicy:\0"), 0isize: isize => Bool);
 

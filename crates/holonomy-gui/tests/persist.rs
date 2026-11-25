@@ -726,7 +726,9 @@ fn sixty_year_21900_witness_scrub_and_reverify() {
     let w_y30 = reopened.spine_at_witness(10_950).expect("y30 spine");
     let w_y60 = reopened.spine_at_witness(DAYS).expect("y60 spine");
     assert!(w_y1.len() < w_y30.len() && w_y30.len() < w_y60.len());
-    let diff = reopened.diff_witnesses(10_950, DAYS).expect("diff y30->y60");
+    let diff = reopened
+        .diff_witnesses(10_950, DAYS)
+        .expect("diff y30->y60");
     assert!(!diff.is_empty());
     let excerpt = reopened
         .read_witness_excerpt(3_650, 0, w_y30.len().min(64))
@@ -739,7 +741,9 @@ fn sixty_year_21900_witness_scrub_and_reverify() {
         .expect("bounded witness search at year 60");
     assert_eq!(hits.count, 6);
 
-    let report = reopened.verify().expect("full 60-year witness chain verifies");
+    let report = reopened
+        .verify()
+        .expect("full 60-year witness chain verifies");
     assert_eq!(report.segments_verified, DAYS);
     println!(
         "HOLONOMY_60YR_SCRUB witnesses={} write_ms={} reopen_ms={} scrub_ms={} bytes={}",

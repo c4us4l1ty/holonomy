@@ -300,7 +300,10 @@ fn translate_virtual_key(vk: u16, mods: Modifiers) -> Option<Key> {
 
 fn lparam_xy(lp: Lparam) -> (i16, i16) {
     let raw = lp as usize;
-    ((raw & 0xFFFF) as u16 as i16, ((raw >> 16) & 0xFFFF) as u16 as i16)
+    (
+        (raw & 0xFFFF) as u16 as i16,
+        ((raw >> 16) & 0xFFFF) as u16 as i16,
+    )
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -361,7 +364,8 @@ unsafe extern "system" fn wnd_proc(
             WM_MOUSEWHEEL => {
                 let delta = ((w_param >> 16) as u16) as i16;
                 let lines = if delta > 0 { -3 } else { 3 };
-                q.events.push_back(DesktopEvent::Scroll { delta_lines: lines });
+                q.events
+                    .push_back(DesktopEvent::Scroll { delta_lines: lines });
             }
             WM_KEYDOWN => {
                 let mods = current_modifiers();

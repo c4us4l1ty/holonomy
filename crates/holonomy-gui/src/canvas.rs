@@ -224,7 +224,9 @@ fn draw_ui_text(
     for (variant, g) in shaped {
         let xo = fonts.scale_units(variant, g.x_offset, style).sixtyfourths();
         let yo = (fonts.scale_units(variant, g.y_offset, style).sixtyfourths() + 32) >> 6;
-        let adv = fonts.scale_units(variant, g.x_advance, style).sixtyfourths();
+        let adv = fonts
+            .scale_units(variant, g.x_advance, style)
+            .sixtyfourths();
         let px = ((pen_64ths + xo + 32) >> 6) as i32;
         if let Some(bmp) = fonts.rasterize_glyph(variant, g.glyph_id, style, 1_000, 96) {
             fb.blend_glyph(
@@ -532,13 +534,7 @@ impl Surface for PixelSurface {
         }
     }
 
-    fn line_clusters(
-        &mut self,
-        y: Fixed,
-        text: &str,
-        origin: u64,
-        clusters: &[PictureCluster],
-    ) {
+    fn line_clusters(&mut self, y: Fixed, text: &str, origin: u64, clusters: &[PictureCluster]) {
         if clusters.is_empty() {
             return;
         }
@@ -1217,13 +1213,8 @@ fn render_security_overlay(surface: &mut PixelSurface, facts: &Facts) {
 struct ReadOnlySink;
 
 impl SegmentSink for ReadOnlySink {
-    fn append(
-        &mut self,
-        _bytes: &[u8],
-    ) -> Result<holonomy_text::SegmentId, holonomy_text::StoreError> {
-        Err(holonomy_text::StoreError::Message(
-            "history view is read-only".to_owned(),
-        ))
+    fn append_segment(&mut self, _plaintext: &[u8]) -> Result<holonomy_text::Appended, String> {
+        Err("history view is read-only".to_owned())
     }
 }
 
@@ -1345,8 +1336,8 @@ fn render_history_drawer(
         track.x
     } else {
         track.x
-            + ((state.selected_idx as i64 * i64::from((track.w - 10).max(1)))
-                / (total as i64 - 1)) as i32
+            + ((state.selected_idx as i64 * i64::from((track.w - 10).max(1))) / (total as i64 - 1))
+                as i32
     };
     let knob = Rect::new(knob_x, track.y + 3, 10, 16);
     fb.fill_rect_clipped(knob, QUIET_MD_THEME.link, drawer);
@@ -2214,7 +2205,10 @@ fn run_desktop_with_window(
             let left = if !status_msg.is_empty() {
                 format!("{name} \u{00B7} {status_msg}")
             } else if let Some(ref h) = history_drawer {
-                format!("{name} \u{00B7} HISTORY READ-ONLY \u{00B7} {}", h.diff_summary)
+                format!(
+                    "{name} \u{00B7} HISTORY READ-ONLY \u{00B7} {}",
+                    h.diff_summary
+                )
             } else {
                 format!(
                     "{name} \u{00B7} {} B \u{00B7} {segs} segs \u{00B7} {wits} witnesses \u{00B7} {save_tag}",
@@ -2525,7 +2519,8 @@ fn run_desktop_with_window(
                                     let ts = SystemTime::now()
                                         .duration_since(UNIX_EPOCH)
                                         .unwrap_or_default()
-                                        .as_secs() as i64;
+                                        .as_secs()
+                                        as i64;
                                     let w_seq = document.witness_count().saturating_sub(1);
                                     let name = format!("bookmark-{w_seq}");
                                     let _ = document.add_bookmark(w_seq, ts, &name);
@@ -2593,9 +2588,7 @@ fn run_desktop_with_window(
 
                     if key == Key::Escape {
                         if let Some(ref mut h) = history_drawer {
-                            if h.bookmark_input.take().is_some()
-                                || h.search_input.take().is_some()
-                            {
+                            if h.bookmark_input.take().is_some() || h.search_input.take().is_some() {
                                 pending_paint = true;
                                 continue;
                             }
@@ -2990,7 +2983,7 @@ fn handle_history_key(
         }
         Key::PageUp => {
             if let Some(ref mut hed) = h.history_editor {
-                hed.scroll_by(-lh);
+                hed.scroll_by(Fixed::ZERO - lh);
             }
         }
         Key::PageDown => {
@@ -3494,7 +3487,10 @@ mod tests {
             }
             handle_history_key(&doc, h, Key::Enter, Modifiers::none(), &fonts, lw, lh, view);
             assert!(!h.search_hits.is_empty(), "search_history must find 'clue'");
-            assert!(!h.diff_hunks.is_empty(), "diff_witnesses must populate hunks");
+            assert!(
+                !h.diff_hunks.is_empty(),
+                "diff_witnesses must populate hunks"
+            );
             render_history_viewport(app.surface_mut(), h);
             assert!(app.surface().painted_clusters() > 0);
         }

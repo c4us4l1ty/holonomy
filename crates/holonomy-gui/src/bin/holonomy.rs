@@ -300,10 +300,10 @@ mod sys_console {
                 && out != INVALID_HANDLE_VALUE
                 && GetConsoleScreenBufferInfo(out, &mut info) != 0
             {
-                let cols = usize::try_from(info.sr_window.right - info.sr_window.left + 1)
-                    .unwrap_or(80);
-                let rows = usize::try_from(info.sr_window.bottom - info.sr_window.top + 1)
-                    .unwrap_or(24);
+                let cols =
+                    usize::try_from(info.sr_window.right - info.sr_window.left + 1).unwrap_or(80);
+                let rows =
+                    usize::try_from(info.sr_window.bottom - info.sr_window.top + 1).unwrap_or(24);
                 if cols >= 20 && rows >= 4 {
                     return (cols, rows);
                 }

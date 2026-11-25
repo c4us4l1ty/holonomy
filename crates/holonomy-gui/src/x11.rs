@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
-pub use crate::platform::{DesktopEvent, MAX_CLIPBOARD_BYTES};
 use crate::platform::DesktopWindow;
+pub use crate::platform::{DesktopEvent, MAX_CLIPBOARD_BYTES};
 use crate::{Key, Modifiers};
 
 /// Maximum core-protocol request size without `BIG-REQUESTS` (`65,535 * 4` bytes).
@@ -902,7 +902,7 @@ impl X11Window {
             ))
         })?;
         let sock_path = format!("/tmp/.X11-unix/X{number}");
-        let mut stream = connect_x11_socket(&sock_path)?;
+        let stream = connect_x11_socket(&sock_path)?;
         stream.set_read_timeout(Some(SETUP_TIMEOUT))?;
         stream.set_write_timeout(Some(SETUP_TIMEOUT))?;
 
@@ -2050,7 +2050,7 @@ mod tests {
             body[22] = 0; // image_byte_order = LSBFirst
             body[26] = 8; // min_keycode
             body[27] = 10; // max_keycode
-            // Format 0 at offset 32: depth=24, bpp=32, scanline_pad=32
+                           // Format 0 at offset 32: depth=24, bpp=32, scanline_pad=32
             body[32] = 24;
             body[33] = 32;
             body[34] = 32;
@@ -2127,14 +2127,8 @@ mod tests {
                     op::GET_KEYBOARD_MAPPING => {
                         // 3 keycodes (8..=10), 2 keysyms per keycode -> 24 bytes after 24-byte hdr.
                         let mut p = vec![0u8; 48];
-                        let syms: [u32; 6] = [
-                            u32::from(b'a'),
-                            u32::from(b'A'),
-                            0xff08,
-                            0,
-                            0xff0d,
-                            0,
-                        ];
+                        let syms: [u32; 6] =
+                            [u32::from(b'a'), u32::from(b'A'), 0xff08, 0, 0xff0d, 0];
                         for (i, s) in syms.iter().enumerate() {
                             p[24 + i * 4..24 + i * 4 + 4].copy_from_slice(&s.to_le_bytes());
                         }
@@ -2230,9 +2224,8 @@ mod tests {
             )
         });
 
-        let mut win =
-            X11Window::open_stream(client_sock, &cookie, "Holonomy Test", 640, 480)
-                .expect("handshake + window setup succeeds");
+        let mut win = X11Window::open_stream(client_sock, &cookie, "Holonomy Test", 640, 480)
+            .expect("handshake + window setup succeeds");
         assert_eq!(win.size(), (640, 480));
 
         // Present framebuffer large enough to exercise scanline PutImage framing (> 300 KB).
@@ -2243,7 +2236,10 @@ mod tests {
         let mut got = Vec::new();
         for _ in 0..8 {
             got.extend(win.poll_events(50).expect("poll"));
-            if got.iter().any(|e| matches!(e, DesktopEvent::CloseRequested)) {
+            if got
+                .iter()
+                .any(|e| matches!(e, DesktopEvent::CloseRequested))
+            {
                 break;
             }
         }
