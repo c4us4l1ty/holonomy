@@ -19,8 +19,7 @@ use holonomy_seal::{
     MAX_PASSPHRASE_INPUT_BYTES,
 };
 use holonomy_shell::{
-    DocumentMetrics, Editor, Effect, Intent, PageTheme, Rgba8, QUIET_MD_DARK_THEME,
-    QUIET_MD_THEME,
+    DocumentMetrics, Editor, Effect, Intent, PageTheme, Rgba8, QUIET_MD_DARK_THEME, QUIET_MD_THEME,
 };
 use holonomy_text::{
     Alignment, FontFamily, Heading, ListKind, ResidentSet, SegmentSink, SpineDiffHunk,
@@ -989,6 +988,7 @@ fn draw_toolbar_button(
 }
 
 /// Renders the fixed `40 px` top Ribbon (`UI-SPEC.md` §3, Law `U0`) directly from `app.editor().toolbar_state()`.
+#[cfg(test)]
 fn render_toolbar<S, R>(
     app: &mut App<S, R, FontSet, PixelSurface>,
     dot_state: SecurityDotState,
@@ -1185,13 +1185,7 @@ where
             false,
             false,
         ),
-        (
-            ToolbarAction::OpenLinkDialog,
-            "Link",
-            link_hl,
-            true,
-            true,
-        ),
+        (ToolbarAction::OpenLinkDialog, "Link", link_hl, true, true),
         (
             ToolbarAction::ToggleBullet,
             "\u{2022}",
@@ -1503,7 +1497,12 @@ fn render_link_bar(surface: &mut PixelSurface, url: &str) {
     let (w, h) = surface.window_size();
     let fonts = surface.fonts().clone();
     let fb = surface.framebuffer_mut();
-    let rect = Rect::new(0, i32::from(h) - STATUS_BAR_HEIGHT_PX - 30, i32::from(w), 30);
+    let rect = Rect::new(
+        0,
+        i32::from(h) - STATUS_BAR_HEIGHT_PX - 30,
+        i32::from(w),
+        30,
+    );
     fb.fill_rect_clipped(rect, theme.code_bg, rect);
     fb.stroke_rect(rect, theme.link, rect);
     let prompt_line = format!("Link URL: {url}|   (Enter set, empty clears, Esc cancel)");
@@ -2299,7 +2298,12 @@ fn prompt_gui_document(
             let clip = Rect::new(0, 0, i32::from(w), i32::from(h));
             let recents_rows = recent_paths.len().min(4) as i32;
             let card_w = i32::from(w).min(520) - 32;
-            let card_h = 294 + if recents_rows > 0 { 26 + recents_rows * 22 } else { 0 };
+            let card_h = 294
+                + if recents_rows > 0 {
+                    26 + recents_rows * 22
+                } else {
+                    0
+                };
             let cx = (i32::from(w) - card_w) / 2;
             let cy = (i32::from(h) - card_h) / 2;
             let card = Rect::new(cx, cy, card_w, card_h);
@@ -2477,9 +2481,8 @@ fn prompt_gui_document(
             // Opt-in recent world-lines toggle (default OFF; plaintext path list only when opted in).
             remember_box = Rect::new(cx + 24, cy + 234, card_w - 48, 22);
             let check = if remember_recent { "[x]" } else { "[ ]" };
-            let opt_label = format!(
-                "{check} Remember recent paths (opt-in local path metadata; default OFF)"
-            );
+            let opt_label =
+                format!("{check} Remember recent paths (opt-in local path metadata; default OFF)");
             draw_ui_text(
                 &mut fb,
                 fonts,
@@ -2544,8 +2547,7 @@ fn prompt_gui_document(
                         dirty = true;
                         continue;
                     }
-                    if let Some((_, chosen)) =
-                        recent_hits.iter().find(|(r, _)| r.contains(px, py))
+                    if let Some((_, chosen)) = recent_hits.iter().find(|(r, _)| r.contains(px, py))
                     {
                         path_buf = chosen.clone();
                         editing_path = false;
@@ -4255,7 +4257,8 @@ mod tests {
             "narrow width (< 720 px) must collapse overflow controls cleanly"
         );
         assert!(
-            hits.iter().any(|h| h.action == ToolbarAction::ToggleOverflow),
+            hits.iter()
+                .any(|h| h.action == ToolbarAction::ToggleOverflow),
             "narrow toolbar must expose clickable overflow button"
         );
         let overflow_hits = render_toolbar_with(
@@ -4266,10 +4269,20 @@ mod tests {
             true,
             false,
         );
-        let has_zoom = overflow_hits.iter().any(|h| h.action == ToolbarAction::ZoomIn);
-        assert!(has_zoom, "opening overflow popup must reveal collapsed controls");
-        let has_theme = overflow_hits.iter().any(|h| h.action == ToolbarAction::ToggleTheme);
-        assert!(has_theme, "overflow popup must expose light/dark theme toggle");
+        let has_zoom = overflow_hits
+            .iter()
+            .any(|h| h.action == ToolbarAction::ZoomIn);
+        assert!(
+            has_zoom,
+            "opening overflow popup must reveal collapsed controls"
+        );
+        let has_theme = overflow_hits
+            .iter()
+            .any(|h| h.action == ToolbarAction::ToggleTheme);
+        assert!(
+            has_theme,
+            "overflow popup must expose light/dark theme toggle"
+        );
 
         let facts = Facts::gather_with(app.residency(), &doc, LockCapability::None, None);
         render_security_overlay(app.surface_mut(), &facts);
@@ -4498,7 +4511,10 @@ mod tests {
         // CycleSize advances 15px -> 17px -> 21px.
         app.editor().select_range(0, 3).expect("select one");
         apply_toolbar_action(&mut app, ToolbarAction::CycleSize).expect("17px");
-        assert_eq!(app.editor().toolbar_state().size_milli, TriState::Uniform(1_133));
+        assert_eq!(
+            app.editor().toolbar_state().size_milli,
+            TriState::Uniform(1_133)
+        );
 
         // Visual list markers render without mutating plaintext spine.
         apply_toolbar_action(&mut app, ToolbarAction::ToggleBullet).expect("bullet");
@@ -4509,16 +4525,21 @@ mod tests {
 
         // Ctrl+Backspace deletes word before caret; Ctrl+Left jumps word.
         app.editor().select_range(7, 7).expect("after two");
-        app.press(Key::Backspace, Modifiers::control()).expect("ctrl+backspace");
+        app.press(Key::Backspace, Modifiers::control())
+            .expect("ctrl+backspace");
         assert_eq!(app.frame_text().expect("frame"), "one \nthree four");
-        app.press(Key::Left, Modifiers::control()).expect("ctrl+left");
+        app.press(Key::Left, Modifiers::control())
+            .expect("ctrl+left");
         assert_eq!(app.editor().selection().anchor(), 0);
 
         // SetLink & link_at_caret roundtrip.
         app.editor().select_range(0, 3).expect("select one");
         let link = Intent::SetLink(Some("https://holonomy.example".to_owned()));
         app.editor().apply(link).expect("set link");
-        assert_eq!(app.editor().link_at_caret().as_deref(), Some("https://holonomy.example"));
+        assert_eq!(
+            app.editor().link_at_caret().as_deref(),
+            Some("https://holonomy.example")
+        );
 
         // Scrollbar & recovery banner render without panics.
         let metrics = app.editor().status_metrics();

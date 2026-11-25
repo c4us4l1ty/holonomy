@@ -681,12 +681,15 @@ struct TuiHistory {
 impl TuiHistory {
     fn render(&self) -> String {
         if let Some(w) = self.witnesses.get(self.selected) {
+            let m_tag = match w.manifest_sequence {
+                Some(m) => format!(", manifest #{m}"),
+                None => String::new(),
+            };
             format!(
-                "History #{}/{} ({} segs, {} B) · Up/Down select · Enter restore · Esc close",
+                "History #{}/{} ({} segs{m_tag}) · Up/Down select · Enter restore · Esc close",
                 w.sequence,
                 self.witnesses.len(),
-                w.segment_count,
-                w.plaintext_bytes
+                w.segment_count
             )
         } else {
             "History empty (Esc close)".to_owned()
@@ -899,7 +902,10 @@ fn run(
         } else {
             let m = app.editor().status_metrics();
             let approx = if m.words_exact { "" } else { "~" };
-            format!("{approx}{}w · p.{}/{}", m.total_words, m.current_page, m.total_pages)
+            format!(
+                "{approx}{}w · p.{}/{}",
+                m.total_words, m.current_page, m.total_pages
+            )
         };
         let line = status(
             path,
@@ -1163,7 +1169,11 @@ fn run(
                                 .verify()
                                 .ok()
                                 .map(|report| report.segments_verified);
-                            Some((probe_capability(), verified, verified.map(|_| Instant::now())))
+                            Some((
+                                probe_capability(),
+                                verified,
+                                verified.map(|_| Instant::now()),
+                            ))
                         };
                         continue;
                     }

@@ -374,10 +374,19 @@ mod tests {
     #[test]
     fn strength_estimator_penalizes_repeats_and_scores_passphrases_honestly() {
         assert_eq!(estimate_passphrase_strength("").tier, StrengthTier::Empty);
-        assert_eq!(estimate_passphrase_strength("aaaaaaaaaa").tier, StrengthTier::Weak);
-        assert_eq!(estimate_passphrase_strength("123456").tier, StrengthTier::Weak);
+        assert_eq!(
+            estimate_passphrase_strength("aaaaaaaaaa").tier,
+            StrengthTier::Weak
+        );
+        assert_eq!(
+            estimate_passphrase_strength("123456").tier,
+            StrengthTier::Weak
+        );
         let diceware = estimate_passphrase_strength("correct horse battery staple");
-        assert!(matches!(diceware.tier, StrengthTier::Strong | StrengthTier::VeryStrong));
+        assert!(matches!(
+            diceware.tier,
+            StrengthTier::Strong | StrengthTier::VeryStrong
+        ));
         assert!(diceware.estimated_bits >= 64);
     }
 }

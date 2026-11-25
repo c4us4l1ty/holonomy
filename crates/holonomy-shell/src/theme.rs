@@ -293,7 +293,10 @@ mod tests {
         let spec = include_str!("../../../docs/UI-SPEC.md");
         assert!(spec.contains("#1A1A19"));
         assert_eq!(QUIET_MD_DARK_THEME.bg_body.hex_rgb(), "#1a1a19");
-        assert_eq!(QUIET_MD_DARK_THEME.page_max_width_px, QUIET_MD_THEME.page_max_width_px);
+        assert_eq!(
+            QUIET_MD_DARK_THEME.page_max_width_px,
+            QUIET_MD_THEME.page_max_width_px
+        );
         assert_eq!(QUIET_MD_DARK_THEME.headings, QUIET_MD_THEME.headings);
     }
 }

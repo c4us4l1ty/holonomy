@@ -502,7 +502,10 @@ fn word_navigation_multi_click_and_status_metrics_work_across_leaves() {
     shell.select_range(1, 5).expect("select beta");
     let set_link = Intent::SetLink(Some("https://holonomy.invalid/word".to_owned()));
     shell.apply(set_link).expect("link");
-    assert_eq!(shell.link_at_caret().as_deref(), Some("https://holonomy.invalid/word"));
+    assert_eq!(
+        shell.link_at_caret().as_deref(),
+        Some("https://holonomy.invalid/word")
+    );
     let metrics = shell.status_metrics();
     assert!(metrics.words_exact);
     assert!(metrics.total_words >= 4);

@@ -16,9 +16,7 @@ use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::platform::{
-    CaptureExclusionState, DesktopWindow, SecureInputState, WindowSecurityInfo,
-};
+use crate::platform::{CaptureExclusionState, DesktopWindow, SecureInputState, WindowSecurityInfo};
 pub use crate::platform::{DesktopEvent, MAX_CLIPBOARD_BYTES};
 use crate::{Key, Modifiers};
 
