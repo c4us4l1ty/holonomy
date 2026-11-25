@@ -71,7 +71,7 @@ pub struct Modifiers {
     pub shift: bool,
     /// Control, or Command on a platform that maps it here: the shortcut modifier.
     pub control: bool,
-    /// Alt/Option: reserved for word-wise motion, which the loop does not have yet.
+    /// Alt/Option: word-wise motion and deletion (`Option+Arrow` / `Option+Backspace`).
     pub alt: bool,
 }
 
@@ -198,10 +198,20 @@ impl Keymap {
                 Some(Intent::Type(character.to_string()))
             }
             Key::Enter => Some(Intent::Type("\n".to_owned())),
+            Key::Backspace if modifiers.control || modifiers.alt => Some(Intent::DeleteWordBefore),
             Key::Backspace => Some(Intent::Backspace),
+            Key::Delete if modifiers.control || modifiers.alt => Some(Intent::DeleteWordAfter),
             Key::Delete => Some(Intent::DeleteForward),
+            Key::Left if modifiers.control || modifiers.alt => Some(Intent::Move {
+                to: Move::WordLeft,
+                extend,
+            }),
             Key::Left => Some(Intent::Move {
                 to: Move::Left,
+                extend,
+            }),
+            Key::Right if modifiers.control || modifiers.alt => Some(Intent::Move {
+                to: Move::WordRight,
                 extend,
             }),
             Key::Right => Some(Intent::Move {
@@ -698,6 +708,8 @@ where
             Intent::Type(_)
                 | Intent::Backspace
                 | Intent::DeleteForward
+                | Intent::DeleteWordBefore
+                | Intent::DeleteWordAfter
                 | Intent::Move { .. }
                 | Intent::Undo
                 | Intent::Redo

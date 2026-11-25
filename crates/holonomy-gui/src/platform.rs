@@ -10,6 +10,45 @@ use crate::{Key, Modifiers};
 /// Maximum clipboard UTF-8 payload accepted into the editor in a single paste (`4 KiB`).
 pub const MAX_CLIPBOARD_BYTES: usize = 4_096;
 
+/// OS-level window screen-capture exclusion status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureExclusionState {
+    /// OS windowing API confirmed capture exclusion (`WDA_EXCLUDEFROMCAPTURE` / `NSWindowSharingNone`).
+    Excluded,
+    /// OS or display protocol provides no enforced capture exclusion.
+    Unsupported(&'static str),
+}
+
+/// OS-level secure keyboard input status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecureInputState {
+    /// OS secure keyboard input mode is active (`EnableSecureEventInput`).
+    Active,
+    /// OS or display protocol offers no secure-input isolation mode here.
+    Unsupported(&'static str),
+}
+
+/// Live OS window security telemetry surfaced into [`crate::panel::Facts`] (`UI-SPEC.md` §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSecurityInfo {
+    /// Window capture-exclusion state.
+    pub capture_exclusion: CaptureExclusionState,
+    /// Secure keyboard input isolation state.
+    pub secure_input: SecureInputState,
+    /// Clipboard lifetime guarantee on this backend.
+    pub clipboard_policy: &'static str,
+}
+
+impl Default for WindowSecurityInfo {
+    fn default() -> Self {
+        Self {
+            capture_exclusion: CaptureExclusionState::Unsupported("not queried"),
+            secure_input: SecureInputState::Unsupported("not queried"),
+            clipboard_policy: "cleared on focus loss & exit",
+        }
+    }
+}
+
 /// High-level input/window events dispatched from a native desktop backend to the GUI loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopEvent {
@@ -103,6 +142,11 @@ pub trait DesktopWindow {
 
     /// Releases/scrubs any owned clipboard buffer held on behalf of this window.
     fn clear_clipboard(&mut self);
+
+    /// Reports live OS capture-exclusion, secure-input, and clipboard policy status.
+    fn security_info(&self) -> WindowSecurityInfo {
+        WindowSecurityInfo::default()
+    }
 }
 
 /// Opens the native desktop window for the current OS (`Win32` on Windows, `Cocoa`/`X11` on

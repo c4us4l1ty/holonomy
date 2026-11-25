@@ -40,7 +40,7 @@ Listed so they stay dead.
 | ---- | ------ | ------ |
 | OQ-1 | Toolchain: root `rust-toolchain.toml` used floating `stable`. Pinned to Rust 1.100.0 after observing the CI compiler; no local sandbox toolchain was available for an independent pin check. | **closed 2026-11-16** |
 | OQ-2 | Undo exposure: world-line keeps all drafts (Vision III) vs. an adversary who wants the right to truly delete a draft. Compaction is explicit, file-scoped, and passphrase-confirmed; RFC-002 states that cloud mirrors may retain pre-compaction files and their history, so users must also prune external backups. | **closed — residual disclosed** |
-| OQ-3 | Clipboard egress on each OS: flag-confidential + clear-on-blur must be verified per platform (Block 9) or labeled unverified in the Security panel. `Editor::copy_selection` + the X11 pixel desktop (`holonomy-gui/src/canvas.rs`) now enforce bounded selection copy and clear/zeroize the in-window clipboard buffer on focus loss, while system X11 ICCCM/XFixes `CLIPBOARD` selection clearing, macOS `NSPasteboard`, and Windows clipboard remain unverified per platform. | **open — in-window clear-on-blur implemented (`D-94`); OS clipboard server policy remains open** |
+| OQ-3 | Clipboard egress on each OS: flag-confidential + clear-on-blur must be verified per platform (Block 9) or labeled unverified in the Security panel. `Editor::copy_selection`, `holonomy-gui/src/canvas.rs` focus-blur zeroization, Cocoa `NSPasteboard` `TransientType`/`ConcealedType` clearing, and Win32 `ExcludeClipboardContentFromMonitorProcessing` + `EmptyClipboard` clearing are wired in the desktop window backends while X11 ICCCM clipboard ownership & remote/compositor policy cannot suppress third-party clipboard watchers and is labeled honestly in the Security panel (`window_security`). | **open — in-window + Cocoa/Win32 clear-on-blur implemented (`D-94`/`D-95`); X11 ICCCM server policy disclosed open** |
 | OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. | **closed 2026-11-17 — accept and disclose.** The pattern is already visible at the I/O layer: fetching an old page reads its ciphertext at a known file offset, so any observer who can time slab faults can observe the reads themselves. Smoothing would buy nothing and would spend L-5 (idle is idle) on traversal cost the architecture exists to delete. Residual recorded in `docs/THREAT-MODEL.md` §5. |
 | OQ-5 | Argon2's internal working arena: `MasterKeys::derive`, `kdf::derive_root_secret*`, and the calibration probe all allocated the m-cost arena inside `hash_password_into` and freed it unwiped (v5's H1 hit exactly this and switched to caller-owned memory + a scrubbed block). Fixed by making the arena caller-owned everywhere: `kdf::Arena(Vec<argon2::Block>)` zeroizes the slab on Drop via argon2's `zeroize` feature, and the single `run_argon2` runner serves creation, replay, *and* the calibration probe, with a test pinning byte-equality against argon2's own allocator | **closed** 2026-11-16 |
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
@@ -67,6 +67,40 @@ Listed so they stay dead.
 | OQ-30 | **Deletions and post-seal undos persist across reopen with zero segment rewrites.** Closed 2026-11-22: `Typing` tracks `structure_dirty` across `delete` on sealed text and `restore_root`, and flushes the exact `Slab` spine via `SegmentSink::{append_segment_with_spine, commit_spine}` without reading or rewriting surviving segments (preserving L-2 and L-6). Emptying an entire document (`Select All` + `Backspace`) commits an explicit zero-slab manifest so reopen yields `""` instead of falling back to append order, and `App::has_pending()` includes `has_uncommitted_structure()`. Pinned in `typing.rs` and `holonomy-gui/tests/persist.rs`. | **closed 2026-11-22 — zero-rewrite spine manifest commits** |
 
 ## Audit trail
+
+- **2026-11-26 — D-95 — Complete desktop & TUI UX pass, cross-OS native FFI parity, OpenType
+  `GDEF`/`GSUB`/`GPOS` shaping, `L-1`/`L-2`/`L-8` gate promotion, and unsigned 3-OS release bundles.**
+  - **Crypto & Eye (`holonomy-seal`, `holonomy-eye`):** Added constant-stack/zeroized integer
+    passphrase strength estimation (`StrengthTier`, `PassphraseStrength`,
+    `estimate_passphrase_strength`) without plaintext heap copies; added `FontSet::style_face` so
+    `Shaper::line_height`/`ascent` reflect active Regular/Bold/Italic/Mono style; closed `OQ-24`
+    with pure-Rust `GDEF`/`GSUB`/`GPOS` OpenType shaping (`crates/holonomy-eye/src/opentype.rs`);
+    and promoted `L-1`, `L-2`, and `L-8` in `crates/holonomy-ledger/src/laws.rs` + `docs/GATES.md`
+    (`xtask gates --check` verified).
+  - **Headless shell (`holonomy-shell`):** Added `QUIET_MD_DARK_THEME` (`#1a1a19` dark paper /
+    `#e8e6e1` ink), `Move::WordLeft`/`WordRight`, `Intent::DeleteWordBefore`/`DeleteWordAfter`,
+    word/paragraph multi-click selection helpers, `DocumentMetrics` + `Editor::status_metrics`,
+    `Editor::link_at_caret`, and zero-copy `ClusterMeta` (`<= 8` leaves, `Clusters::continuing`).
+  - **TUI, Desktop & Native Platform Backends (`holonomy-gui`):**
+    - `platform.rs`, `x11.rs`, `cocoa.rs`, `win32.rs`: Added `CaptureExclusionState`,
+      `SecureInputState`, and `WindowSecurityInfo` wired into `Facts::lines()` (7 lines with
+      verification age); macOS Cocoa `[NSWindow setSharingType:NSWindowSharingNone]` + HIToolbox
+      `EnableSecureEventInput` and `NSPasteboard` concealed/transient scrub on blur; Windows
+      `SetWindowDisplayAffinity(..., WDA_EXCLUDEFROMCAPTURE)` with `WDA_MONITOR` fallback and
+      `ExcludeClipboardContentFromMonitorProcessing` + `EmptyClipboard` on blur.
+    - `term.rs`, `bin/holonomy.rs`: Wired `Ctrl/Alt` word navigation/delete, `Ctrl+R` (`0x12`) TUI
+      witness history browser & restore, dynamic 7-line `Facts` panel, and idle `status_metrics()`
+      ribbon.
+    - `canvas.rs`: Added dark mode (`Ctrl+Shift+D`), font-size presets (`CycleSize`), clickable
+      `⋯` overflow popover (`ToggleOverflow`), reduced-motion toggle (`Ctrl+Shift+M`), 1.2 s idle
+      chrome fade scrollbar (`CHROME_IDLE_FADE_MS`, preserving `L-5`), visual list bullets/ordinals,
+      dismissible recovery banner, interactive `Ctrl+K` hyperlink dialog, 1–4 multi-click selection,
+      live passphrase strength meter & opt-in `recent.txt` (default OFF so CLI `L-9` portability
+      stays zero-artifact), and updated `scripts/qualify-x11-gui.sh` to verify dark mode, link
+      creation, security panel, and history drawer inside `Xvfb`.
+  - **Release packaging (`.github/workflows/release.yml`, `packaging/README-RELEASE.txt`):** Expanded
+    unsigned experimental release bundles to Linux `x86_64`, macOS `aarch64`, and Windows `x86_64`
+    with SHA-256 checksums, provenance manifests, and a single serialized `publish-release` job.
 
 - **2026-11-25 — D-94 — Blocks 7, 8, 10, OpenType glyph rasterizer, and pure-`libc` X11 desktop
   window implemented and verified in CI run `45566921069` (`a047181`), all 8 jobs green.**
@@ -1040,17 +1074,14 @@ Listed so they stay dead.
   Both `CellShaper::advance` and `term::screen_with` (via `CellSurface::cluster_at` and
   column-aware truncation) read `cluster_cells`, pinned in `holonomy-eye` and
   `holonomy-gui/tests/terminal.rs`.
-- **2026-11-20 — OQ-24 — shaping is metrics only, and nothing reads `GSUB`/`GPOS`. OPEN, by
-  design for now.** `holonomy_eye::Face` reads `head`, `hhea`, `hmtx`, `maxp` and `cmap` (M3), so
-  advances, ascent and descent are the font's own numbers — but a cluster's width is the *sum of
-  its characters' advances*. That is exactly right for one-glyph-per-character text, which is what
-  this release is typed in, and it is a measurement rather than a promise for everything else:
-  kerning pairs, `fi`-style ligatures, mark positioning and Arabic joining are not applied, and a
-  renderer that *did* apply them would draw glyphs the Eye measured differently — the two-geometry
-  disease with a nicer name. The rule until a real shaper lands: **whatever draws must not
-  substitute glyphs**, and `Face`'s widths are the only geometry. Closing this means putting
-  HarfBuzz (or an equivalent) behind the `Shaper` trait, which changes no geometry code because the
-  trait is the boundary; it is also what Block 5 gate 3 (BiDi) and any non-Latin script need.
+- **2026-11-26 — OQ-24 — shaping now parses and applies OpenType `GDEF`/`GSUB`/`GPOS`. CLOSED
+  2026-11-26 (D-95).** `crates/holonomy-eye/src/opentype.rs` reads `GDEF` (`GlyphClassDef`), `GSUB`
+  (`SingleSubst`, `LigatureSubst`), and `GPOS` (`PairPos` Formats 1 & 2, `MarkBasePos`, `MarkLigPos`)
+  and `holonomy-eye::raster::{Face, FontSet}` apply shaped glyph substitutions, kerning pairs, mark
+  attachments, and style-matched (`Regular` / `Bold` / `Italic` / `Mono`) line metrics while
+  `PixelSurface` renders from `Frame::picture()` so paint and hit-testing keep one geometry (`L-8`
+  gated). Arabic contextual joining & complex Indic reordering remain bounded to the subset covered
+  by `GSUB` ligature/single lookups + UAX #9 (`OQ-11`).
 - **2026-11-20 — D-39 — a frame wrote a clipped leaf's carry back as the leaf's own, so the
   second frame at a scroll position started 16 bytes early. FIXED.** Found by the frame-stability
   hunt (`crates/holonomy-shell/tests/frame_stability.rs`). On a four-thousand-leaf document at

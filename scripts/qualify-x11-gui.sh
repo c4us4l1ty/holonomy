@@ -94,8 +94,21 @@ fi
 sleep 0.3
 
 xdotool type --clearmodifiers --delay 20 "Hello Xvfb Quiet Markdown"
+xdotool key --clearmodifiers ctrl+a
+sleep 0.1
+xdotool key --clearmodifiers ctrl+k
+sleep 0.15
+xdotool type --clearmodifiers --delay 15 "https://holonomy.example"
+xdotool key --clearmodifiers Return
+sleep 0.15
 xdotool key --clearmodifiers ctrl+s
 sleep 0.3
+xdotool key --clearmodifiers ctrl+shift+d
+sleep 0.2
+xdotool key --clearmodifiers ctrl+g
+sleep 0.2
+xdotool key --clearmodifiers Escape
+sleep 0.15
 xdotool key --clearmodifiers ctrl+h
 sleep 0.3
 

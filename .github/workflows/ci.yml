@@ -109,7 +109,10 @@ jobs:
           total="$(ls diag-chunk-* | wc -l | tr -d '[:space:]')"
           for chunk in diag-chunk-*; do
             { echo "### diag base64 part ${chunk##*-} of ${total} (decode, concatenate, base64 -d)"; cat "$chunk"; echo; } > "$chunk.md"
-            gh issue comment "$DIAG_ISSUE" --body-file "$chunk.md"
+            for attempt in 1 2 3; do
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${DIAG_ISSUE}/comments" -F "body=@$chunk.md" --silent && break
+              sleep 3
+            done
           done
 
   fmt:
@@ -179,7 +182,7 @@ jobs:
           fi
           if [[ "${{ github.event_name }}" == push && "${{ github.ref }}" == refs/heads/arena/* ]]; then
             { echo "### Encrypted search measurement for ${{ github.sha }} (exit $result)"; echo '```'; cat "$RUNNER_TEMP/encrypted-search.log"; echo '```'; } > "$RUNNER_TEMP/encrypted-search-comment.md"
-            gh issue comment 51 --body-file "$RUNNER_TEMP/encrypted-search-comment.md"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/encrypted-search-comment.md" --silent || echo "::warning::issue 51 comment failed"
           fi
           if [[ "$result" -ne 0 ]]; then exit "$result"; fi
           grep 'HOLONOMY_ENCRYPTED_SEARCH' "$RUNNER_TEMP/encrypted-search.log"
@@ -197,7 +200,7 @@ jobs:
           fi
           if [[ "${{ github.event_name }}" == push && "${{ github.ref }}" == refs/heads/arena/* ]]; then
             { echo "### Isolated supervisor prototype for ${{ github.sha }} (exit $result)"; echo '```'; cat "$RUNNER_TEMP/supervisor-probe.log"; echo '```'; } > "$RUNNER_TEMP/supervisor-probe-comment.md"
-            gh issue comment 51 --body-file "$RUNNER_TEMP/supervisor-probe-comment.md"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/supervisor-probe-comment.md" --silent || echo "::warning::issue 51 comment failed"
           fi
           if [[ "$result" -ne 0 ]]; then exit "$result"; fi
           grep 'HOLONOMY_SUPERVISOR_SUMMARY' "$RUNNER_TEMP/supervisor-probe.log"
@@ -262,7 +265,7 @@ jobs:
             cat "$RUNNER_TEMP/wipe-gate.txt"
             echo '```'
           } > "$RUNNER_TEMP/track-a-gates-comment.md"
-          gh issue comment 51 --body-file "$RUNNER_TEMP/track-a-gates-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/track-a-gates-comment.md" --silent || echo "::warning::issue 51 comment failed"
       # OQ-14 and its neighbour, measured rather than described: what a reopen does to a document
       # that was edited before its end, and what a deletion does to the file. Both tests assert
       # today's behaviour, so the numbers print every push and a change to either is a red build
@@ -294,7 +297,7 @@ jobs:
           { echo '### OQ-29 / OQ-30 / L-1 / L-2 — persistence & 60yr/30M scale';
             echo '```text'; cat "$RUNNER_TEMP/persist.txt"; echo '```'; } \
             > "$RUNNER_TEMP/persist-comment.md"
-          gh issue comment 51 --body-file "$RUNNER_TEMP/persist-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/persist-comment.md" --silent || echo "::warning::issue 51 comment failed"
 
   xvfb:
     name: X11 GUI live Xvfb qualification
@@ -323,7 +326,7 @@ jobs:
         run: |
           { echo '### X11 GUI live Xvfb qualification'; echo '```text'; cat "$RUNNER_TEMP/xvfb.txt"; echo '```'; } \
             > "$RUNNER_TEMP/xvfb-comment.md"
-          gh issue comment 51 --body-file "$RUNNER_TEMP/xvfb-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/xvfb-comment.md" --silent || echo "::warning::issue 51 comment failed"
 
   cross-os:
     name: cross-OS build & test (${{ matrix.os }})
@@ -379,7 +382,7 @@ jobs:
             tail -c 24000 "$RUNNER_TEMP/cross-os.log" || true
             echo '```'
           } > "$RUNNER_TEMP/cross-os-err.md"
-          gh issue comment 51 --body-file "$RUNNER_TEMP/cross-os-err.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/cross-os-err.md" --silent || echo "::warning::issue 51 comment failed"
 
   sync:
     name: L-10 rsync transfer measurement
@@ -409,7 +412,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           { echo '### L-10 rsync application-layer measurement'; echo '```text'; cat "$RUNNER_TEMP/rsync-measurement.txt"; echo '```'; } > "$RUNNER_TEMP/rsync-comment.md"
-          gh issue comment 51 --body-file "$RUNNER_TEMP/rsync-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/rsync-comment.md" --silent || echo "::warning::issue 51 comment failed"
 
   filesystem:
     name: L-6 ext4 ENOSPC rehearsal (not power-loss qualification)
@@ -439,7 +442,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           { echo '### L-6 ext4 loop-filesystem ENOSPC evidence (not a device power-cut test)'; echo '```text'; cat "$RUNNER_TEMP/ext4-enospc-measurement.txt"; echo '```'; } > "$RUNNER_TEMP/ext4-enospc-comment.md"
-          gh issue comment 51 --body-file "$RUNNER_TEMP/ext4-enospc-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/ext4-enospc-comment.md" --silent || echo "::warning::issue 51 comment failed"
 
   smoke:
     name: M8 smoke — the shipped binary through a real terminal
@@ -484,7 +487,7 @@ jobs:
           { echo '### M8 smoke — the shipped binary through a real terminal'; echo '```text'; \
             grep -E 'HOLONOMY_SMOKE|^smoke: ' "$RUNNER_TEMP/smoke.log"; echo '```'; } \
             > "$RUNNER_TEMP/smoke-comment.md"
-          gh issue comment 51 --body-file "$RUNNER_TEMP/smoke-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/smoke-comment.md" --silent || echo "::warning::issue 51 comment failed"
 
   portability:
     name: L-9 hand-off drill (process half, not the second machine)
@@ -520,7 +523,7 @@ jobs:
             echo 'L-9 remains `spec`: this proves no account/token/device/inherited state is needed,'; \
             echo 'not that a second machine can open the file. That is the release drill.'; } \
             > "$RUNNER_TEMP/l9-comment.md"
-          gh issue comment 51 --body-file "$RUNNER_TEMP/l9-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/l9-comment.md" --silent || echo "::warning::issue 51 comment failed"
 
   gates:
     name: gates contract

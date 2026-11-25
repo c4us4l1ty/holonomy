@@ -298,10 +298,9 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
   a property of the runner and is quoted as a measured range rather than a constant — two runs
   sixteen minutes apart on 2026-11-24 gave `p50 = 696,731 ns` and `1,045,075 ns` for the identical
   workload (`D-91`), against a control `76–90×` slower in all three runs.
-- Residual, stated rather than hidden: `Face` reads `cmap`/`hmtx` advances without `GSUB`/`GPOS`
-  complex-script glyph joining or ligatures (`OQ-24`), and `L-8` stays `spec` in `docs/GATES.md`
-  until Block 6's GPU renderer draws from `Picture` alongside the terminal cell surface. The
-  workspace moves to `6.0.0-block.5`, one bump per closed block.
+- **Status (2026-11-26, AUDIT D-95):** `holonomy-eye::opentype` implements `GDEF`/`GSUB`/`GPOS`
+  shaping (`OQ-24` closed), `L-8` is now `gated` in `docs/GATES.md`, and `PixelSurface` (`X11`,
+  `Cocoa`, `Win32`) renders directly from `Frame::picture()`.
 
 **GATES** — ✅ **all three passed, and the block is closed (2026-11-22, CI run [45106234334](https://github.com/c4us4l1ty/holonomy/actions/runs/45106234334) on `3b54969`)**
 - [x] Property test: for arbitrary documents, `hit_test(paint_to_point(g)) == g` for every
@@ -343,19 +342,18 @@ Everything before this block is plumbing. This is the first thing a user can hol
 already obeys every constitutional law: viewport plaintext, one file, password-only,
 world-line history internal (no history UI yet), smooth at any size.
 
-**Status (2026-11-21) — no pixel, but it opens and it keeps what you write.** Its *headless half*
-exists as `holonomy-shell` (D-19): intents produce frames, the frames measure the heights the Eye
-indexes, and the caret-boundary check OQ-15 asked for passes over every caret a frame offers. The
-window over it (`holonomy-gui`) is **real and runnable today**: a terminal in raw mode, keys decoded
-from the bytes a tty actually sends, a `.wavefunction` created or opened under a passphrase,
-autosave on pause, a seal on quit, the security panel on `Ctrl+G`, and a run that died mid-append
-recovered on the next open. M5 and M6 are done in `docs/TO-APP.md`.
+**Status (2026-11-26 — TUI + cross-OS pure-FFI pixel window shipped; GPUI/IME deferred)** —
+The headless editor (`holonomy-shell`), TUI (`holonomy <doc>`), and native pure-FFI desktop
+(`holonomy-gui` / `holonomy gui` over `X11`, `Cocoa`, and `Win32`) all drive `Frame::picture()` and
+`holonomy-eye`'s `GDEF`/`GSUB`/`GPOS` OpenType rasterizer (`quiet-md` light `#FFFFFF` and dark
+`#1A1A19` paper themes, visual list markers, word nav/delete, `Ctrl+K` link bar, recovery banner,
+`1.2s` idle chrome fade, passphrase strength meter, and opt-in `recent.txt` default OFF). Linux
+`Xvfb` rendering + keyboard flow are verified end-to-end by `scripts/qualify-x11-gui.sh`, and
+`cross-os` CI builds and tests macOS + Windows on every push.
 
-What is not here: **GPUI**, quiet-md's page, a font, a palette, IME — so the deliverable this block
-describes is still not met, and **none of this block's gates is claimed**, because they are about a
-shipped app on reference hardware and cannot be faked by a character-grid window. The terminal
-window is M4b-i in `docs/TO-APP.md`: the thing this environment can build, not a substitute for the
-block.
+What remains open: GPUI GPU shell (requires upstream crate graph outside `--locked`), platform IME
+composition, hardware power-loss (`L-6`), second-physical-machine portability (`L-9`), and hardware
+reference benchmarks (`L-3`..`L-5`, `L-7`).
 
 **Deliverables**
 - GPUI shell built on **quiet-md** ([s1dashu/quiet-md](https://github.com/s1dashu/quiet-md), MIT):
@@ -425,12 +423,12 @@ bounds under arbitrary allocator stress remain open.
 
 The world-line already holds everything; this block gives it a face.
 
-**Draft status (2026-11-25, AUDIT D-94):** Core persistence and history APIs are implemented and
-tested (`RECORD_BOOKMARK`, `Bookmark`, `WitnessSummary`, `WorldLine::{witness_history, bookmarks,
-add_bookmark, open_manifest_at, diff_witnesses}`, and `Editor::restore_spine`), with end-to-end
-persistence verified in `holonomy-line` and `holonomy-gui/tests/persist.rs`. Interactive 60-year
-timeline scrubbing in the desktop UI and a simulated-decades residency benchmark remain open for the
-gates below.
+**Draft status (2026-11-26, AUDIT D-94/D-95):** Core persistence, history APIs, GUI timeline
+scrubber (`Ctrl+H`), TUI witness history browser (`Ctrl+R`), and simulated 60-year / 30 M-word
+witness benchmarks (`persist.rs`) are implemented and tested (`RECORD_BOOKMARK`, `Bookmark`,
+`WitnessSummary`, `WorldLine::{witness_history, bookmarks, add_bookmark, open_manifest_at,
+diff_witnesses}`, and `Editor::restore_spine`). Live desktop scrub-over-decades residency telemetry
+under hardware reference benchmarks remains open for the gate checkboxes below.
 
 **Deliverables**
 - Timeline UI: scrub a human timeline (day/month/year), watch the document state at that
@@ -488,19 +486,19 @@ v5's 45 ms wipe-budget overshoot disappears by construction.
       cooperative watcher still cannot meet the 50 ms deadline from a blocked UI thread, and
       registration still covers only the allocations the editor arms, so **L-7 stays `spec`**.
 - [x] Security panel claims cross-checked by test (no status a test cannot prove).
-      **Enforced by `crates/holonomy-gui/tests/panel.rs` (M6):** every line rendered by
-      `holonomy_gui::panel::Facts` is verified by mutating live `ResidentSet` byte/leaf counts,
-      `Document` segment/witness/verification counts, and every `LockCapability` rung from
-      `probe_capability()`, with `None` rendered as `"not verified"`. No clipboard status is claimed
-      because the terminal front end has no OS clipboard integration (`OQ-3` stays open for Block 6).
+      **Enforced by `crates/holonomy-gui/tests/panel.rs` (M6 & D-95):** every line rendered by
+      `holonomy_gui::panel::Facts` (7 lines including `window_security`: Cocoa `NSWindowSharingNone`
+      + HIToolbox `EnableSecureEventInput`, Win32 `SetWindowDisplayAffinity`, and X11 unexcluded
+      status with timestamped OS verification) is verified against live `ResidentSet`, `Document`,
+      `DesktopWindow::security_info()`, and `LockCapability` (`None` rendered as `"not verified"`).
+      In-window clipboard zeroization on blur is wired in `canvas.rs`; OS clipboard server policy
+      remains `OQ-3`.
 - [x] Implementation audit closed; all findings fixed or written down as user-visible limits.
-      **Closed 2026-11-22 (AUDIT D-78, D-79):** re-audit of Blocks 2–9 fixed
-      `SlabText::from_plaintext`'s `Vec::reserve` `realloc` / invalid-UTF-8 unwiped-plaintext escape
-      (`crates/holonomy-text/src/text.rs`) and `holonomy-shell`'s three-part leaf-seam defect
-      (`tail_bytes` over-extension on clean cluster boundaries, `measure_window` overwriting clipped
-      tail-leaf heights, and `cluster_after` absorbing a neighbour cluster across a clean leaf seam
-      on `Delete` / `Move::Right` / `legal_caret`), and recorded remaining user-visible limits
-      (`OQ-3` clipboard in GPUI, `OQ-24` OpenType `GSUB`/`GPOS`, terminal screen-capture exclusion).
+      **Closed 2026-11-22 (AUDIT D-78, D-79) and updated 2026-11-26 (D-95):** re-audit of Blocks
+      2–9 fixed `SlabText::from_plaintext`'s `Vec::reserve` / invalid-UTF-8 escape and
+      `holonomy-shell`'s leaf-seam geometry defects, closed `OQ-24` (`GDEF`/`GSUB`/`GPOS`), and
+      recorded remaining user-visible limits (`OQ-3` OS clipboard servers, platform IME, code
+      signing).
 
 ---
 

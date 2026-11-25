@@ -15,6 +15,10 @@
 //! The numbers print as `HOLONOMY_INTENTS intents= …`, and the counts are asserted: a green run
 //! that applied no intents would be a green run that proved nothing.
 
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
 use holonomy_eye::{Fixed, Point, Shaper, Style, View};
 use holonomy_shell::{Editor, Effect, Intent, Move};
 use holonomy_text::{
@@ -87,6 +91,49 @@ fn editor() -> Shell {
         ResidentSet::new(Repeated { leaf_bytes: 64 }, BUDGET, 0).expect("a workable budget");
     Editor::new(
         Typing::new(Recorder::default(), 64),
+        residency,
+        Fake,
+        WIDTH,
+        VIEWPORT,
+    )
+}
+
+/// Shared in-memory world-line store so sealed leaves fault back the exact bytes typed.
+#[derive(Debug, Clone, Default)]
+struct World {
+    segments: Rc<RefCell<BTreeMap<u64, Vec<u8>>>>,
+    next: Rc<Cell<u64>>,
+}
+
+impl SegmentSink for World {
+    fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+        let id = self.next.get();
+        self.next.set(id + 1);
+        self.segments.borrow_mut().insert(id, plaintext.to_vec());
+        Ok(Appended {
+            segment: SegmentId::new(id),
+            witness_sequence: id + 1,
+            segment_root: [0u8; 32],
+            bytes_written: plaintext.len() as u64,
+        })
+    }
+}
+
+impl SegmentSource for World {
+    fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+        self.segments
+            .borrow()
+            .get(&segment.get())
+            .cloned()
+            .ok_or_else(|| format!("missing {segment}"))
+    }
+}
+
+fn world_editor(slab_bytes: usize) -> Editor<World, World, Fake> {
+    let store = World::default();
+    let residency = ResidentSet::new(store.clone(), BUDGET, 0).expect("a workable budget");
+    Editor::new(
+        Typing::new(store, slab_bytes),
         residency,
         Fake,
         WIDTH,
@@ -195,7 +242,7 @@ impl Rng {
 /// The intent a seed step asks for, and the direct call that means the same thing.
 fn step(seed: u64, shell_len: u64) -> Intent {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    match rng.below(15) {
+    match rng.below(17) {
         0..=2 => {
             let text = if rng.below(3) == 0 { "m中\n" } else { "ab" };
             Intent::Type(text.to_owned())
@@ -214,15 +261,19 @@ fn step(seed: u64, shell_len: u64) -> Intent {
         }
         11 => Intent::SetView(View::new(500 + rng.below(1_500) as i64, 96).expect("a view")),
         12 => Intent::Move {
-            to: match rng.below(4) {
+            to: match rng.below(6) {
                 0 => Move::Left,
                 1 => Move::Right,
-                2 => Move::Up,
+                2 => Move::WordLeft,
+                3 => Move::WordRight,
+                4 => Move::Up,
                 _ => Move::Down,
             },
             extend: rng.below(2) == 0,
         },
         13 => Intent::Undo,
+        14 => Intent::DeleteWordBefore,
+        15 => Intent::DeleteWordAfter,
         _ => {
             // Redo, reveal and flush share the tail; flush only when there is something to write.
             if rng.below(2) == 0 && shell_len > 0 {
@@ -245,6 +296,12 @@ fn directly(shell: &mut Shell, intent: &Intent) {
         }
         Intent::DeleteForward => {
             shell.delete_forward().expect("deleted");
+        }
+        Intent::DeleteWordBefore => {
+            shell.delete_word_before().expect("deleted word before");
+        }
+        Intent::DeleteWordAfter => {
+            shell.delete_word_after().expect("deleted word after");
         }
         Intent::DeleteSelection => {
             shell.delete_selection().expect("deleted");
@@ -431,4 +488,88 @@ fn formatting_links_and_replace_all_intents_agree_with_direct_calls() {
             "toolbar_state diverged at step {idx}"
         );
     }
+}
+
+#[test]
+fn word_navigation_multi_click_and_status_metrics_work_across_leaves() {
+    // Verify unsealed open-buffer metrics & cluster helpers before any slab is sealed.
+    let mut unsealed = world_editor(256);
+    unsealed
+        .type_text("alpha beta gamma\nsecond paragraph line")
+        .expect("seeded unsealed");
+    let unsealed_metrics = unsealed.status_metrics();
+    assert!(unsealed_metrics.words_exact);
+    assert_eq!(unsealed_metrics.total_words, 6);
+    unsealed
+        .apply(Intent::DeleteWordBefore)
+        .expect("unsealed del word before");
+    assert_eq!(unsealed.status_metrics().total_words, 5);
+
+    // 12-byte slabs split "alpha beta gamma\nsecond paragraph line" across multiple leaves.
+    let mut shell = world_editor(12);
+    shell
+        .type_text("alpha beta gamma\nsecond paragraph line")
+        .expect("seeded");
+    shell.reflow().expect("reflowed");
+
+    // WordRight / WordLeft navigation & DeleteWordBefore / DeleteWordAfter.
+    let home = Intent::Move {
+        to: Move::DocumentStart,
+        extend: false,
+    };
+    shell.apply(home).expect("home");
+    let word_r = Intent::Move {
+        to: Move::WordRight,
+        extend: false,
+    };
+    shell.apply(word_r).expect("word right");
+    assert_eq!(shell.caret(), 5);
+    let word_r_ext = Intent::Move {
+        to: Move::WordRight,
+        extend: true,
+    };
+    shell.apply(word_r_ext).expect("word right extend");
+    assert_eq!(shell.selection().normalised(), (5, 10));
+    let word_l = Intent::Move {
+        to: Move::WordLeft,
+        extend: false,
+    };
+    shell.apply(word_l).expect("word left");
+    assert_eq!(shell.caret(), 6);
+
+    // Double-click word, triple-click line, quad-click paragraph via painted geometry.
+    let frame_pt = {
+        let f = shell.frame().expect("frame");
+        let p = f.layout().paint_point(7).expect("paint");
+        Point::new(p.x, p.top + Fixed::ONE)
+    };
+    assert!(shell.select_word_at(frame_pt).expect("double click"));
+    assert_eq!(shell.selection().normalised(), (6, 10));
+    assert!(shell.select_visual_line_at(frame_pt).expect("triple click"));
+    assert_eq!(shell.selection().normalised().0, 0);
+    assert!(shell.select_paragraph_at(frame_pt).expect("quad click"));
+    assert_eq!(shell.selection().normalised(), (0, 16));
+
+    // DeleteWordAfter / DeleteWordBefore parity with intents.
+    shell.select_range(0, 0).expect("reset");
+    shell.apply(Intent::DeleteWordAfter).expect("del after");
+    assert!(shell.frame().expect("frame").text().starts_with(" beta"));
+    shell.apply(Intent::Undo).expect("undo");
+    shell.select_range(5, 5).expect("at end of alpha");
+    shell.apply(Intent::DeleteWordBefore).expect("del before");
+    assert!(shell.frame().expect("frame").text().starts_with(" beta"));
+
+    // Link inspection and status metrics.
+    shell.select_range(1, 5).expect("select beta");
+    let set_link = Intent::SetLink(Some("https://holonomy.invalid/word".to_owned()));
+    shell.apply(set_link).expect("link");
+    assert_eq!(
+        shell.link_at_caret().as_deref(),
+        Some("https://holonomy.invalid/word")
+    );
+    let metrics = shell.status_metrics();
+    assert!(metrics.words_exact);
+    assert!(metrics.total_words >= 4);
+    assert_eq!(metrics.current_page, 1);
+    assert!(metrics.total_pages >= 1);
 }

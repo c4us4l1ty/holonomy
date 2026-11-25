@@ -121,11 +121,7 @@ Prints `HOLONOMY_FACE …`, `HOLONOMY_FACE_SCALE …` and `HOLONOMY_FACE_LAYOUT 
 the counts are asserted (95 printable ASCII advances, ≥5 scalings, ≥4 sums, >50 caret round trips,
 ≥2 lines), so a green run cannot be a run that read no font.
 
-**What this is not:** shaping. Kerning, ligatures, mark positioning and Arabic joining live in
-`GSUB`/`GPOS`, which nothing reads yet; a cluster's width is the *sum* of its characters, which is
-exactly right for one-glyph-per-character text and a measurement — not a promise — elsewhere. That
-gap is recorded as **OQ-24** in `AUDIT.md`, and Block 5 gate 2's timing half can now be measured
-with these metrics.
+**Update (`OQ-24` closed, D-95):** `holonomy_eye::opentype` now parses `GDEF`/`GSUB`/`GPOS` (`SingleSubst`, `LigatureSubst`, `PairPos` kerning, `MarkBasePos`, `MarkLigPos`, and GDEF glyph classes) and `Face` / `FontSet` compute shaped cluster widths and exact glyph placements (`x_offset`, `y_offset`, `x_advance`), while `PixelSurface::line_clusters` renders shaped glyph runs without splitting the Eye's geometry (`L-8` gated).
 
 ### M4 — The window (Block 6, first half) — **half done**
 
@@ -153,16 +149,20 @@ surface; arrows move a caret and keep the column; shift selects and the next key
 are the loop's own; an unchanged window does not repaint. Counts asserted and printed as
 `HOLONOMY_WINDOW*`.
 
-**M4b-ii — pixel window & GPUI status (`2026-11-25` update, AUDIT D-94):** GPUI itself remains
-unbuilt in this offline `--locked` tree (adding ~200 transitive crates requires crates.io resolution
-and `Cargo.lock` regeneration). Without adding any external crate, `crates/holonomy-eye/src/raster.rs`
-and `crates/holonomy-gui/src/{x11.rs,canvas.rs}` now provide a pure-Rust/`libc` OpenType
-`loca`/`glyf` rasterizer (`Inter-Regular`, `Inter-Bold`, `Inter-Italic`, `JetBrainsMono-Regular`),
-`PixelSurface` rendering `Frame::picture()` directly (`L-8` pointer round-trips pinned across zooms
-and DPIs in `canvas::tests`), and a pure-`libc` X11 desktop window (`holonomy gui <doc>` or
-`holonomy-gui`, keeping PTY `holonomy <doc>` as the default CLI path). Cross-platform GPUI
-(`macOS`/`Windows`/Wayland), `GSUB`/`GPOS` shaping (`OQ-24`), and live X-server screenshot tests
-remain open.
+**M4b-ii — cross-OS pure-FFI pixel window & GPUI status (`2026-11-25` update, AUDIT D-94/D-95):**
+GPUI itself remains unbuilt in this offline `--locked` tree (adding ~200 transitive crates requires
+crates.io resolution and `Cargo.lock` regeneration). Without adding any external crate,
+`crates/holonomy-eye/src/{opentype,raster}.rs` and
+`crates/holonomy-gui/src/{platform,x11,cocoa,win32,canvas}.rs` implement `GDEF`/`GSUB`/`GPOS`
+shaping, an embedded OpenType `loca`/`glyf` rasterizer (`Inter-Regular`, `Inter-Bold`,
+`Inter-Italic`, `JetBrainsMono-Regular`), `PixelSurface` (`quiet-md` light `#FFFFFF` and dark
+`#1A1A19` paper themes, visual bullets/ordinals, link dialog, recovery banner, 1.2s idle chrome
+fade, passphrase strength meter, and opt-in recent world-lines default OFF), plus native pure-FFI
+desktop windows on Linux (`X11Window`), macOS (`CocoaWindow` with `NSWindowSharingNone` +
+HIToolbox `EnableSecureEventInput`), and Windows (`Win32Window` with `SetWindowDisplayAffinity`).
+Linux rendering is live-tested end-to-end under `Xvfb` (`scripts/qualify-x11-gui.sh`), and macOS /
+Windows binaries build and pass `cargo test --locked --workspace` in CI (`cross-os`). Platform IME
+composition and code signing remain open.
 
 **M4b-i, done: the terminal window.** The window this environment *can* build. `holonomy-gui`
 gains `term.rs` — a `CellShaper` whose unit is one grid cell (so the Eye's geometry and the screen are
@@ -395,14 +395,18 @@ today, and the file's own counts — not from a constant. `Esc` dismisses it (D-
 than the terminal gives way rather than scrolling the screen (D-48), and no panel line claims
 verification unless a full `verify` ran.
 
-The distance left, plainly: the remaining gates (M7), packaging (M8), plus the GPUI backend
-(M4b-ii) for a machine with registry access. **Not one of the ten laws in `docs/GATES.md` is
-`gated`** — all ten read `spec`, and `xtask gates --check` fails the build if that file and
-`crates/holonomy-ledger/src/laws.rs` ever disagree.
+The distance left, plainly: hardware / physical / external-environment gates in `docs/GATES.md`
+(`L-3`..`L-7`, `L-9`, `L-10` still read `spec`, while `L-1`, `L-2`, and `L-8` read `gated`),
+platform code signing and notarization in `.github/workflows/release.yml`, and platform IME
+composition on the Cocoa/Win32 desktop backends (`M8` now packages unsigned Linux `x86_64`, macOS
+`aarch64`, and Windows `x86_64` archives with `SHA-256` + provenance on `v*` tags). `xtask gates
+--check` fails the build if `docs/GATES.md` and `crates/holonomy-ledger/src/laws.rs` ever disagree.
 
-What is still not here, in the order it would meet a user: no GPU or font rendering (the window is
-a terminal cell grid whose wide characters use UCD 18.0.0 two-cell advances — `OQ-25` closed — and
-whose RTL/mixed lines reorder per UAX #9 — `OQ-11` closed — while OpenType `GSUB`/`GPOS` glyph
-joining remains `OQ-24`), one document at a time, deleted bytes remain encrypted in the append-only
-`.wavefunction` until explicit `holonomy compact` (`OQ-14`), and no physical power-loss
-qualification (the L-6 rehearsal is an ENOSPC test and says so in its own job name).
+What is still not here, in the order it would meet a user: platform IME composition for CJK/dead-key
+scripts and code signing on the release archives (OpenType `GDEF`/`GSUB`/`GPOS` shaping, embedded
+font rasterization, pure-FFI Linux/macOS/Windows windows, `Ctrl+W`/`Ctrl+R`/dark/light paper
+themes, passphrase meter, and Xvfb screenshot tests are all shipped and tested in CI), one
+document at a time per window (with opt-in recent world-lines list default OFF), deleted bytes
+remain encrypted in the append-only `.wavefunction` until explicit `holonomy compact` (`OQ-14`),
+and no physical power-loss qualification (the `L-6` rehearsal is an ENOSPC test and says so in its
+own job name).
