@@ -973,7 +973,7 @@ impl X11Window {
             return Err(X11Error::Unsupported(format!("setup status {status}")));
         }
         let body_bytes = extra_words.saturating_mul(4);
-        if body_bytes < 72 || body_bytes > MAX_REPLY_BYTES {
+        if !(72..=MAX_REPLY_BYTES).contains(&body_bytes) {
             return Err(X11Error::Unsupported("short X11 setup reply".to_owned()));
         }
         let mut body = vec![0u8; body_bytes];

@@ -527,13 +527,13 @@ fn stream_markdown_inline(
                 continue;
             }
         }
-        if rest.starts_with('`') {
-            if let Some(end) = rest[1..].find('`') {
+        if let Some(after_tick) = rest.strip_prefix('`') {
+            if let Some(end) = after_tick.find('`') {
                 if !plain_run.is_empty() {
                     acc.push_styled(&plain_run, base_style, tx)?;
                     plain_run.clear();
                 }
-                let inner = &rest[1..1 + end];
+                let inner = &after_tick[..end];
                 let mut code_style = base_style;
                 code_style.code_span = true;
                 code_style.family = FontFamily::Mono;
@@ -545,8 +545,8 @@ fn stream_markdown_inline(
                 continue;
             }
         }
-        if rest.starts_with("**") {
-            if let Some(end) = rest[2..].find("**") {
+        if let Some(after_bold) = rest.strip_prefix("**") {
+            if let Some(end) = after_bold.find("**") {
                 if end > 0 {
                     if !plain_run.is_empty() {
                         acc.push_styled(&plain_run, base_style, tx)?;
@@ -554,14 +554,14 @@ fn stream_markdown_inline(
                     }
                     let mut bold_style = base_style;
                     bold_style.bold = true;
-                    stream_markdown_inline(&rest[2..2 + end], bold_style, acc, tx)?;
+                    stream_markdown_inline(&after_bold[..end], bold_style, acc, tx)?;
                     i += 2 + end + 2;
                     continue;
                 }
             }
         }
-        if rest.starts_with("~~") {
-            if let Some(end) = rest[2..].find("~~") {
+        if let Some(after_strike) = rest.strip_prefix("~~") {
+            if let Some(end) = after_strike.find("~~") {
                 if end > 0 {
                     if !plain_run.is_empty() {
                         acc.push_styled(&plain_run, base_style, tx)?;
@@ -569,7 +569,7 @@ fn stream_markdown_inline(
                     }
                     let mut strike_style = base_style;
                     strike_style.strikethrough = true;
-                    stream_markdown_inline(&rest[2..2 + end], strike_style, acc, tx)?;
+                    stream_markdown_inline(&after_strike[..end], strike_style, acc, tx)?;
                     i += 2 + end + 2;
                     continue;
                 }
@@ -606,10 +606,10 @@ fn stream_markdown_inline(
                 }
             }
         }
-        if rest.starts_with('[') {
-            if let Some(close_bracket) = rest[1..].find("](") {
-                let label = &rest[1..1 + close_bracket];
-                let after = &rest[1 + close_bracket + 2..];
+        if let Some(after_open) = rest.strip_prefix('[') {
+            if let Some(close_bracket) = after_open.find("](") {
+                let label = &after_open[..close_bracket];
+                let after = &after_open[close_bracket + 2..];
                 if let Some(close_paren) = after.find(')') {
                     let url = &after[..close_paren];
                     if !label.is_empty() && !url.is_empty() && !url.contains(char::is_whitespace) {

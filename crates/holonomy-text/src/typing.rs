@@ -3200,7 +3200,7 @@ mod tests {
                 .extend_from_slice(&seg[span.slab().start() as usize..span.slab().end() as usize]);
         }
         assert_eq!(reconstructed, expected.as_bytes());
-        assert_eq!(typing.spine().style_at(0).bold, true);
+        assert!(typing.spine().style_at(0).bold);
         assert_eq!(
             typing.spine().styles().links(),
             &["https://holonomy.example".to_owned()]

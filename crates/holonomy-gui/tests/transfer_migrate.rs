@@ -15,7 +15,7 @@ use holonomy_seal::v5::{
     write_v5_test_container, V5PadSource, V5Passphrase, V5_PAYLOAD_PLAINTEXT_PER_SLOT,
 };
 use holonomy_seal::{ParamsClass, PassphraseInput};
-use holonomy_text::{Heading, ListKind};
+use holonomy_text::{Heading, ListKind, SegmentSource};
 
 fn temp_file(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()

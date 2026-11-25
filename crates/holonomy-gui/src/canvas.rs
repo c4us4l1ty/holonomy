@@ -107,7 +107,7 @@ impl FrameBuffer {
     }
 
     /// Fills `rect` clipped to `clip` and window bounds using `color`'s alpha percentage.
-    pub fn fill_rect_clipped(&mut self, rect: Rect, color: Rgba8, clip: Rect) {
+    fn fill_rect_clipped(&mut self, rect: Rect, color: Rgba8, clip: Rect) {
         let x0 = rect.x.max(clip.x).max(0);
         let y0 = rect.y.max(clip.y).max(0);
         let x1 = (rect.x + rect.w)
@@ -139,7 +139,7 @@ impl FrameBuffer {
     }
 
     /// Draws a 1 px stroked outline inside `rect`.
-    pub fn stroke_rect(&mut self, rect: Rect, color: Rgba8, clip: Rect) {
+    fn stroke_rect(&mut self, rect: Rect, color: Rgba8, clip: Rect) {
         self.fill_rect_clipped(Rect::new(rect.x, rect.y, rect.w, 1), color, clip);
         self.fill_rect_clipped(
             Rect::new(rect.x, rect.y + rect.h - 1, rect.w, 1),
@@ -155,7 +155,7 @@ impl FrameBuffer {
     }
 
     /// Alpha-blends a rasterized A8 glyph bitmap at `(dst_x, dst_y)`.
-    pub fn blend_glyph(
+    fn blend_glyph(
         &mut self,
         dst_x: i32,
         dst_y: i32,
