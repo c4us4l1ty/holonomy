@@ -31,7 +31,7 @@ use holonomy_gui::term::CellShaper;
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers};
 use holonomy_seal::generate_container_id;
 use holonomy_shell::Editor;
-use holonomy_text::{ResidentSet, Typing};
+use holonomy_text::{ResidentSet, SegmentSource, Typing};
 
 const COLUMNS: usize = 40;
 const ROWS: usize = 6;
@@ -552,4 +552,116 @@ fn replace_all_commits_one_witness_and_undo_persists() {
     drop(document);
     let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens undo");
     assert_eq!(text(&mut open_window(&reopened)), "one fish, one bird");
+}
+
+#[test]
+fn document_witness_history_bookmarks_diff_search_and_restore_persist() {
+    let path = temp_path("history-restore-persist");
+    let document = create(&path.0);
+    let mut typing = Typing::new(document.sink(), store::CAPACITY);
+    typing.insert(b"chapter one alpha\n").unwrap();
+    typing.flush().unwrap();
+    document
+        .add_bookmark(1, 1_700_000_010, "Chapter One")
+        .unwrap();
+
+    typing.insert(b"chapter two beta\n").unwrap();
+    typing.flush().unwrap();
+    typing.delete(8, 17).unwrap(); // delete "alpha\ncha" across boundary
+    typing.flush().unwrap();
+
+    assert_eq!(document.witness_history().len(), 4);
+    assert_eq!(document.bookmarks().len(), 1);
+    assert_eq!(document.bookmarks()[0].name, "Chapter One");
+
+    let diff = document.diff_witnesses(1, 3).unwrap();
+    assert!(!diff.is_empty());
+
+    let hist_hits = document.search_history("alpha").unwrap();
+    assert_eq!(hist_hits.len(), 2); // witness 1 and witness 2 had "alpha"
+    assert_eq!(hist_hits[0].witness_sequence, 1);
+    assert_eq!(hist_hits[1].witness_sequence, 2);
+
+    // Restore back to witness 1 via Typing::restore_spine and verify reopen matches witness 1.
+    let w1 = document.spine_at_witness(1).unwrap();
+    typing.restore_spine(w1).unwrap();
+    drop(typing);
+    drop(document);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens restored");
+    assert_eq!(text(&mut open_window(&reopened)), "chapter one alpha\n");
+    assert_eq!(reopened.bookmarks().len(), 1);
+    assert_eq!(reopened.witness_history().len(), 5);
+    reopened.verify().unwrap();
+}
+
+fn all_bytes(document: &Document) -> Vec<u8> {
+    let spine = document.spine().expect("spine");
+    let mut source = document.source();
+    let mut out = Vec::with_capacity(usize::try_from(spine.len()).expect("fits in usize"));
+    for span in spine.spans_in(0, spine.len()) {
+        let slab = span.slab();
+        let segment = source.load(slab.segment()).expect("segment loads");
+        out.extend_from_slice(&segment[slab.start() as usize..slab.end() as usize]);
+    }
+    out
+}
+
+#[test]
+fn dense_streaming_replace_all_over_real_document_persists_and_undoes() {
+    let path = temp_path("dense-streaming-persist");
+    let document = create(&path.0);
+    let mut typing = Typing::new(document.sink(), store::CAPACITY);
+    let payload = "ab ".repeat(17_000);
+    typing.insert(payload.as_bytes()).unwrap();
+    typing.flush().unwrap();
+    let original = typing.spine().clone();
+    let before_witnesses = document.witness_count();
+
+    let mut source = document.source();
+    let count = typing.replace_all(b"ab", b"XYZ", &mut source).unwrap();
+    assert_eq!(count, 17_000);
+    assert_eq!(document.witness_count(), before_witnesses + 1);
+    drop(source);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens dense");
+    assert_eq!(
+        String::from_utf8(all_bytes(&reopened)).unwrap(),
+        "XYZ ".repeat(17_000)
+    );
+    assert_eq!(
+        open_window(&reopened).document_len(),
+        ("XYZ ".len() * 17_000) as u64
+    );
+    reopened.verify().unwrap();
+    drop(reopened);
+
+    assert!(typing.undo().unwrap());
+    assert!(typing.spine().ptr_eq(&original));
+    typing.flush().unwrap();
+    drop(typing);
+    drop(document);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens dense undo");
+    assert_eq!(String::from_utf8(all_bytes(&reopened)).unwrap(), payload);
+    assert_eq!(open_window(&reopened).document_len(), payload.len() as u64);
+}
+
+#[test]
+fn witness_excerpt_trims_split_multibyte_utf8_boundaries() {
+    let path = temp_path("excerpt-utf8");
+    let document = create(&path.0);
+    let mut typing = Typing::new(document.sink(), store::CAPACITY);
+    let prefix = "a".repeat(318);
+    let body = format!("{prefix}🦀tail");
+    typing.insert(body.as_bytes()).unwrap();
+    typing.flush().unwrap();
+
+    // End at byte 320 splits the 4-byte emoji at [318..322); excerpt must trim cleanly.
+    let head = document.read_witness_excerpt(1, 0, 320).unwrap();
+    assert_eq!(head, prefix);
+
+    // Start inside the 4-byte emoji at 319 and end inside it at 324 -> trims leading continuation bytes.
+    let mid = document.read_witness_excerpt(1, 319, 326).unwrap();
+    assert_eq!(mid, "tail");
 }

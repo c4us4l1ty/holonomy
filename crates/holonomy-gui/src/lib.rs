@@ -23,9 +23,12 @@
 //! Nothing in this crate assumes a grid, a font or a window: [`Surface`] hands a backend clusters at
 //! the advances the Eye measured, so a GPU backend draws exactly the picture the tests assert.
 
+pub mod canvas;
 pub mod panel;
 pub mod store;
 pub mod term;
+pub mod transfer;
+pub mod x11;
 
 use std::sync::Arc;
 
@@ -135,6 +138,8 @@ pub enum Key {
     PageUp,
     /// Page down.
     PageDown,
+    /// Tab: advances UI focus.
+    Tab,
     /// Escape: dismisses, never edits.
     Escape,
 }
@@ -223,7 +228,7 @@ impl Keymap {
             }),
             Key::PageUp => Some(Intent::ScrollBy(Fixed::ZERO - self.page)),
             Key::PageDown => Some(Intent::ScrollBy(self.page)),
-            Key::Character(_) | Key::Escape => None,
+            Key::Character(_) | Key::Tab | Key::Escape => None,
         }
     }
 }
@@ -521,6 +526,11 @@ where
     #[must_use]
     pub fn dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Marks the surface as needing a repaint on the next loop tick.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     /// Renders a compact Ribbon readout (`UI-SPEC.md` §3, Law `U0`) for the current caret or

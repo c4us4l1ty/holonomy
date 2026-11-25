@@ -1833,3 +1833,135 @@ impl Seek for GuardedReader {
         self.cursor.seek(position)
     }
 }
+
+#[test]
+fn witness_history_manifest_time_travel_and_bookmarks_survive_reopen_and_tamper() {
+    let path = temp_path("history-bookmarks");
+    let salt = [0x91; 64];
+    let (_keys, capsule, dem) = test_material(b"history-bookmarks", salt);
+    let header = test_header(salt, capsule);
+    let mut line = WorldLine::create(&path.0, header, dem.duplicate()).unwrap();
+
+    // Genesis witness 0: empty.
+    let hist0 = line.witness_history();
+    assert_eq!(hist0.len(), 1);
+    assert_eq!(hist0[0].sequence, 0);
+    assert!(line.manifest_at_witness(0).unwrap().slabs.is_empty());
+
+    // Witness 1: append two implicit segments.
+    line.append_segments(&[&b"first "[..], &b"draft"[..]])
+        .unwrap();
+    line.add_bookmark(1, 1_700_000_001, "Initial Draft")
+        .unwrap();
+
+    // Witness 2: cut & style via explicit manifest.
+    let m2 = LineManifest {
+        slabs: vec![LineSlab {
+            segment: 0,
+            start: 0,
+            len: 5,
+        }],
+        styles: vec![LineStyleRun {
+            start: 0,
+            end: 5,
+            flags: 0x01,
+            family: 0,
+            heading: 0,
+            alignment: 0,
+            list_kind: 0,
+            list_depth: 0,
+            blockquote: 0,
+            size_milli: 1_000,
+            list_start: 0,
+            link_id: 0,
+        }],
+        links: Vec::new(),
+    };
+    line.commit_full_manifest(&m2).unwrap();
+    line.add_bookmark(2, 1_700_000_099, "Trimmed Bold").unwrap();
+
+    // Reject bookmark pointing past committed witness sequence.
+    assert!(matches!(
+        line.add_bookmark(99, 1_700_000_100, "Future"),
+        Err(LineError::NoSuchWitness)
+    ));
+    // Reject empty or oversized bookmark names.
+    assert!(matches!(
+        line.add_bookmark(2, 0, ""),
+        Err(LineError::InvalidBookmark(_))
+    ));
+    drop(line);
+
+    let reopened = WorldLine::open(&path.0, dem.duplicate()).unwrap();
+    assert_eq!(reopened.witness_history().len(), 3);
+    assert_eq!(reopened.bookmarks().len(), 2);
+    assert_eq!(reopened.bookmarks()[0].name, "Initial Draft");
+    assert_eq!(reopened.bookmarks()[1].witness_sequence, 2);
+    let at1 = reopened.manifest_at_witness(1).unwrap();
+    assert_eq!(at1.slabs.len(), 2);
+    assert_eq!(at1.slabs[0].segment, 0);
+    assert_eq!(at1.slabs[1].segment, 1);
+    let at2 = reopened.manifest_at_witness(2).unwrap();
+    assert_eq!(at2, m2);
+    assert!(matches!(
+        reopened.manifest_at_witness(3),
+        Err(LineError::NoSuchWitness)
+    ));
+    assert_eq!(reopened.verify().unwrap().witnesses_verified, 3);
+    drop(reopened);
+
+    // Truncating mid-bookmark record yields torn tail recovery without losing witness 2 or bookmark 0.
+    let file_len = fs::metadata(&path.0).unwrap().len();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path.0)
+        .unwrap()
+        .set_len(file_len - 4)
+        .unwrap();
+    let recovered = WorldLine::open(&path.0, dem.duplicate()).unwrap();
+    assert_eq!(recovered.witness_history().len(), 3);
+    assert_eq!(recovered.bookmarks().len(), 1);
+    assert_eq!(recovered.bookmarks()[0].name, "Initial Draft");
+    assert_eq!(recovered.document_manifest(), m2);
+}
+
+#[test]
+fn streaming_tx_publishes_atomically_and_aborts_cleanly_without_corrupting_worldline() {
+    let path = temp_path("streaming-tx");
+    let salt = [0x92; 64];
+    let (_keys, capsule, dem) = test_material(b"streaming-tx", salt);
+    let header = test_header(salt, capsule);
+    let mut line = WorldLine::create(&path.0, header, dem.duplicate()).unwrap();
+    line.append_segments(&[&b"seed text"[..]]).unwrap();
+
+    // Uncommitted / aborted stream leaves witness count unchanged and line usable.
+    let mut aborted = line.start_streaming_tx().unwrap();
+    aborted.push_segment(b"uncommitted one").unwrap();
+    aborted.push_segment(b"uncommitted two").unwrap();
+    line.abort_streaming_tx(aborted).unwrap();
+    assert_eq!(line.witness_count(), 2);
+    assert_eq!(line.segment_count(), 1);
+    assert!(!line.recovery_info().needs_recovery());
+
+    // Committed stream publishes multiple segments + explicit manifest under ONE witness.
+    let mut tx = line.start_streaming_tx().unwrap();
+    let s1 = tx.push_segment(b"alpha ").unwrap();
+    let s2 = tx.push_segment(b"omega").unwrap();
+    let manifest = LineManifest {
+        slabs: vec![s1, s2],
+        styles: Vec::new(),
+        links: Vec::new(),
+    };
+    let receipt = line.finish_streaming_tx(tx, Some(&manifest)).unwrap();
+    assert_eq!(receipt.witness_sequence, 2);
+    assert_eq!(line.segment_count(), 3);
+    assert_eq!(line.document_manifest(), manifest);
+    assert_eq!(&line.open_segment(1).unwrap()[..], b"alpha ");
+    assert_eq!(&line.open_segment(2).unwrap()[..], b"omega");
+    drop(line);
+
+    let reopened = WorldLine::open(&path.0, dem).unwrap();
+    assert_eq!(reopened.witness_count(), 3);
+    assert_eq!(reopened.document_manifest(), manifest);
+    assert_eq!(reopened.verify().unwrap().segments_verified, 3);
+}

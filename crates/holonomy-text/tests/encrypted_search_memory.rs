@@ -151,6 +151,74 @@ impl SegmentSink for Shared {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+    fn supports_stream_publish(&self) -> bool {
+        true
+    }
+    fn begin_stream_publish(
+        &mut self,
+    ) -> Result<Box<dyn holonomy_text::StreamSegmentWriter + '_>, String> {
+        struct WorldLineWriter {
+            line: Rc<RefCell<WorldLine>>,
+            tx: Option<holonomy_line::StreamingTx>,
+        }
+        impl holonomy_text::StreamSegmentWriter for WorldLineWriter {
+            fn write_chunk(&mut self, plaintext: &[u8]) -> Result<SegmentId, String> {
+                let slab = self
+                    .tx
+                    .as_mut()
+                    .ok_or_else(|| "streaming tx closed".to_owned())?
+                    .push_segment(plaintext)
+                    .map_err(|e| e.to_string())?;
+                Ok(SegmentId::new(slab.segment))
+            }
+            fn finish(
+                mut self: Box<Self>,
+                slabs: &[Slab],
+                styles: &StyleMap,
+            ) -> Result<(), String> {
+                if !styles.is_empty() {
+                    return Err("fixture unexpectedly styled".to_owned());
+                }
+                let tx = self
+                    .tx
+                    .take()
+                    .ok_or_else(|| "streaming tx closed".to_owned())?;
+                let manifest = LineManifest {
+                    slabs: slabs
+                        .iter()
+                        .map(|s| LineSlab {
+                            segment: s.segment().get(),
+                            start: s.start(),
+                            len: s.len(),
+                        })
+                        .collect(),
+                    styles: Vec::new(),
+                    links: Vec::new(),
+                };
+                self.line
+                    .borrow_mut()
+                    .finish_streaming_tx(tx, Some(&manifest))
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+        }
+        impl Drop for WorldLineWriter {
+            fn drop(&mut self) {
+                if let Some(tx) = self.tx.take() {
+                    let _ = self.line.borrow_mut().abort_streaming_tx(tx);
+                }
+            }
+        }
+        let tx = self
+            .line
+            .borrow_mut()
+            .start_streaming_tx()
+            .map_err(|e| e.to_string())?;
+        Ok(Box::new(WorldLineWriter {
+            line: Rc::clone(&self.line),
+            tx: Some(tx),
+        }))
+    }
 }
 
 #[test]
@@ -278,13 +346,6 @@ fn encrypted_30m_word_search_and_replace_heap_measurement() {
         typing.find_all(b"word0", resident.source_mut()),
         Err(holonomy_text::SearchError::MatchLimitExceeded { .. })
     ));
-    assert!(matches!(
-        typing.replace_all(b"word0", b"x", resident.source_mut()),
-        Err(holonomy_text::TypingError::Search(
-            holonomy_text::SearchError::MatchLimitExceeded { .. }
-        ))
-    ));
-    assert!(typing.spine().ptr_eq(&original));
 
     PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
     assert_eq!(
@@ -302,5 +363,19 @@ fn encrypted_30m_word_search_and_replace_heap_measurement() {
     assert_eq!(resident.allocated_bytes(), resident_allocated);
     assert!(typing.undo().unwrap());
     assert!(typing.spine().ptr_eq(&original));
-    println!("HOLONOMY_ENCRYPTED_SEARCH segments={SEGMENTS} bytes={} words={words} matches=5 resident={resident_allocated} find_peak={find_peak} replace_peak={replace_peak} bound={LIMIT}", SEGMENTS * LENGTH);
+
+    PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
+    let dense_replaced = typing
+        .replace_all(b"word0", b"X", resident.source_mut())
+        .unwrap();
+    let dense_replace_peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
+    assert_eq!(dense_replaced as u64, dense.count);
+    println!("HOLONOMY_DENSE_REPLACE matches={dense_replaced} peak_heap_delta={dense_replace_peak} bound={LIMIT}");
+    assert!(
+        dense_replace_peak <= LIMIT,
+        "dense replace peak {dense_replace_peak} exceeds {LIMIT}"
+    );
+    assert!(typing.undo().unwrap());
+    assert!(typing.spine().ptr_eq(&original));
+    println!("HOLONOMY_ENCRYPTED_SEARCH segments={SEGMENTS} bytes={} words={words} matches=5 resident={resident_allocated} find_peak={find_peak} replace_peak={replace_peak} dense_replace_peak={dense_replace_peak} bound={LIMIT}", SEGMENTS * LENGTH);
 }

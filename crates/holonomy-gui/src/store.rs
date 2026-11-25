@@ -34,13 +34,20 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use holonomy_line::{LineError, LineHeader, LineManifest, LineSlab, LineStyleRun, WorldLine};
+use zeroize::Zeroizing;
+
+use holonomy_line::{
+    Bookmark, LineError, LineHeader, LineManifest, LineSlab, LineStyleRun, StreamingTx,
+    WitnessSummary, WorldLine,
+};
 use holonomy_seal::{
     calibrate, confirm_compaction, create_capsule_for, generate_kdf_salt, open_capsule_for,
     KdfParamsRecord, MasterKeys, PassphraseInput, SecretArenas,
 };
 use holonomy_text::{
-    Appended, DocStyle, DocStyleSpan, SegmentId, SegmentSink, SegmentSource, Slab, Spine, StyleMap,
+    find_streaming, visit_streaming, Appended, DocStyle, DocStyleSpan, Draft, OpenSources,
+    SearchError, SearchSummary, SegmentId, SegmentSink, SegmentSource, Slab, Spine, SpineDiffHunk,
+    StreamSegmentWriter, StyleMap,
 };
 
 /// How much text one open leaf holds before the session seals it.
@@ -124,13 +131,13 @@ fn normalize_for_open(passphrase: &[u8]) -> Result<PassphraseInput, StoreError> 
 /// An opened world-line and the geometry it presents to a window.
 #[derive(Clone)]
 pub struct Document {
-    line: Rc<RefCell<Line>>,
+    pub(crate) line: Rc<RefCell<Line>>,
 }
 
-struct Line {
-    path: PathBuf,
+pub(crate) struct Line {
+    pub(crate) path: PathBuf,
     keys: MasterKeys,
-    line: WorldLine,
+    pub(crate) line: WorldLine,
 }
 
 impl Document {
@@ -413,13 +420,267 @@ impl Document {
     pub fn source(&self) -> DocumentSource {
         DocumentSource(self.clone())
     }
+
+    /// Lists every committed witness checkpoint in chronological order (`Block 8`).
+    #[must_use]
+    pub fn witness_history(&self) -> Vec<WitnessSummary> {
+        self.line.borrow().line.witness_history().to_vec()
+    }
+
+    /// Lists every authenticated named bookmark recorded on this document (`Block 8`).
+    #[must_use]
+    pub fn bookmarks(&self) -> Vec<Bookmark> {
+        self.line.borrow().line.bookmarks().to_vec()
+    }
+
+    /// Reconstructs the immutable [`Spine`] active at committed `witness_sequence` without
+    /// decrypting any segment plaintext (`Block 8`, `Law L-2`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Line`] if `witness_sequence` does not exist or the historical manifest
+    /// cannot be authenticated.
+    pub fn spine_at_witness(&self, witness_sequence: u64) -> Result<Spine, StoreError> {
+        let line = self
+            .line
+            .try_borrow()
+            .map_err(|_| StoreError::Line("the document is busy".to_owned()))?;
+        let manifest = line
+            .line
+            .manifest_at_witness(witness_sequence)
+            .map_err(|err| StoreError::Line(err.to_string()))?;
+        Ok(manifest_to_spine(manifest))
+    }
+
+    /// Records a named bookmark anchored to committed `witness_sequence` (`Block 8`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Line`] if the witness does not exist, uncommitted segments are
+    /// pending, or the bookmark name is invalid.
+    pub fn add_bookmark(
+        &self,
+        witness_sequence: u64,
+        timestamp_secs: i64,
+        name: &str,
+    ) -> Result<Bookmark, StoreError> {
+        let mut line = self
+            .line
+            .try_borrow_mut()
+            .map_err(|_| StoreError::Line("the document is busy".to_owned()))?;
+        line.line
+            .add_bookmark(witness_sequence, timestamp_secs, name)
+            .map_err(|err| StoreError::Line(err.to_string()))
+    }
+
+    /// Computes a structural diff between two committed witnesses without decrypting any segment
+    /// plaintext (`Block 8`, `Law L-2`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Line`] if either witness cannot be opened.
+    pub fn diff_witnesses(
+        &self,
+        older_witness: u64,
+        newer_witness: u64,
+    ) -> Result<Vec<SpineDiffHunk>, StoreError> {
+        let older = self.spine_at_witness(older_witness)?;
+        let newer = self.spine_at_witness(newer_witness)?;
+        Ok(older.diff_slabs(&newer))
+    }
+
+    /// Counts matches and locates match `index` in committed `witness_sequence` using bounded
+    /// streaming search without expanding the active resident set (`Block 8`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Line`] if reading the historical witness or searching fails.
+    pub fn find_nth_at_witness(
+        &self,
+        witness_sequence: u64,
+        needle: &str,
+        index: u64,
+    ) -> Result<SearchSummary, StoreError> {
+        let spine = self.spine_at_witness(witness_sequence)?;
+        if needle.is_empty() || spine.is_empty() {
+            return Ok(SearchSummary {
+                count: 0,
+                selected: None,
+            });
+        }
+        let mut source = self.source();
+        let draft = Draft::new();
+        let sources = OpenSources::new();
+        let mut count = 0u64;
+        let mut first = None;
+        let mut selected = None;
+        visit_streaming(
+            &spine,
+            &draft,
+            &sources,
+            &[],
+            needle.as_bytes(),
+            &mut source,
+            |hit| {
+                if first.is_none() {
+                    first = Some(hit);
+                }
+                if count == index {
+                    selected = Some(hit);
+                }
+                count = count.saturating_add(1);
+                true
+            },
+        )
+        .map_err(|err| StoreError::Line(err.to_string()))?;
+        Ok(SearchSummary {
+            count,
+            selected: selected.or(first),
+        })
+    }
+
+    /// Searches every committed witness across the document's history using bounded streaming
+    /// search, returning each witness that contains at least one occurrence of `needle` (`Block 8`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Line`] if `needle` exceeds the scan limit or segment loading fails.
+    pub fn search_history(&self, needle: &str) -> Result<Vec<HistorySearchHit>, StoreError> {
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let witnesses = self.witness_history();
+        let mut hits = Vec::new();
+        let mut source = self.source();
+        let draft = Draft::new();
+        let sources = OpenSources::new();
+        for summary in witnesses {
+            if summary.segment_count == 0 {
+                continue;
+            }
+            let spine = self.spine_at_witness(summary.sequence)?;
+            let mut count = 0u64;
+            let mut first = None;
+            visit_streaming(
+                &spine,
+                &draft,
+                &sources,
+                &[],
+                needle.as_bytes(),
+                &mut source,
+                |hit| {
+                    if first.is_none() {
+                        first = Some(hit);
+                    }
+                    count = count.saturating_add(1);
+                    true
+                },
+            )
+            .map_err(|err| StoreError::Line(err.to_string()))?;
+            if count > 0 {
+                hits.push(HistorySearchHit {
+                    witness_sequence: summary.sequence,
+                    count,
+                    first_offset: first.map(|h| h.start),
+                });
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Reads a UTF-8 excerpt intersecting `[start, end)` from historical `witness_sequence`
+    /// using bounded viewport reads (`Block 8` diff/preview pane), trimming any partial multi-byte
+    /// UTF-8 edges caused by byte slicing instead of failing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Line`] if `witness_sequence` or segments fail authentication, or
+    /// [`StoreError::Refused`] if the interior bytes are not valid UTF-8.
+    pub fn read_witness_excerpt(
+        &self,
+        witness_sequence: u64,
+        start: u64,
+        end: u64,
+    ) -> Result<String, StoreError> {
+        let spine = self.spine_at_witness(witness_sequence)?;
+        let lo = start.min(spine.len());
+        let hi = end.min(spine.len());
+        if lo >= hi {
+            return Ok(String::new());
+        }
+        let line = self.line.borrow();
+        let mut out = Zeroizing::new(Vec::with_capacity((hi - lo) as usize));
+        for span in spine.spans_in(lo, hi) {
+            let slab = span.slab();
+            let plain = line
+                .line
+                .open_segment(slab.segment().get())
+                .map_err(|err| StoreError::Line(err.to_string()))?;
+            out.extend_from_slice(&plain[slab.start() as usize..slab.end() as usize]);
+        }
+        let mut head = 0usize;
+        if lo > 0 {
+            while head < out.len() && head < 3 && (out[head] & 0b1100_0000) == 0b1000_0000 {
+                head += 1;
+            }
+        }
+        let slice = &out[head..];
+        match std::str::from_utf8(slice) {
+            Ok(text) => Ok(text.to_owned()),
+            Err(err) if err.error_len().is_none() => {
+                // Truncated at `hi` in the middle of a trailing multi-byte scalar value.
+                let valid = std::str::from_utf8(&slice[..err.valid_up_to()])
+                    .map_err(|_| StoreError::Refused)?;
+                Ok(valid.to_owned())
+            }
+            Err(_) => Err(StoreError::Refused),
+        }
+    }
+
+    /// Re-exports `search_matching_ranges` bounded at `MAX_COLLECTED_MATCHES` for a witness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Line`] if scanning fails or exceeds collection bounds.
+    pub fn collect_witness_matches(
+        &self,
+        witness_sequence: u64,
+        needle: &[u8],
+    ) -> Result<Vec<holonomy_text::SearchMatch>, StoreError> {
+        let spine = self.spine_at_witness(witness_sequence)?;
+        let mut source = self.source();
+        let draft = Draft::new();
+        let sources = OpenSources::new();
+        find_streaming(&spine, &draft, &sources, &[], needle, &mut source).map_err(
+            |err| match err {
+                SearchError::MatchLimitExceeded { limit } => {
+                    StoreError::Line(format!("exceeded {limit} collected matches"))
+                }
+                other => StoreError::Line(other.to_string()),
+            },
+        )
+    }
+}
+
+/// Summary of historical matches found inside one committed witness (`Block 8`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistorySearchHit {
+    /// Committed witness sequence where `needle` appeared.
+    pub witness_sequence: u64,
+    /// Number of non-overlapping matches in that snapshot.
+    pub count: u64,
+    /// Byte offset of the first match in that snapshot.
+    pub first_offset: Option<u64>,
 }
 
 /// The spine a world-line presents: one [`Slab`] per active [`LineSlab`] plus any persisted
 /// rich-text [`StyleMap`] runs and links, in authenticated document order (AUDIT OQ-29, OQ-30,
 /// Block 7).
 fn spine_of(line: &WorldLine) -> Spine {
-    let manifest = line.document_manifest();
+    manifest_to_spine(line.document_manifest())
+}
+
+fn manifest_to_spine(manifest: LineManifest) -> Spine {
     let slabs: Vec<Slab> = manifest
         .slabs
         .into_iter()
@@ -468,7 +729,7 @@ fn to_line_slabs(slabs: &[Slab]) -> Vec<LineSlab> {
 }
 
 /// Converts resolved [`LineSlab`] spans and a [`StyleMap`] into a [`LineManifest`].
-fn to_line_manifest(slabs: Vec<LineSlab>, styles: &StyleMap) -> LineManifest {
+pub(crate) fn to_line_manifest(slabs: Vec<LineSlab>, styles: &StyleMap) -> LineManifest {
     let mut runs = Vec::with_capacity(styles.runs().len());
     for span in styles.runs() {
         let st = span.style;
@@ -602,6 +863,70 @@ impl SegmentSink for DocumentSink {
             .commit_full_manifest(&desired)
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    fn supports_stream_publish(&self) -> bool {
+        true
+    }
+
+    fn begin_stream_publish(&mut self) -> Result<Box<dyn StreamSegmentWriter + '_>, String> {
+        struct StoreStreamWriter {
+            doc: Document,
+            tx: Option<StreamingTx>,
+        }
+
+        impl StreamSegmentWriter for StoreStreamWriter {
+            fn write_chunk(&mut self, plaintext: &[u8]) -> Result<SegmentId, String> {
+                let slab = self
+                    .tx
+                    .as_mut()
+                    .ok_or_else(|| "streaming tx closed".to_owned())?
+                    .push_segment(plaintext)
+                    .map_err(|error| error.to_string())?;
+                Ok(SegmentId::new(slab.segment))
+            }
+
+            fn finish(
+                mut self: Box<Self>,
+                slabs: &[Slab],
+                styles: &StyleMap,
+            ) -> Result<(), String> {
+                let tx = self
+                    .tx
+                    .take()
+                    .ok_or_else(|| "streaming tx closed".to_owned())?;
+                let manifest = to_line_manifest(to_line_slabs(slabs), styles);
+                self.doc
+                    .line
+                    .borrow_mut()
+                    .line
+                    .finish_streaming_tx(tx, Some(&manifest))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        }
+
+        impl Drop for StoreStreamWriter {
+            fn drop(&mut self) {
+                if let Some(tx) = self.tx.take() {
+                    if let Ok(mut guard) = self.doc.line.try_borrow_mut() {
+                        let _ = guard.line.abort_streaming_tx(tx);
+                    }
+                }
+            }
+        }
+
+        let tx = self
+            .0
+            .line
+            .borrow_mut()
+            .line
+            .start_streaming_tx()
+            .map_err(|error| error.to_string())?;
+        Ok(Box::new(StoreStreamWriter {
+            doc: self.0.clone(),
+            tx: Some(tx),
+        }))
     }
 }
 

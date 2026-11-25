@@ -35,6 +35,7 @@ mod lock;
 mod passphrase;
 mod reaper;
 mod secret;
+pub mod v5;
 
 #[cfg(test)]
 #[global_allocator]
@@ -72,6 +73,11 @@ pub use passphrase::{
 pub use reaper::{
     ArenaSlot, CanaryReport, CanarySet, ReaperGuard, ReaperOutcome, SchedClass, SecretArenas,
     TripReason, Tripwire, WipeStats, MAX_ARENAS,
+};
+pub use v5::{
+    open_v5_streaming, scan_v5_cursors, V5Error, V5OpenReport, V5PadSource, V5Passphrase,
+    V5_CONTAINER_BYTES, V5_PAYLOAD_PLAINTEXT_PER_SLOT, V5_SAVES_BEFORE_DOMAIN_REUSE,
+    V5_ZONE_B_LBA_START,
 };
 
 /// The boundary law, carried in code so it is compiled, not just quoted.

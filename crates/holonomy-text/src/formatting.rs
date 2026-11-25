@@ -1312,6 +1312,10 @@ impl StyleMap {
             &StylePatch::new().with_link_id(Some(id)),
         )
     }
+
+    pub(crate) fn normalize_runs(runs: Vec<DocStyleSpan>, links: Vec<String>) -> Self {
+        Self::normalize(runs, links)
+    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,36 @@ use crate::formatting::{DocStyle, DocStyleSpan, StyleMap, StylePatch, ToolbarSta
 use crate::slab::{Slab, SlabHit, SlabSpan};
 use crate::tree::{self, Node};
 
+/// Structural diff classification between two [`Spine`] trees without reading plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpineDiffKind {
+    /// Bytes were added in `other` that did not appear in `self`.
+    Added,
+    /// Bytes were removed from `self` and do not appear in `other`.
+    Removed,
+    /// Bytes at `old_range` in `self` were replaced by `new_range` in `other`.
+    Replaced,
+}
+
+/// One structural diff hunk between two [`Spine`] revisions (`Block 8`).
+///
+/// Computed purely from [`Slab`] descriptors `(segment, start, len)` and document offsets —
+/// zero plaintext segments are decrypted to compute diffs, keeping history views bounded under
+/// `L-2`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpineDiffHunk {
+    /// Whether this hunk is an addition, deletion, or replacement.
+    pub kind: SpineDiffKind,
+    /// Byte range `(start, end)` in the older spine.
+    pub old_range: (u64, u64),
+    /// Byte range `(start, end)` in the newer spine.
+    pub new_range: (u64, u64),
+    /// Slabs covered in the older spine (`empty` for [`SpineDiffKind::Added`]).
+    pub old_slabs: Vec<Slab>,
+    /// Slabs covered in the newer spine (`empty` for [`SpineDiffKind::Removed`]).
+    pub new_slabs: Vec<Slab>,
+}
+
 /// Errors from structural spine operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpineError {
@@ -385,6 +415,228 @@ impl Spine {
         }
         spans
     }
+
+    /// Merges any adjacent leaves naming contiguous byte ranges of the same segment (`OQ-9`),
+    /// returning `self.clone()` in O(1) when the tree is already maximally coalesced.
+    #[must_use]
+    pub fn coalesce(&self) -> Self {
+        let count = self.slab_count();
+        if count <= 1 {
+            return self.clone();
+        }
+        let mut can_merge = false;
+        let mut prev: Option<Slab> = None;
+        let mut idx = 0u32;
+        while idx < count {
+            if let Some(span) = self.slab_span(idx) {
+                let slab = span.slab();
+                if let Some(p) = prev {
+                    if p.segment() == slab.segment()
+                        && p.end() == slab.start()
+                        && p.len().checked_add(slab.len()).is_some()
+                    {
+                        can_merge = true;
+                        break;
+                    }
+                }
+                prev = Some(slab);
+            }
+            idx += 1;
+        }
+        if !can_merge {
+            return self.clone();
+        }
+        let slabs = self
+            .spans_in(0, self.len())
+            .into_iter()
+            .map(|span| span.slab());
+        Self::from_slabs_and_styles(slabs, self.styles.clone())
+    }
+
+    /// Computes a structural diff between `self` (older) and `other` (newer) purely from slab
+    /// identity and offsets without decrypting any segment plaintext (`Block 8`).
+    #[must_use]
+    pub fn diff_slabs(&self, other: &Self) -> Vec<SpineDiffHunk> {
+        if self.ptr_eq(other) {
+            return Vec::new();
+        }
+        let old_slabs = coalesced_slabs_with_offsets(self);
+        let new_slabs = coalesced_slabs_with_offsets(other);
+
+        // Trim identical prefix and suffix slabs first so localized edits across 100k-slab
+        // documents stay proportional to the changed window.
+        let mut prefix = 0usize;
+        let min_len = old_slabs.len().min(new_slabs.len());
+        while prefix < min_len && old_slabs[prefix].slab == new_slabs[prefix].slab {
+            prefix += 1;
+        }
+        let mut old_end = old_slabs.len();
+        let mut new_end = new_slabs.len();
+        while old_end > prefix
+            && new_end > prefix
+            && old_slabs[old_end - 1].slab == new_slabs[new_end - 1].slab
+        {
+            old_end -= 1;
+            new_end -= 1;
+        }
+
+        let old_mid = &old_slabs[prefix..old_end];
+        let new_mid = &new_slabs[prefix..new_end];
+        if old_mid.is_empty() && new_mid.is_empty() {
+            return Vec::new();
+        }
+
+        // Fast exact LCS when the middle spans fit within a small matrix budget; otherwise emit
+        // one coarse replacement/addition/removal hunk covering the unmatched middle.
+        let ops = if old_mid.len().saturating_mul(new_mid.len()) <= 65_536 {
+            lcs_ops(old_mid, new_mid)
+        } else {
+            vec![DiffOp::Mismatch(0..old_mid.len(), 0..new_mid.len())]
+        };
+
+        let mut hunks = Vec::new();
+        let mut old_anchor = if prefix == 0 {
+            0
+        } else {
+            old_slabs[prefix - 1].offset + u64::from(old_slabs[prefix - 1].slab.len())
+        };
+        let mut new_anchor = if prefix == 0 {
+            0
+        } else {
+            new_slabs[prefix - 1].offset + u64::from(new_slabs[prefix - 1].slab.len())
+        };
+
+        for op in ops {
+            match op {
+                DiffOp::Match(o_idx, n_idx) => {
+                    old_anchor = old_mid[o_idx].offset + u64::from(old_mid[o_idx].slab.len());
+                    new_anchor = new_mid[n_idx].offset + u64::from(new_mid[n_idx].slab.len());
+                }
+                DiffOp::Mismatch(o_range, n_range) => {
+                    let o_slice = &old_mid[o_range];
+                    let n_slice = &new_mid[n_range];
+                    let old_range = if o_slice.is_empty() {
+                        (old_anchor, old_anchor)
+                    } else {
+                        let s = o_slice[0].offset;
+                        let last = &o_slice[o_slice.len() - 1];
+                        let e = last.offset + u64::from(last.slab.len());
+                        old_anchor = e;
+                        (s, e)
+                    };
+                    let new_range = if n_slice.is_empty() {
+                        (new_anchor, new_anchor)
+                    } else {
+                        let s = n_slice[0].offset;
+                        let last = &n_slice[n_slice.len() - 1];
+                        let e = last.offset + u64::from(last.slab.len());
+                        new_anchor = e;
+                        (s, e)
+                    };
+                    let kind = match (o_slice.is_empty(), n_slice.is_empty()) {
+                        (true, false) => SpineDiffKind::Added,
+                        (false, true) => SpineDiffKind::Removed,
+                        _ => SpineDiffKind::Replaced,
+                    };
+                    hunks.push(SpineDiffHunk {
+                        kind,
+                        old_range,
+                        new_range,
+                        old_slabs: o_slice.iter().map(|entry| entry.slab).collect(),
+                        new_slabs: n_slice.iter().map(|entry| entry.slab).collect(),
+                    });
+                }
+            }
+        }
+        hunks
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SlabEntry {
+    offset: u64,
+    slab: Slab,
+}
+
+fn coalesced_slabs_with_offsets(spine: &Spine) -> Vec<SlabEntry> {
+    let count = spine.slab_count();
+    let mut entries: Vec<SlabEntry> = Vec::with_capacity(count as usize);
+    for idx in 0..count {
+        if let Some(span) = spine.slab_span(idx) {
+            let slab = span.slab();
+            if slab.is_empty() {
+                continue;
+            }
+            if let Some(last) = entries.last_mut() {
+                if last.slab.segment() == slab.segment()
+                    && last.slab.end() == slab.start()
+                    && last.slab.len().checked_add(slab.len()).is_some()
+                {
+                    last.slab = Slab::new(
+                        last.slab.segment(),
+                        last.slab.start(),
+                        last.slab.len() + slab.len(),
+                    );
+                    continue;
+                }
+            }
+            entries.push(SlabEntry {
+                offset: span.offset(),
+                slab,
+            });
+        }
+    }
+    entries
+}
+
+enum DiffOp {
+    Match(usize, usize),
+    Mismatch(std::ops::Range<usize>, std::ops::Range<usize>),
+}
+
+fn lcs_ops(old_mid: &[SlabEntry], new_mid: &[SlabEntry]) -> Vec<DiffOp> {
+    let m = old_mid.len();
+    let n = new_mid.len();
+    if m == 0 || n == 0 {
+        return vec![DiffOp::Mismatch(0..m, 0..n)];
+    }
+    let cols = n + 1;
+    let mut dp = vec![0u32; (m + 1) * cols];
+    for i in (0..m).rev() {
+        for j in (0..n).rev() {
+            dp[i * cols + j] = if old_mid[i].slab == new_mid[j].slab {
+                dp[(i + 1) * cols + (j + 1)] + 1
+            } else {
+                dp[(i + 1) * cols + j].max(dp[i * cols + (j + 1)])
+            };
+        }
+    }
+
+    let mut ops = Vec::new();
+    let mut i = 0;
+    let mut j = 0;
+    let mut cur_o = 0;
+    let mut cur_n = 0;
+    while i < m && j < n {
+        if old_mid[i].slab == new_mid[j].slab {
+            if cur_o < i || cur_n < j {
+                ops.push(DiffOp::Mismatch(cur_o..i, cur_n..j));
+            }
+            ops.push(DiffOp::Match(i, j));
+            i += 1;
+            j += 1;
+            cur_o = i;
+            cur_n = j;
+        } else if dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    if cur_o < m || cur_n < n {
+        ops.push(DiffOp::Mismatch(cur_o..m, cur_n..n));
+    }
+    ops
 }
 
 fn slab_span_in(node: &Arc<Node>, index: u32, base: u64) -> Option<SlabSpan> {
@@ -928,6 +1180,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn coalesce_merges_only_contiguous_same_segment_neighbors_and_preserves_styles() {
+        let s0 = SegmentId::new(0);
+        let s1 = SegmentId::new(1);
+        let raw = Spine {
+            root: crate::tree::join(
+                crate::tree::join(
+                    crate::tree::leaf(Slab::new(s0, 0, 5)),
+                    crate::tree::leaf(Slab::new(s0, 5, 6)),
+                ),
+                crate::tree::join(
+                    crate::tree::leaf(Slab::new(s1, 0, 4)),
+                    crate::tree::leaf(Slab::new(s0, 11, 3)),
+                ),
+            ),
+            styles: StyleMap::empty()
+                .apply_patch(18, 2, 9, &StylePatch::new().with_bold(true))
+                .unwrap(),
+        };
+        assert_eq!(raw.slab_count(), 4);
+        let merged = raw.coalesce();
+        assert_eq!(merged.slab_count(), 3);
+        let spans = merged.spans_in(0, merged.len());
+        assert_eq!(spans[0].slab(), Slab::new(s0, 0, 11));
+        assert_eq!(spans[1].slab(), Slab::new(s1, 0, 4));
+        assert_eq!(spans[2].slab(), Slab::new(s0, 11, 3));
+        assert_eq!(merged.style_spans_in(0, 18), raw.style_spans_in(0, 18));
+        assert!(merged.coalesce().ptr_eq(&merged));
+    }
+
+    #[test]
+    fn diff_slabs_reports_added_removed_and_replaced_without_decrypting() {
+        let s0 = SegmentId::new(0);
+        let s1 = SegmentId::new(1);
+        let s2 = SegmentId::new(2);
+        let old = Spine::from_slabs(vec![Slab::new(s0, 0, 10), Slab::new(s1, 0, 8)]);
+        assert!(old.diff_slabs(&old).is_empty());
+
+        let added = Spine::from_slabs(vec![
+            Slab::new(s0, 0, 10),
+            Slab::new(s2, 0, 5),
+            Slab::new(s1, 0, 8),
+        ]);
+        let h_add = old.diff_slabs(&added);
+        assert_eq!(h_add.len(), 1);
+        assert_eq!(h_add[0].kind, SpineDiffKind::Added);
+        assert_eq!(h_add[0].old_range, (10, 10));
+        assert_eq!(h_add[0].new_range, (10, 15));
+        assert_eq!(h_add[0].new_slabs, vec![Slab::new(s2, 0, 5)]);
+
+        let h_rem = added.diff_slabs(&old);
+        assert_eq!(h_rem.len(), 1);
+        assert_eq!(h_rem[0].kind, SpineDiffKind::Removed);
+        assert_eq!(h_rem[0].old_range, (10, 15));
+        assert_eq!(h_rem[0].new_range, (10, 10));
+
+        let replaced = Spine::from_slabs(vec![
+            Slab::new(s0, 0, 10),
+            Slab::new(s2, 0, 4),
+            Slab::new(s1, 0, 8),
+        ]);
+        let h_rep = added.diff_slabs(&replaced);
+        assert_eq!(h_rep.len(), 1);
+        assert_eq!(h_rep[0].kind, SpineDiffKind::Replaced);
+        assert_eq!(h_rep[0].old_slabs, vec![Slab::new(s2, 0, 5)]);
+        assert_eq!(h_rep[0].new_slabs, vec![Slab::new(s2, 0, 4)]);
     }
 
     #[test]

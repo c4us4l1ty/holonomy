@@ -84,7 +84,10 @@ use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
 use crate::formatting::{StylePatch, ToolbarState};
 use crate::residency::{SegmentSource, WipeRegistry};
-use crate::search::{find_streaming, visit_streaming, SearchError, SearchMatch, SearchSummary};
+use crate::search::{
+    find_streaming, stream_replace_chunks, visit_streaming, SearchError, SearchMatch,
+    SearchSummary, StreamReplaceError,
+};
 use crate::slab::{SegmentId, Slab, SlabSpan};
 use crate::source::OpenSources;
 use crate::spine::{Spine, SpineError};
@@ -1024,6 +1027,54 @@ impl<S: SegmentSink> Typing<S> {
         self.seal()
     }
 
+    /// Merges any adjacent leaves naming contiguous byte ranges of the same segment (`OQ-9`)
+    /// without altering document bytes, drafts, or undo history, returning whether any leaves
+    /// merged.
+    pub fn coalesce(&mut self) -> bool {
+        let coalesced = self.spine.coalesce();
+        if !coalesced.ptr_eq(&self.spine) {
+            self.spine = coalesced;
+            self.structure_dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Restores the live document geometry to `next_spine` (for example from a historical witness
+    /// in the world-line) as a single undoable and durably committed transition (`Block 8`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `next_spine` names an unknown/open provisional source, flushing the
+    /// live draft fails, or the sink refuses to commit the restored manifest.
+    pub fn restore_spine(&mut self, next_spine: Spine) -> Result<(), TypingError> {
+        let mut resolved = Vec::new();
+        for span in next_spine.spans_in(0, next_spine.len()) {
+            resolved.push(self.resolve_slab(span.slab())?);
+        }
+        let checkpoint =
+            (self.open.is_some() || self.structure_dirty).then(|| ReplaceCheckpoint::capture(self));
+        if let Err(error) = self.flush() {
+            if let Some(checkpoint) = checkpoint {
+                checkpoint.restore(self);
+            }
+            return Err(error);
+        }
+        if let Err(reason) = self.sink.commit_manifest(&resolved, next_spine.styles()) {
+            if let Some(checkpoint) = checkpoint {
+                checkpoint.restore(self);
+            }
+            return Err(TypingError::Append { reason });
+        }
+        self.undone.clear();
+        self.push_root(self.caret());
+        self.spine = next_spine.coalesce();
+        self.next_at = Some(self.spine.len());
+        self.structure_dirty = false;
+        Ok(())
+    }
+
     /// A session resumed over a document that is already in the world-line.
     ///
     /// `spine` is the geometry the file's segment lengths give; the caret starts at its end, and
@@ -1328,10 +1379,10 @@ impl<S: SegmentSink> Typing<S> {
     /// the entire document as **one** undoable transaction, without widening [`crate::ResidentSet`]
     /// (`L-2`, Block 7 Gate 2).
     ///
-    /// Returns the number of occurrences replaced. Untouched leaves are never read or re-sealed;
-    /// `replacement` is sealed once in `<= 64 KiB` UTF-8 chunks and referenced across all match
-    /// sites by Spine path-copying. If more than [`crate::MAX_COLLECTED_MATCHES`] matches exist,
-    /// the operation refuses before changing the document; dense replacement is not yet supported.
+    /// Returns the number of occurrences replaced. Sparse matches (`<= MAX_COLLECTED_MATCHES`)
+    /// re-use one sealed replacement across Spine path copies; dense matches stream bounded
+    /// 64 KiB output chunks directly to sinks supporting [`SegmentSink::begin_stream_publish`]
+    /// (`OQ-32`) and fail closed with [`SearchError::MatchLimitExceeded`] otherwise.
     pub fn replace_all<R: SegmentSource>(
         &mut self,
         needle: &[u8],
@@ -1351,14 +1402,20 @@ impl<S: SegmentSink> Typing<S> {
         }
         // Search the live draft first: sealing a no-op would unnecessarily alter undo/redo
         // history and write to the world-line. Sealing does not change document byte offsets.
-        let matches = find_streaming(
+        let matches = match find_streaming(
             &self.spine,
             &self.draft,
             &self.sources,
             self.pending(),
             needle,
             source,
-        )?;
+        ) {
+            Ok(matches) => matches,
+            Err(SearchError::MatchLimitExceeded { limit }) => {
+                return self.stream_replace_dense(needle, replacement, source, limit);
+            }
+            Err(error) => return Err(error.into()),
+        };
         if matches.is_empty() {
             return Ok(0);
         }
@@ -1474,6 +1531,91 @@ impl<S: SegmentSink> Typing<S> {
         self.sealed_bytes = self.sealed_bytes.saturating_add(replacement.len() as u64);
         self.structure_dirty = false;
         Ok(matches.len())
+    }
+
+    fn stream_replace_dense<R: SegmentSource>(
+        &mut self,
+        needle: &[u8],
+        replacement: &[u8],
+        source: &mut R,
+        limit: usize,
+    ) -> Result<usize, TypingError> {
+        if !self.sink.supports_stream_publish() {
+            return Err(TypingError::Search(SearchError::MatchLimitExceeded {
+                limit,
+            }));
+        }
+        let checkpoint =
+            (self.open.is_some() || self.structure_dirty).then(|| ReplaceCheckpoint::capture(self));
+        if let Err(error) = self.flush() {
+            if let Some(checkpoint) = checkpoint {
+                checkpoint.restore(self);
+            }
+            return Err(error);
+        }
+
+        let outcome = (|| -> Result<_, TypingError> {
+            let mut writer = self
+                .sink
+                .begin_stream_publish()
+                .map_err(|reason| TypingError::Append { reason })?;
+            let mut slabs = Vec::new();
+            let mut produced_bytes: u64 = 0;
+            let streamed = stream_replace_chunks(
+                &self.spine,
+                &self.sources,
+                needle,
+                replacement,
+                MAX_REPLACE_CHUNK_BYTES,
+                source,
+                |chunk| {
+                    let len = u32::try_from(chunk.len())
+                        .map_err(|_| "streamed replacement chunk exceeds u32".to_owned())?;
+                    let segment = writer.write_chunk(chunk)?;
+                    slabs.push(Slab::new(segment, 0, len));
+                    produced_bytes = produced_bytes
+                        .checked_add(u64::from(len))
+                        .ok_or_else(|| "streamed replacement size overflow".to_owned())?;
+                    Ok(())
+                },
+            )
+            .map_err(|err| match err {
+                StreamReplaceError::Search(s) => TypingError::Search(s),
+                StreamReplaceError::Sink(reason) => TypingError::Append { reason },
+                StreamReplaceError::InvalidUtf8 => TypingError::Text(TextError::InvalidUtf8),
+                StreamReplaceError::OffsetOverflow => TypingError::Append {
+                    reason: "streaming replacement offset overflow".to_owned(),
+                },
+            })?;
+            writer
+                .finish(&slabs, &streamed.styles)
+                .map_err(|reason| TypingError::Append { reason })?;
+            let next_spine = Spine::from_slabs_and_styles(slabs, streamed.styles);
+            Ok((
+                streamed.count,
+                streamed.first_match_start.unwrap_or(0),
+                streamed.final_caret,
+                produced_bytes,
+                next_spine,
+            ))
+        })();
+
+        let (count, first_match_start, final_caret, produced_bytes, next_spine) = match outcome {
+            Ok(values) => values,
+            Err(error) => {
+                if let Some(checkpoint) = checkpoint {
+                    checkpoint.restore(self);
+                }
+                return Err(error);
+            }
+        };
+        self.undone.clear();
+        self.push_root(first_match_start);
+        self.spine = next_spine;
+        self.next_at = Some(final_caret.min(self.spine.len()));
+        self.sealed_bytes = self.sealed_bytes.saturating_add(produced_bytes);
+        self.structure_dirty = false;
+        Ok(count)
     }
 
     /// Seals the open source: append once, rename, correct the leaf's length, drop the draft.
@@ -2900,5 +3042,174 @@ mod tests {
         assert!(typing.pending().is_empty());
         assert!(typing.steps.is_empty());
         assert!(typing.undone.is_empty());
+    }
+
+    #[test]
+    fn dense_streaming_replace_all_crosses_segments_preserves_utf8_styles_and_rolls_back() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Default)]
+        struct SharedStore {
+            segments: Vec<Vec<u8>>,
+            spines: Vec<(Vec<Slab>, crate::StyleMap)>,
+            fail_finish: bool,
+        }
+
+        struct StoreSource(Rc<RefCell<SharedStore>>);
+        impl SegmentSource for StoreSource {
+            fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+                self.0
+                    .borrow()
+                    .segments
+                    .get(segment.get() as usize)
+                    .cloned()
+                    .ok_or_else(|| format!("missing {segment}"))
+            }
+        }
+
+        struct StoreWriter {
+            store: Rc<RefCell<SharedStore>>,
+            staged: Vec<Vec<u8>>,
+            base: u64,
+        }
+        impl crate::StreamSegmentWriter for StoreWriter {
+            fn write_chunk(&mut self, plaintext: &[u8]) -> Result<SegmentId, String> {
+                assert!(core::str::from_utf8(plaintext).is_ok());
+                let id = SegmentId::new(self.base + self.staged.len() as u64);
+                self.staged.push(plaintext.to_vec());
+                Ok(id)
+            }
+            fn finish(
+                self: Box<Self>,
+                slabs: &[Slab],
+                styles: &crate::StyleMap,
+            ) -> Result<(), String> {
+                let mut guard = self.store.borrow_mut();
+                if guard.fail_finish {
+                    return Err("injected finish failure".to_owned());
+                }
+                guard.segments.extend(self.staged);
+                guard.spines.push((slabs.to_vec(), styles.clone()));
+                Ok(())
+            }
+        }
+
+        struct StoreSink(Rc<RefCell<SharedStore>>);
+        impl SegmentSink for StoreSink {
+            fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+                let mut guard = self.0.borrow_mut();
+                let seg = SegmentId::new(guard.segments.len() as u64);
+                guard.segments.push(plaintext.to_vec());
+                Ok(Appended {
+                    segment: seg,
+                    witness_sequence: guard.segments.len() as u64,
+                    segment_root: [0u8; 32],
+                    bytes_written: plaintext.len() as u64,
+                })
+            }
+            fn commit_manifest(
+                &mut self,
+                slabs: &[Slab],
+                styles: &crate::StyleMap,
+            ) -> Result<(), String> {
+                self.0
+                    .borrow_mut()
+                    .spines
+                    .push((slabs.to_vec(), styles.clone()));
+                Ok(())
+            }
+            fn supports_stream_publish(&self) -> bool {
+                true
+            }
+            fn begin_stream_publish(
+                &mut self,
+            ) -> Result<Box<dyn crate::StreamSegmentWriter + '_>, String> {
+                let base = self.0.borrow().segments.len() as u64;
+                Ok(Box::new(StoreWriter {
+                    store: Rc::clone(&self.0),
+                    staged: Vec::new(),
+                    base,
+                }))
+            }
+        }
+
+        let store = Rc::new(RefCell::new(SharedStore::default()));
+        // Build 20,000 occurrences of "x\u{2022}" (~80 KB, > MAX_COLLECTED_MATCHES = 16,384)
+        // split across multiple segments so matches straddle segment boundaries and multi-byte UTF-8.
+        let unit = "x\u{2022}";
+        let doc = unit.repeat(20_000);
+        let half = doc.len() / 2;
+        let split_at = (0..=half).rev().find(|&i| doc.is_char_boundary(i)).unwrap();
+        store
+            .borrow_mut()
+            .segments
+            .push(doc.as_bytes()[..split_at].to_vec());
+        store
+            .borrow_mut()
+            .segments
+            .push(doc.as_bytes()[split_at..].to_vec());
+        let initial_styles = crate::StyleMap::empty()
+            .apply_patch(
+                doc.len() as u64,
+                0,
+                unit.len() as u64 * 10,
+                &StylePatch::new().with_bold(true),
+            )
+            .unwrap()
+            .set_link(
+                doc.len() as u64,
+                0,
+                unit.len() as u64 * 10,
+                Some("https://holonomy.example"),
+            )
+            .unwrap();
+        let initial_spine = Spine::from_slabs_and_styles(
+            vec![
+                Slab::new(SegmentId::new(0), 0, split_at as u32),
+                Slab::new(SegmentId::new(1), 0, (doc.len() - split_at) as u32),
+            ],
+            initial_styles,
+        );
+
+        let mut source = StoreSource(Rc::clone(&store));
+        let mut typing = Typing::resume(StoreSink(Rc::clone(&store)), initial_spine.clone(), 4096);
+
+        // Fault injection during finish preserves the initial spine and commits nothing.
+        store.borrow_mut().fail_finish = true;
+        assert!(typing
+            .replace_all(unit.as_bytes(), "YY\u{2605}".as_bytes(), &mut source)
+            .is_err());
+        assert!(typing.spine().ptr_eq(&initial_spine));
+        assert_eq!(store.borrow().segments.len(), 2);
+
+        // Real dense streaming replacement across > 16,384 matches.
+        store.borrow_mut().fail_finish = false;
+        let replaced = typing
+            .replace_all(unit.as_bytes(), "YY\u{2605}".as_bytes(), &mut source)
+            .unwrap();
+        assert_eq!(replaced, 20_000);
+        let expected_unit = "YY\u{2605}";
+        let expected = expected_unit.repeat(20_000);
+        assert_eq!(typing.document_len(), expected.len() as u64);
+
+        let mut reconstructed = Vec::new();
+        for span in typing.spine().spans_in(0, typing.spine().len()) {
+            let seg = source.load(span.slab().segment()).unwrap();
+            reconstructed
+                .extend_from_slice(&seg[span.slab().start() as usize..span.slab().end() as usize]);
+        }
+        assert_eq!(reconstructed, expected.as_bytes());
+        assert!(typing.spine().style_at(0).bold);
+        assert_eq!(
+            typing.spine().styles().links(),
+            &["https://holonomy.example".to_owned()]
+        );
+
+        // Coalesce + restore_spine roundtrip + single-step undo.
+        assert!(typing.undo().unwrap());
+        assert!(typing.spine().ptr_eq(&initial_spine));
+        typing.restore_spine(initial_spine.clone()).unwrap();
+        assert!(typing.spine().ptr_eq(&initial_spine));
     }
 }
