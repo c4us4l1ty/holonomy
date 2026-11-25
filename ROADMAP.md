@@ -390,16 +390,17 @@ v3 died bolting a Wordcraft-shaped ribbon onto split geometry. v6 puts the toolb
 5's single geometry and the Block 1 UI spec — same visual language, none of the split-brain. It
 sits above the quiet-md page Block 6 installs, in the same window, in the same run tree.
 
-**Draft status (2026-11-22):** implementation is in progress; none of the gates below is claimed.
-A single-commit replace-all path and a cooperative reaper are under test (AUDIT D-82, D-84).
-Replacement restores a checkpoint of live edit history if a later commit fails; the preliminary
-flush may still have been durable, and an uncertain I/O failure requires reopening. Checkpoint
-memory and failure recovery need further verification. The reaper waits for the editor and does
-not guarantee L-7 latency or complete wipe coverage. A sparse-match
-search and replace on a real encrypted 30 M-word world-line measured less than 4 MiB of incremental
-live heap in CI (AUDIT D-83). Dense find is being measured separately; collecting and replace-all
-currently refuse over 16,384 matches (D-85). The full dense-replacement and total-memory gates remain
-open; the implementation plan is in `docs/BOUNDED_SEARCH_AND_WIPE.md`.
+**Draft status (2026-11-25, AUDIT D-94):** `StyleMap` spine formatting, ribbon controls
+(`holonomy-gui/src/canvas.rs`), streaming search, single-commit sparse replace-all, and dense
+streaming replace-all (> 16,384 matches via `WorldLine::StreamingTx` when supported by the sink)
+are implemented and tested. Replacement restores a checkpoint of live edit history if a later commit
+fails; the preliminary flush may still have been durable, and an uncertain I/O failure requires
+reopening. Both sparse and dense 30 M-word encrypted replace-all measured under 4 MiB of
+incremental live heap in CI run `45566921069` on `a047181` (`find_peak=1176232`,
+`replace_peak=1783625`, `dense_replace_peak=1832689` across `30,013,649` dense matches,
+`bound=4194304`), while `holonomy-gui/tests/persist.rs` verifies full dense-replacement + undo
+persistence across reopen. Full Block 7 visual GPUI/desktop acceptance across all OSes and total-RSS
+bounds under arbitrary allocator stress remain open.
 
 **Deliverables**
 - Toolbar per spec: font family/size, bold/italic/underline/strike, headings 1–3, alignment,
@@ -423,6 +424,13 @@ open; the implementation plan is in `docs/BOUNDED_SEARCH_AND_WIPE.md`.
 *Purpose: user-facing history — sixty years, navigable.*
 
 The world-line already holds everything; this block gives it a face.
+
+**Draft status (2026-11-25, AUDIT D-94):** Core persistence and history APIs are implemented and
+tested (`RECORD_BOOKMARK`, `Bookmark`, `WitnessSummary`, `WorldLine::{witness_history, bookmarks,
+add_bookmark, open_manifest_at, diff_witnesses}`, and `Editor::restore_spine`), with end-to-end
+persistence verified in `holonomy-line` and `holonomy-gui/tests/persist.rs`. Interactive 60-year
+timeline scrubbing in the desktop UI and a simulated-decades residency benchmark remain open for the
+gates below.
 
 **Deliverables**
 - Timeline UI: scrub a human timeline (day/month/year), watch the document state at that
@@ -498,6 +506,13 @@ v5's 45 ms wipe-budget overshoot disappears by construction.
 
 ## Block 10 — The Horizon
 *Purpose: v6.0.0 — the release gate, the docs, the promise kept.*
+
+**Draft status (2026-11-25, AUDIT D-94):** Streaming `.txt`/`.md` import, explicit-disclosure
+plaintext export (`holonomy-gui::transfer`, `holonomy import`, `holonomy export`), and one-way
+v5.1.0 `.wf5 → .wavefunction` migration (`holonomy_seal::v5`, `holonomy migrate-v5`) are
+implemented and verified (`crates/holonomy-gui/tests/transfer_migrate.rs`). Reference-hardware
+three-OS gate certification, migration prose/whitepaper deliverables, and the multi-year
+self-hosting/fresh-user drill remain open for the gates below.
 
 **Deliverables**
 - Full VISION budget certification on reference hardware (published numbers, repro script).

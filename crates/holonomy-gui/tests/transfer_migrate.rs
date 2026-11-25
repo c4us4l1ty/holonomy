@@ -2,8 +2,9 @@
 //! and one-way v5.1.0 -> v6 `.wavefunction` container migration.
 
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use holonomy_gui::store::{test_params, Document, CAPACITY};
@@ -249,4 +250,112 @@ fn migrate_v5_container_with_multibyte_slot_seam_and_corruption_cleanup() {
     let _ = fs::remove_file(&v5_path);
     let _ = fs::remove_file(&v5_non_utf8);
     let _ = fs::remove_file(&v6_path);
+}
+
+fn run_holonomy_with_stdin(args: &[&str], stdin_data: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_holonomy"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawns holonomy binary");
+    if !stdin_data.is_empty() {
+        child
+            .stdin
+            .as_mut()
+            .expect("piped stdin")
+            .write_all(stdin_data.as_bytes())
+            .expect("writes passphrase");
+    }
+    child.wait_with_output().expect("waits for holonomy")
+}
+
+#[test]
+fn cli_import_verify_and_export_subcommands_round_trip() {
+    let src_md = temp_file("cli-src.md");
+    let wf_path = temp_file("cli-doc.wf");
+    let out_md = temp_file("cli-out.md");
+    let md_body = "# CLI Heading\n\nBody with **bold** and `mono`.\n";
+    fs::write(&src_md, md_body).unwrap();
+
+    let help = run_holonomy_with_stdin(&["--help"], "");
+    assert!(help.status.success());
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(help_text.contains("import"));
+    assert!(help_text.contains("export"));
+    assert!(help_text.contains("migrate-v5"));
+    assert!(help_text.contains("gui"));
+
+    let pass_line = "cli-roundtrip-passphrase\n";
+    let import_out = run_holonomy_with_stdin(
+        &[
+            "import",
+            "--format",
+            "md",
+            src_md.to_str().unwrap(),
+            wf_path.to_str().unwrap(),
+        ],
+        pass_line,
+    );
+    assert!(
+        import_out.status.success(),
+        "import stderr: {}",
+        String::from_utf8_lossy(&import_out.stderr)
+    );
+    assert!(wf_path.exists());
+
+    let verify_out = run_holonomy_with_stdin(&["verify", wf_path.to_str().unwrap()], pass_line);
+    assert!(verify_out.status.success());
+    let verify_stdout = String::from_utf8_lossy(&verify_out.stdout);
+    assert!(verify_stdout.contains("verified"));
+
+    let export_out = run_holonomy_with_stdin(
+        &[
+            "export",
+            "--format",
+            "md",
+            wf_path.to_str().unwrap(),
+            out_md.to_str().unwrap(),
+        ],
+        pass_line,
+    );
+    assert!(
+        export_out.status.success(),
+        "export stderr: {}",
+        String::from_utf8_lossy(&export_out.stderr)
+    );
+    let export_stdout = String::from_utf8_lossy(&export_out.stdout);
+    assert!(export_stdout.contains(PLAINTEXT_EGRESS_DISCLOSURE));
+    assert_eq!(fs::read_to_string(&out_md).unwrap(), md_body);
+
+    // Refuses overwrite unless `--force` is given.
+    let refuse = run_holonomy_with_stdin(
+        &[
+            "export",
+            "--format",
+            "md",
+            wf_path.to_str().unwrap(),
+            out_md.to_str().unwrap(),
+        ],
+        pass_line,
+    );
+    assert!(!refuse.status.success());
+
+    let forced = run_holonomy_with_stdin(
+        &[
+            "export",
+            "--force",
+            "--format",
+            "md",
+            wf_path.to_str().unwrap(),
+            out_md.to_str().unwrap(),
+        ],
+        pass_line,
+    );
+    assert!(forced.status.success());
+
+    let _ = fs::remove_file(&src_md);
+    let _ = fs::remove_file(&wf_path);
+    let _ = fs::remove_file(&out_md);
 }

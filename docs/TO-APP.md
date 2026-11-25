@@ -153,14 +153,16 @@ surface; arrows move a caret and keep the column; shift selects and the next key
 are the loop's own; an unchanged window does not repaint. Counts asserted and printed as
 `HOLONOMY_WINDOW*`.
 
-**M4b-ii, blocked in this environment: the pixels.** `ROADMAP.md` names GPUI, and GPUI is what the
-real window will be drawn with. It cannot be compiled where this was written: the workspace lockfile
-is committed and CI builds `--locked`, so a new dependency needs registry access to resolve and
-checksum ~200 transitive crates, and this environment has none — `Cargo.lock` cannot be regenerated
-here at all. The crate is therefore backend-free by construction: a GPUI adapter is one
-implementation of `Surface` plus an event loop that turns platform keys into `Key` and platform
-resize into `App::resize`. That is a small file, and it is the first task for a machine that can
-fetch crates. Recorded rather than faked.
+**M4b-ii — pixel window & GPUI status (`2026-11-25` update, AUDIT D-94):** GPUI itself remains
+unbuilt in this offline `--locked` tree (adding ~200 transitive crates requires crates.io resolution
+and `Cargo.lock` regeneration). Without adding any external crate, `crates/holonomy-eye/src/raster.rs`
+and `crates/holonomy-gui/src/{x11.rs,canvas.rs}` now provide a pure-Rust/`libc` OpenType
+`loca`/`glyf` rasterizer (`Inter-Regular`, `Inter-Bold`, `Inter-Italic`, `JetBrainsMono-Regular`),
+`PixelSurface` rendering `Frame::picture()` directly (`L-8` pointer round-trips pinned across zooms
+and DPIs in `canvas::tests`), and a pure-`libc` X11 desktop window (`holonomy gui <doc>` or
+`holonomy-gui`, keeping PTY `holonomy <doc>` as the default CLI path). Cross-platform GPUI
+(`macOS`/`Windows`/Wayland), `GSUB`/`GPOS` shaping (`OQ-24`), and live X-server screenshot tests
+remain open.
 
 **M4b-i, done: the terminal window.** The window this environment *can* build. `holonomy-gui`
 gains `term.rs` — a `CellShaper` whose unit is one grid cell (so the Eye's geometry and the screen are
