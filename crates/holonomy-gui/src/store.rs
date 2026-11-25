@@ -34,6 +34,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use zeroize::Zeroizing;
+
 use holonomy_line::{
     Bookmark, LineError, LineHeader, LineManifest, LineSlab, LineStyleRun, StreamingTx,
     WitnessSummary, WorldLine,
@@ -586,12 +588,14 @@ impl Document {
         Ok(hits)
     }
 
-    /// Reads an arbitrary range `[start, end)` from historical `witness_sequence` using bounded
-    /// viewport reads (`Block 8` diff/preview pane).
+    /// Reads a UTF-8 excerpt intersecting `[start, end)` from historical `witness_sequence`
+    /// using bounded viewport reads (`Block 8` diff/preview pane), trimming any partial multi-byte
+    /// UTF-8 edges caused by byte slicing instead of failing.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Line`] if `witness_sequence` or segments fail authentication.
+    /// Returns [`StoreError::Line`] if `witness_sequence` or segments fail authentication, or
+    /// [`StoreError::Refused`] if the interior bytes are not valid UTF-8.
     pub fn read_witness_excerpt(
         &self,
         witness_sequence: u64,
@@ -605,7 +609,7 @@ impl Document {
             return Ok(String::new());
         }
         let line = self.line.borrow();
-        let mut out = Vec::with_capacity((hi - lo) as usize);
+        let mut out = Zeroizing::new(Vec::with_capacity((hi - lo) as usize));
         for span in spine.spans_in(lo, hi) {
             let slab = span.slab();
             let plain = line
@@ -614,7 +618,23 @@ impl Document {
                 .map_err(|err| StoreError::Line(err.to_string()))?;
             out.extend_from_slice(&plain[slab.start() as usize..slab.end() as usize]);
         }
-        String::from_utf8(out).map_err(|_| StoreError::Refused)
+        let mut head = 0usize;
+        if lo > 0 {
+            while head < out.len() && head < 3 && (out[head] & 0b1100_0000) == 0b1000_0000 {
+                head += 1;
+            }
+        }
+        let slice = &out[head..];
+        match std::str::from_utf8(slice) {
+            Ok(text) => Ok(text.to_owned()),
+            Err(err) if err.error_len().is_none() => {
+                // Truncated at `hi` in the middle of a trailing multi-byte scalar value.
+                let valid = std::str::from_utf8(&slice[..err.valid_up_to()])
+                    .map_err(|_| StoreError::Refused)?;
+                Ok(valid.to_owned())
+            }
+            Err(_) => Err(StoreError::Refused),
+        }
     }
 
     /// Re-exports `search_matching_ranges` bounded at `MAX_COLLECTED_MATCHES` for a witness.

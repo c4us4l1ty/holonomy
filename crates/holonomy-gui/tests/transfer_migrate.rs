@@ -2,7 +2,7 @@
 //! and one-way v5.1.0 -> v6 `.wavefunction` container migration.
 
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::{BufReader, Cursor, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -359,3 +359,41 @@ fn cli_import_verify_and_export_subcommands_round_trip() {
     let _ = fs::remove_file(&wf_path);
     let _ = fs::remove_file(&out_md);
 }
+
+#[test]
+fn streaming_markdown_line_boundary_preserves_multibyte_utf8_and_heading_toggle() {
+    let dest = temp_file("md-long-utf8.wf");
+    let pass = PassphraseInput::new("utf8-boundary-pass").unwrap();
+    // Force a 4-byte emoji to straddle the exact 65,536-byte line cap while reading via tiny 37-byte chunks.
+    let mut long_md = String::from("# Heading\n");
+    long_md.extend(std::iter::repeat_n('x', 65_534));
+    long_md.push('🦀');
+    long_md.push_str("-tail\n");
+
+    let reader = BufReader::with_capacity(37, Cursor::new(long_md.as_bytes()));
+    let (doc, rep) = import_from_reader(
+        reader,
+        &dest,
+        &pass,
+        test_params(),
+        TransferFormat::Markdown,
+    )
+    .expect("long markdown line splitting across buffer refills and 64 KiB boundary succeeds");
+    assert!(rep.plaintext_bytes > 65_540);
+
+    let spine = doc.spine().unwrap();
+    let head_style = spine.styles().style_at(0);
+    assert_eq!(head_style.heading, Heading::H1);
+    // Heading must inherit weight/scale via effective_* helpers instead of locking bold/size_milli overrides.
+    assert!(!head_style.bold);
+    assert_eq!(head_style.size_milli, 1_000);
+    assert!(head_style.effective_bold());
+    assert_eq!(head_style.effective_size_milli(), Heading::H1.default_size_milli());
+
+    let mut exported = Vec::new();
+    export_to_writer(&doc, &mut exported, "<mem>", TransferFormat::Markdown).unwrap();
+    assert!(String::from_utf8(exported).unwrap().contains("🦀-tail"));
+
+    let _ = fs::remove_file(&dest);
+}
+

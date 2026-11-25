@@ -646,3 +646,23 @@ fn dense_streaming_replace_all_over_real_document_persists_and_undoes() {
     assert_eq!(String::from_utf8(all_bytes(&reopened)).unwrap(), payload);
     assert_eq!(open_window(&reopened).document_len(), payload.len() as u64);
 }
+
+#[test]
+fn witness_excerpt_trims_split_multibyte_utf8_boundaries() {
+    let path = temp_path("excerpt-utf8");
+    let document = create(&path.0);
+    let mut typing = Typing::new(document.sink(), store::CAPACITY);
+    let prefix = "a".repeat(318);
+    let body = format!("{prefix}🦀tail");
+    typing.insert(body.as_bytes()).unwrap();
+    typing.flush().unwrap();
+
+    // End at byte 320 splits the 4-byte emoji at [318..322); excerpt must trim cleanly.
+    let head = document.read_witness_excerpt(1, 0, 320).unwrap();
+    assert_eq!(head, prefix);
+
+    // Start inside the 4-byte emoji at 319 and end inside it at 324 -> trims leading continuation bytes.
+    let mid = document.read_witness_excerpt(1, 319, 326).unwrap();
+    assert_eq!(mid, "tail");
+}
+

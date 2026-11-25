@@ -446,29 +446,30 @@ fn read_bounded_line<R: BufRead>(
         }
         let room = MAX_STREAM_LINE_BYTES.saturating_sub(line_buf.len());
         if room == 0 {
-            return Ok(true);
+            break;
         }
         let take = avail.len().min(room);
-        // Avoid splitting a multi-byte UTF-8 sequence when clipping an extra-long line.
-        let safe_take = if take == avail.len() {
-            take
-        } else {
-            let mut safe = take;
-            while safe > 0 && (avail[safe] & 0b1100_0000) == 0b1000_0000 {
-                safe -= 1;
-            }
-            if safe == 0 {
-                take
-            } else {
-                safe
-            }
-        };
-        line_buf.extend_from_slice(&avail[..safe_take]);
-        reader.consume(safe_take);
+        line_buf.extend_from_slice(&avail[..take]);
+        reader.consume(take);
         if line_buf.len() >= MAX_STREAM_LINE_BYTES {
-            return Ok(true);
+            break;
         }
     }
+    // If capping at `MAX_STREAM_LINE_BYTES` stopped inside a multi-byte UTF-8 character, consume
+    // the remaining continuation bytes (at most 3) so valid long lines never split mid-codepoint.
+    if let Err(err) = std::str::from_utf8(line_buf) {
+        if err.error_len().is_none() {
+            for _ in 0..3 {
+                let avail = reader.fill_buf()?;
+                if avail.is_empty() || (avail[0] & 0b1100_0000) != 0b1000_0000 {
+                    break;
+                }
+                line_buf.push(avail[0]);
+                reader.consume(1);
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn parse_ordered_list_prefix(s: &str) -> Option<(u32, usize)> {
@@ -516,7 +517,7 @@ fn stream_markdown_inline(
     acc: &mut StreamChunkAccumulator,
     tx: &mut holonomy_line::StreamingTx,
 ) -> Result<(), TransferError> {
-    let mut plain_run = String::new();
+    let mut plain_run = Zeroizing::new(String::new());
     let mut i = 0usize;
     while i < input.len() {
         let rest = &input[i..];
@@ -694,18 +695,12 @@ fn stream_import_markdown<R: BufRead>(
 
             if let Some(h) = rest.strip_prefix("### ") {
                 style.heading = Heading::H3;
-                style.size_milli = Heading::H3.default_size_milli();
-                style.bold = Heading::H3.is_bold_by_default();
                 rest = h;
             } else if let Some(h) = rest.strip_prefix("## ") {
                 style.heading = Heading::H2;
-                style.size_milli = Heading::H2.default_size_milli();
-                style.bold = Heading::H2.is_bold_by_default();
                 rest = h;
             } else if let Some(h) = rest.strip_prefix("# ") {
                 style.heading = Heading::H1;
-                style.size_milli = Heading::H1.default_size_milli();
-                style.bold = Heading::H1.is_bold_by_default();
                 rest = h;
             } else if let Some(item) = rest.strip_prefix("- ").or_else(|| rest.strip_prefix("* ")) {
                 style.list = ListKind::Bullet { depth: 1 };
@@ -972,7 +967,9 @@ fn export_markdown_streaming<W: Write>(
             cursor = span.end;
         }
         if cursor < line_end {
-            let tail = &text[(cursor - line_start) as usize..];
+            let tail = text.get((cursor - line_start) as usize..).ok_or_else(|| {
+                TransferError::InvalidUtf8("style span tail crosses UTF-8 boundary".to_owned())
+            })?;
             writer.write_all(tail.as_bytes())?;
             *written += tail.len() as u64;
         }

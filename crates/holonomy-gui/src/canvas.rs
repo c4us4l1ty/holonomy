@@ -1818,7 +1818,15 @@ pub fn run_x11_desktop(
             pending_paint = false;
         }
 
-        let events = x11.poll_events(100)?;
+        let poll_ms = deadman_timeout.map_or(100, |d| {
+            i32::try_from(d.as_millis() / 2)
+                .unwrap_or(100)
+                .clamp(10, 100)
+        });
+        let events = x11.poll_events(poll_ms)?;
+        if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            return Ok(finish_gui_wipe(&mut app, &document, &arenas, reaper));
+        }
         if events.is_empty() {
             // Autosave after 1.5s typing pause (`D-64`, matches TUI loop).
             if app.has_pending()
@@ -1840,6 +1848,9 @@ pub fn run_x11_desktop(
             match ev {
                 DesktopEvent::CloseRequested => {
                     quit = true;
+                }
+                DesktopEvent::FocusOut => {
+                    x11.clear_clipboard();
                 }
                 DesktopEvent::Expose => {
                     pending_paint = true;
@@ -1996,7 +2007,7 @@ pub fn run_x11_desktop(
                                 pending_paint = true;
                                 continue;
                             }
-                            Key::Character('f') => {
+                            Key::Character('f') if history_drawer.is_none() => {
                                 find_bar = Some(FindState::Find {
                                     needle: String::new(),
                                     next_idx: 0,
@@ -2015,7 +2026,19 @@ pub fn run_x11_desktop(
                                 pending_paint = true;
                                 continue;
                             }
-                            Key::Character('v') => {
+                            Key::Character('x') if history_drawer.is_none() => {
+                                if let Ok(Some(text)) =
+                                    app.editor().copy_selection(crate::x11::MAX_CLIPBOARD_BYTES)
+                                {
+                                    let z = Zeroizing::new(text);
+                                    let _ = x11.set_clipboard(z.as_bytes());
+                                    status_msg = format!("cut {} bytes", z.len());
+                                    let _ = app.press(Key::Delete, Modifiers::none());
+                                }
+                                pending_paint = true;
+                                continue;
+                            }
+                            Key::Character('v') if history_drawer.is_none() => {
                                 let _ = x11.request_clipboard();
                                 continue;
                             }
@@ -2514,5 +2537,24 @@ mod tests {
             "doc.wavefunction",
             facts.resident_line().as_str(),
         );
+    }
+
+    #[test]
+    fn selection_cut_copies_and_removes_selected_range() {
+        let (_tmp, doc) = temp_doc("cut");
+        let mut app = open_gui_app(&doc, View::IDENTITY, 1_120, 760);
+        for ch in "alpha beta".chars() {
+            app.press(Key::Character(ch), Modifiers::none())
+                .expect("type");
+        }
+        app.editor().select_range(0, 6).expect("select 'alpha '");
+        let cut = app
+            .editor()
+            .copy_selection(crate::x11::MAX_CLIPBOARD_BYTES)
+            .expect("copy")
+            .expect("selection non-empty");
+        assert_eq!(cut, "alpha ");
+        app.press(Key::Delete, Modifiers::none()).expect("delete");
+        assert_eq!(app.frame_text().expect("frame"), "beta");
     }
 }

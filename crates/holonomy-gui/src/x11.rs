@@ -106,6 +106,10 @@ pub mod event_code {
     pub const SELECTION_NOTIFY: u8 = 31;
     /// ClientMessage.
     pub const CLIENT_MESSAGE: u8 = 33;
+    /// FocusIn.
+    pub const FOCUS_IN: u8 = 9;
+    /// FocusOut.
+    pub const FOCUS_OUT: u8 = 10;
     /// SendEvent bit on packet byte 0.
     pub const SEND_EVENT_FLAG: u8 = 0x80;
 }
@@ -124,6 +128,8 @@ pub mod mask {
     pub const EXPOSURE: u32 = 0x0000_8000;
     /// StructureNotifyMask.
     pub const STRUCTURE_NOTIFY: u32 = 0x0002_0000;
+    /// FocusChangeMask.
+    pub const FOCUS_CHANGE: u32 = 0x0020_0000;
 }
 
 mod cw {
@@ -214,11 +220,16 @@ pub fn select_xauth_cookie(xauth_bytes: &[u8], display: u32) -> Result<Vec<u8>, 
     let pick = records
         .iter()
         .filter(|r| r.name == COOKIE_NAME)
-        .find(|r| r.family == FAMILY_LOCAL && r.number.is_empty())
+        .find(|r| r.family == FAMILY_LOCAL && r.number == wanted)
         .or_else(|| {
             records
                 .iter()
                 .find(|r| r.name == COOKIE_NAME && r.number == wanted)
+        })
+        .or_else(|| {
+            records
+                .iter()
+                .find(|r| r.name == COOKIE_NAME && r.family == FAMILY_LOCAL && r.number.is_empty())
         })
         .or_else(|| {
             records
@@ -239,13 +250,13 @@ pub fn select_xauth_cookie(xauth_bytes: &[u8], display: u32) -> Result<Vec<u8>, 
     Ok(pick.data.clone())
 }
 
-fn default_xauthority_path() -> Option<PathBuf> {
+fn default_xauthority_path() -> Option<(PathBuf, bool)> {
     if let Some(p) = std::env::var_os("XAUTHORITY") {
         if !p.is_empty() {
-            return Some(PathBuf::from(p));
+            return Some((PathBuf::from(p), true));
         }
     }
-    std::env::var_os("HOME").map(|h| Path::new(&h).join(".Xauthority"))
+    std::env::var_os("HOME").map(|h| (Path::new(&h).join(".Xauthority"), false))
 }
 
 /// Little-endian X11 request encoder.
@@ -487,6 +498,10 @@ pub enum WireEvent {
         /// Property holding converted data (`0` if conversion failed).
         property: u32,
     },
+    /// Window gained keyboard focus.
+    FocusIn,
+    /// Window lost keyboard focus.
+    FocusOut,
     /// Any unhandled X11 event.
     Other(u8),
 }
@@ -651,6 +666,8 @@ impl WireEvent {
                     property,
                 }
             }
+            event_code::FOCUS_IN => Self::FocusIn,
+            event_code::FOCUS_OUT => Self::FocusOut,
             other => Self::Other(other),
         }
     }
@@ -672,6 +689,7 @@ pub fn keysym_to_key(keysym: u32, state: u16) -> Option<(Key, Modifiers)> {
         0xff09 | 0xfe20 => Key::Tab,
         0xff0d | 0xff8d => Key::Enter,
         0xff1b => Key::Escape,
+        0xff80 => Key::Character(' '),
         0xff50 | 0xff95 => Key::Home,
         0xff51 | 0xff96 => Key::Left,
         0xff52 | 0xff97 => Key::Up,
@@ -681,6 +699,14 @@ pub fn keysym_to_key(keysym: u32, state: u16) -> Option<(Key, Modifiers)> {
         0xff56 | 0xff9b => Key::PageDown,
         0xff57 | 0xff9c => Key::End,
         0xffff | 0xff9f => Key::Delete,
+        0xffaa => Key::Character('*'),
+        0xffab => Key::Character('+'),
+        0xffac => Key::Character(','),
+        0xffad => Key::Character('-'),
+        0xffae => Key::Character('.'),
+        0xffaf => Key::Character('/'),
+        0xffb0..=0xffb9 => Key::Character(char::from(b'0' + (keysym - 0xffb0) as u8)),
+        0xffbd => Key::Character('='),
         0x0020..=0x007e | 0x00a0..=0x00ff => {
             let mut ch = char::from_u32(keysym)?;
             if control {
@@ -786,6 +812,8 @@ pub enum DesktopEvent {
     Expose,
     /// Window manager asked to close (`WM_DELETE_WINDOW`).
     CloseRequested,
+    /// Window lost keyboard focus.
+    FocusOut,
     /// Clipboard UTF-8 contents arrived in response to `request_clipboard`.
     ClipboardPasted(Zeroizing<Vec<u8>>),
 }
@@ -928,12 +956,15 @@ impl X11Window {
         stream.set_read_timeout(Some(SETUP_TIMEOUT))?;
         stream.set_write_timeout(Some(SETUP_TIMEOUT))?;
 
-        let cookie = default_xauthority_path()
-            .map(|p| std::fs::read(&p).map_err(|e| X11Error::Auth(format!("{}: {e}", p.display()))))
-            .transpose()?
-            .map(|bytes| select_xauth_cookie(&bytes, number))
-            .transpose()?
-            .unwrap_or_default();
+        let cookie = if let Some((path, explicit)) = default_xauthority_path() {
+            match std::fs::read(&path) {
+                Ok(bytes) => select_xauth_cookie(&bytes, number)?,
+                Err(e) if !explicit && e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => return Err(X11Error::Auth(format!("{}: {e}", path.display()))),
+            }
+        } else {
+            Vec::new()
+        };
 
         let mut init = Vec::with_capacity(32 + cookie.len());
         init.extend_from_slice(&[0x6C, 0]);
@@ -1027,7 +1058,8 @@ impl X11Window {
             | mask::BUTTON_RELEASE
             | mask::POINTER_MOTION
             | mask::EXPOSURE
-            | mask::STRUCTURE_NOTIFY;
+            | mask::STRUCTURE_NOTIFY
+            | mask::FOCUS_CHANGE;
         let create = Req::new(op::CREATE_WINDOW)
             .second_byte(conn.setup.root_depth)
             .u32(win)
@@ -1178,6 +1210,21 @@ impl X11Window {
         Ok(())
     }
 
+    /// Scrubs any locally owned clipboard secret and relinquishes X11 `CLIPBOARD` ownership.
+    pub fn clear_clipboard(&mut self) {
+        let had_data = !self.clipboard_owned.is_empty();
+        self.clipboard_owned.zeroize();
+        self.clipboard_owned.clear();
+        if had_data {
+            let _ = self.send_req(
+                Req::new(op::SET_SELECTION_OWNER)
+                    .u32(0) // None
+                    .u32(self.clipboard_atom)
+                    .u32(0), // CurrentTime
+            );
+        }
+    }
+
     /// Waits up to `timeout_ms` for server events, drains available packets non-blockingly, and
     /// returns coalesced high-level [`DesktopEvent`] items.
     ///
@@ -1218,7 +1265,14 @@ impl X11Window {
                         out.push(DesktopEvent::Key { key, modifiers });
                     }
                 }
-                WireEvent::KeyRelease { .. } | WireEvent::MapNotify | WireEvent::Other(_) => {}
+                WireEvent::KeyRelease { .. }
+                | WireEvent::MapNotify
+                | WireEvent::FocusIn
+                | WireEvent::Other(_) => {}
+                WireEvent::FocusOut => {
+                    self.left_button_down = false;
+                    out.push(DesktopEvent::FocusOut);
+                }
                 WireEvent::ButtonPress {
                     button,
                     x,
@@ -1340,7 +1394,7 @@ impl X11Window {
                 bytes.len()
             )));
         }
-        self.stream.write_all(&bytes)?;
+        write_all_nonblocking(&mut self.stream, &bytes)?;
         Ok(seq)
     }
 
@@ -1601,7 +1655,12 @@ impl X11Window {
             };
             // SAFETY: `pfd` references valid stack memory for a live fd.
             let rc = unsafe { libc::poll(&mut pfd, 1, rem_ms) };
-            if rc > 0 {
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(X11Error::Io(err));
+                }
+            } else if rc > 0 {
                 let mut tmp = [0u8; 4_096];
                 match self.stream.read(&mut tmp) {
                     Ok(0) => {
@@ -1619,6 +1678,47 @@ impl X11Window {
             }
         }
     }
+}
+
+fn write_all_nonblocking(stream: &mut UnixStream, mut data: &[u8]) -> Result<(), X11Error> {
+    let deadline = Instant::now() + SETUP_TIMEOUT;
+    while !data.is_empty() {
+        match stream.write(data) {
+            Ok(0) => {
+                return Err(X11Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "X11 socket write returned zero bytes",
+                )));
+            }
+            Ok(n) => data = &data[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(X11Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timed out writing X11 request",
+                    )));
+                }
+                let rem_ms = deadline.duration_since(now).as_millis().clamp(1, 500) as i32;
+                let mut pfd = libc::pollfd {
+                    fd: stream.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: `pfd` references valid stack memory for a live fd.
+                let rc = unsafe { libc::poll(&mut pfd, 1, rem_ms) };
+                if rc < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(X11Error::Io(err));
+                    }
+                }
+            }
+            Err(e) => return Err(X11Error::Io(e)),
+        }
+    }
+    Ok(())
 }
 
 impl Drop for X11Window {
@@ -1725,7 +1825,7 @@ fn parse_setup_body(body: &[u8]) -> Result<SetupInfo, X11Error> {
     Ok(SetupInfo {
         resource_id_base,
         resource_id_mask,
-        max_request_words: max_request_words.max(16_384),
+        max_request_words: max_request_words.max(4_096),
         root,
         root_depth,
         root_visual,
@@ -1763,11 +1863,25 @@ mod tests {
         push_field(&mut blob, b"workstation");
         push_field(&mut blob, b"");
         push_field(&mut blob, COOKIE_NAME.as_bytes());
-        let cookie = [0xABu8; COOKIE_BYTES];
-        push_field(&mut blob, &cookie);
+        let cookie0 = [0xABu8; COOKIE_BYTES];
+        push_field(&mut blob, &cookie0);
 
-        let selected = select_xauth_cookie(&blob, 0).expect("selects local cookie");
-        assert_eq!(selected, cookie);
+        // Display-exact cookie must beat an empty-number local cookie when both exist.
+        blob.extend_from_slice(&FAMILY_LOCAL.to_be_bytes());
+        push_field(&mut blob, b"workstation");
+        push_field(&mut blob, b"7");
+        push_field(&mut blob, COOKIE_NAME.as_bytes());
+        let cookie7 = [0xCDu8; COOKIE_BYTES];
+        push_field(&mut blob, &cookie7);
+
+        assert_eq!(
+            select_xauth_cookie(&blob, 0).expect("falls back to local empty"),
+            cookie0
+        );
+        assert_eq!(
+            select_xauth_cookie(&blob, 7).expect("prefers exact display match"),
+            cookie7
+        );
     }
 
     #[test]
@@ -1806,6 +1920,54 @@ mod tests {
                 count: 0
             }
         );
+
+        let mut focus_out = [0u8; EVENT_BYTES];
+        focus_out[0] = event_code::FOCUS_OUT;
+        assert_eq!(WireEvent::decode(&focus_out), WireEvent::FocusOut);
+    }
+
+    #[test]
+    fn keypad_and_nonblocking_socket_write_handle_full_frames() {
+        assert_eq!(
+            keysym_to_key(0xffb5, 0),
+            Some((Key::Character('5'), Modifiers::default()))
+        );
+        assert_eq!(
+            keysym_to_key(0xffab, 0),
+            Some((Key::Character('+'), Modifiers::default()))
+        );
+        assert_eq!(
+            keysym_to_key(0xffbd, 0x04),
+            Some((
+                Key::Character('='),
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                }
+            ))
+        );
+
+        let (mut writer, mut reader) = UnixStream::pair().expect("socket pair");
+        writer.set_nonblocking(true).expect("nonblocking");
+        let payload = vec![0x5Au8; 1_024 * 1_024];
+        let expected_len = payload.len();
+        let reader_thread = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 8_192];
+            while got.len() < expected_len {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => panic!("reader error: {e}"),
+                }
+            }
+            got
+        });
+        write_all_nonblocking(&mut writer, &payload).expect("POLLOUT completes large frame write");
+        let received = reader_thread.join().expect("reader thread");
+        assert_eq!(received.len(), payload.len());
+        assert!(received.iter().all(|&b| b == 0x5A));
     }
 
     #[test]

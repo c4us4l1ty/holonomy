@@ -93,10 +93,13 @@ Listed so they stay dead.
     parses `head`, `loca`, `glyf`, `hhea`, `hmtx`, `maxp`, `cmap` for embedded `Inter-Regular`,
     `Inter-Bold`, `Inter-Italic`, and `JetBrainsMono-Regular` (SIL OFL 1.1; attributions in
     `THIRD_PARTY.md` and `LICENSES/*.txt`) with analytic scanline coverage (`tests/raster_fonts.rs`).
-    `x11.rs` implements raw X11 UNIX/TCP wire framing + `.Xauthority` MIT-MAGIC-COOKIE + MIT-SHM /
-    `PutImage` + X11 keymap decoding; `canvas.rs` implements `FrameBuffer`, `PixelSurface` driven
-    from `Frame::picture()`, Block 7 formatting ribbon + overflow popovers, find/replace, security
-    panel, and focus-blur clipboard zeroization. `canvas::tests::pixel_surface_pointer_hit_test_matches_painted_caret_across_zooms_and_dpis`
+    `x11.rs` implements raw X11 local Unix-socket wire framing (`POLLOUT` non-blocking request
+    flush, `.Xauthority` MIT-MAGIC-COOKIE-1 with cookie-less fallback, `PutImage` scanline
+    chunking, `CLIPBOARD` selection handling, and `FocusOut` clipboard zeroization) + X11 keymap
+    and keypad decoding; `canvas.rs` implements `FrameBuffer`, `PixelSurface` driven from
+    `Frame::picture()`, Block 7 formatting ribbon + overflow popovers, find/replace, security
+    panel, `Ctrl+X` selection cut, idle deadman evaluation, and focus-blur clipboard zeroization.
+    `canvas::tests::pixel_surface_pointer_hit_test_matches_painted_caret_across_zooms_and_dpis`
     pins `L-8` pointer round-trips across zooms and DPIs. *Open residuals:* headless CI has no live
     X11 display server (`holonomy gui` is compiled and tested at wire/pixel/unit level, not screenshot
     tested against a running X server), OpenType `GSUB`/`GPOS` shaping remains `OQ-24`, GPUI /
