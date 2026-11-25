@@ -885,6 +885,22 @@ impl FontSet {
         }
     }
 
+    fn style_face(&self, style: Style) -> &Face {
+        let variant = match style.family() {
+            FontFamily::Mono => FontVariant::Mono,
+            FontFamily::Sans | FontFamily::Serif => {
+                if style.is_bold() {
+                    FontVariant::Bold
+                } else if style.is_italic() {
+                    FontVariant::Italic
+                } else {
+                    FontVariant::Regular
+                }
+            }
+        };
+        &self.font(variant).face
+    }
+
     fn scaled_style(&self, style: Style) -> Style {
         Style::at(style.size_milli() * i64::from(self.0.body_px))
     }
@@ -938,13 +954,13 @@ impl Shaper for FontSet {
     }
 
     fn line_height(&self, style: Style) -> Fixed {
-        let regular = &self.0.regular.face;
-        let design = (i64::from(regular.ascender()) - i64::from(regular.descender())) * 121 / 100;
-        regular.scaled(design, self.scaled_style(style))
+        let face = self.style_face(style);
+        let design = (i64::from(face.ascender()) - i64::from(face.descender())) * 121 / 100;
+        face.scaled(design, self.scaled_style(style))
     }
 
     fn ascent(&self, style: Style) -> Fixed {
-        let regular = &self.0.regular.face;
-        regular.scaled(i64::from(regular.ascender()), self.scaled_style(style))
+        let face = self.style_face(style);
+        face.scaled(i64::from(face.ascender()), self.scaled_style(style))
     }
 }

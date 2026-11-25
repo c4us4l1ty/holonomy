@@ -195,7 +195,7 @@ impl Rng {
 /// The intent a seed step asks for, and the direct call that means the same thing.
 fn step(seed: u64, shell_len: u64) -> Intent {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    match rng.below(15) {
+    match rng.below(17) {
         0..=2 => {
             let text = if rng.below(3) == 0 { "m中\n" } else { "ab" };
             Intent::Type(text.to_owned())
@@ -214,15 +214,19 @@ fn step(seed: u64, shell_len: u64) -> Intent {
         }
         11 => Intent::SetView(View::new(500 + rng.below(1_500) as i64, 96).expect("a view")),
         12 => Intent::Move {
-            to: match rng.below(4) {
+            to: match rng.below(6) {
                 0 => Move::Left,
                 1 => Move::Right,
-                2 => Move::Up,
+                2 => Move::WordLeft,
+                3 => Move::WordRight,
+                4 => Move::Up,
                 _ => Move::Down,
             },
             extend: rng.below(2) == 0,
         },
         13 => Intent::Undo,
+        14 => Intent::DeleteWordBefore,
+        15 => Intent::DeleteWordAfter,
         _ => {
             // Redo, reveal and flush share the tail; flush only when there is something to write.
             if rng.below(2) == 0 && shell_len > 0 {
@@ -245,6 +249,12 @@ fn directly(shell: &mut Shell, intent: &Intent) {
         }
         Intent::DeleteForward => {
             shell.delete_forward().expect("deleted");
+        }
+        Intent::DeleteWordBefore => {
+            shell.delete_word_before().expect("deleted word before");
+        }
+        Intent::DeleteWordAfter => {
+            shell.delete_word_after().expect("deleted word after");
         }
         Intent::DeleteSelection => {
             shell.delete_selection().expect("deleted");
@@ -431,4 +441,83 @@ fn formatting_links_and_replace_all_intents_agree_with_direct_calls() {
             "toolbar_state diverged at step {idx}"
         );
     }
+}
+
+#[test]
+fn word_navigation_multi_click_and_status_metrics_work_across_leaves() {
+    let mut shell = editor();
+    shell
+        .type_text("alpha beta gamma\nsecond paragraph line")
+        .expect("seeded");
+    shell.reflow().expect("reflowed");
+
+    // WordRight / WordLeft navigation & DeleteWordBefore / DeleteWordAfter.
+    shell
+        .apply(Intent::Move {
+            to: Move::DocumentStart,
+            extend: false,
+        })
+        .expect("home");
+    shell
+        .apply(Intent::Move {
+            to: Move::WordRight,
+            extend: false,
+        })
+        .expect("word right");
+    assert_eq!(shell.caret(), 5);
+    shell
+        .apply(Intent::Move {
+            to: Move::WordRight,
+            extend: true,
+        })
+        .expect("word right extend");
+    assert_eq!(shell.selection().normalised(), (5, 10));
+    shell
+        .apply(Intent::Move {
+            to: Move::WordLeft,
+            extend: false,
+        })
+        .expect("word left");
+    assert_eq!(shell.caret(), 6);
+
+    // Double-click word, triple-click line, quad-click paragraph via painted geometry.
+    let frame_pt = {
+        let f = shell.frame().expect("frame");
+        let p = f.layout().paint_point(7).expect("paint");
+        Point::new(p.x, p.top + Fixed::ONE)
+    };
+    assert!(shell.select_word_at(frame_pt).expect("double click"));
+    assert_eq!(shell.selection().normalised(), (6, 10));
+    assert!(shell
+        .select_visual_line_at(frame_pt)
+        .expect("triple click"));
+    assert_eq!(shell.selection().normalised().0, 0);
+    assert!(shell
+        .select_paragraph_at(frame_pt)
+        .expect("quad click"));
+    assert_eq!(shell.selection().normalised(), (0, 16));
+
+    // DeleteWordAfter / DeleteWordBefore parity with intents.
+    shell.select_range(0, 0).expect("reset");
+    shell.apply(Intent::DeleteWordAfter).expect("del after");
+    assert!(shell.frame().expect("frame").text().starts_with(" beta"));
+    shell.apply(Intent::Undo).expect("undo");
+    shell.select_range(5, 5).expect("at end of alpha");
+    shell.apply(Intent::DeleteWordBefore).expect("del before");
+    assert!(shell.frame().expect("frame").text().starts_with(" beta"));
+
+    // Link inspection and status metrics.
+    shell.select_range(1, 5).expect("select beta");
+    shell
+        .apply(Intent::SetLink(Some("https://holonomy.invalid/word".to_owned())))
+        .expect("link");
+    assert_eq!(
+        shell.link_at_caret().as_deref(),
+        Some("https://holonomy.invalid/word")
+    );
+    let metrics = shell.status_metrics();
+    assert!(metrics.words_exact);
+    assert!(metrics.total_words >= 4);
+    assert_eq!(metrics.current_page, 1);
+    assert!(metrics.total_pages >= 1);
 }

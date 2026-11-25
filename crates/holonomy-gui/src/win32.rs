@@ -11,7 +11,10 @@ use std::rc::Rc;
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::platform::{DesktopEvent, DesktopWindow, MAX_CLIPBOARD_BYTES};
+use crate::platform::{
+    CaptureExclusionState, DesktopEvent, DesktopWindow, SecureInputState, WindowSecurityInfo,
+    MAX_CLIPBOARD_BYTES,
+};
 use crate::{Key, Modifiers};
 
 type Hwnd = *mut c_void;
@@ -53,6 +56,8 @@ const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC_0020;
 const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
+const WDA_MONITOR: u32 = 0x0000_0001;
+const WDA_EXCLUDEFROMCAPTURE: u32 = 0x0000_0011;
 
 const VK_BACK: u16 = 0x08;
 const VK_TAB: u16 = 0x09;
@@ -193,6 +198,7 @@ extern "system" {
     fn SetClipboardData(u_format: u32, h_mem: Hglobal) -> Hglobal;
     fn GetClipboardData(u_format: u32) -> Hglobal;
     fn CloseClipboard() -> Bool;
+    fn SetWindowDisplayAffinity(h_wnd: Hwnd, dw_affinity: u32) -> Bool;
 }
 
 #[link(name = "gdi32")]
@@ -431,6 +437,7 @@ pub struct Win32Window {
     queue: Rc<RefCell<WinQueue>>,
     dpi: i64,
     prop_raw: *const RefCell<WinQueue>,
+    capture_excluded: bool,
 }
 
 impl Win32Window {
@@ -515,16 +522,20 @@ impl Win32Window {
         }));
         let prop_raw = Rc::into_raw(Rc::clone(&queue));
         // SAFETY: `SetPropW` binds `prop_raw` until `Drop` calls `RemovePropW` and drops `Rc`.
-        unsafe {
+        // Also exclude the window from desktop capture via `WDA_EXCLUDEFROMCAPTURE` (or `WDA_MONITOR`).
+        let capture_excluded = unsafe {
             SetPropW(hwnd, PROP_NAME.as_ptr(), prop_raw as *mut c_void);
             ShowWindow(hwnd, SW_SHOWNORMAL);
-        }
+            SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) != 0
+                || SetWindowDisplayAffinity(hwnd, WDA_MONITOR) != 0
+        };
 
         Ok(Self {
             hwnd,
             queue,
             dpi,
             prop_raw,
+            capture_excluded,
         })
     }
 }
@@ -717,6 +728,22 @@ impl DesktopWindow for Win32Window {
                 EmptyClipboard();
                 CloseClipboard();
             }
+        }
+    }
+
+    fn security_info(&self) -> WindowSecurityInfo {
+        WindowSecurityInfo {
+            capture_exclusion: if self.capture_excluded {
+                CaptureExclusionState::Excluded
+            } else {
+                CaptureExclusionState::Unsupported(
+                    "SetWindowDisplayAffinity rejected by window session",
+                )
+            },
+            secure_input: SecureInputState::Unsupported(
+                "Win32 desktop shares keyboard queue across same-integrity processes",
+            ),
+            clipboard_policy: "CF_UNICODETEXT cleared on WM_KILLFOCUS, WM_DESTROYCLIPBOARD & exit",
         }
     }
 }

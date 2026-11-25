@@ -21,6 +21,10 @@ pub enum Move {
     Left,
     /// One cluster to the next boundary.
     Right,
+    /// One word to the left (`Ctrl+Left` / `Alt+Left`).
+    WordLeft,
+    /// One word to the right (`Ctrl+Right` / `Alt+Right`).
+    WordRight,
     /// To the line above, keeping the column.
     Up,
     /// To the line below, keeping the column.
@@ -47,6 +51,10 @@ pub enum Intent {
     Backspace,
     /// Delete the character after the caret, or the selection.
     DeleteForward,
+    /// Delete the word before the caret, or the selection (`Ctrl+Backspace`).
+    DeleteWordBefore,
+    /// Delete the word after the caret, or the selection (`Ctrl+Delete`).
+    DeleteWordAfter,
     /// Delete the selection, if there is one.
     DeleteSelection,
     /// Select the whole document.
@@ -139,6 +147,18 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             }
             Intent::DeleteForward => {
                 if self.delete_forward()? {
+                    effects.push(Effect::Redraw);
+                    effects.push(Effect::Caret(self.caret()));
+                }
+            }
+            Intent::DeleteWordBefore => {
+                if self.delete_word_before()? {
+                    effects.push(Effect::Redraw);
+                    effects.push(Effect::Caret(self.caret()));
+                }
+            }
+            Intent::DeleteWordAfter => {
+                if self.delete_word_after()? {
                     effects.push(Effect::Redraw);
                     effects.push(Effect::Caret(self.caret()));
                 }

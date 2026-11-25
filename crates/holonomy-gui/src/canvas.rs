@@ -14,10 +14,14 @@ use holonomy_eye::{
 };
 use holonomy_line::WitnessSummary;
 use holonomy_seal::{
-    probe_capability, CanarySet, LockCapability, PassphraseInput, ReaperGuard, SchedClass,
-    SecretArenas, TripReason, Tripwire, MAX_PASSPHRASE_INPUT_BYTES,
+    estimate_passphrase_strength, probe_capability, CanarySet, LockCapability, PassphraseInput,
+    ReaperGuard, SchedClass, SecretArenas, StrengthTier, TripReason, Tripwire,
+    MAX_PASSPHRASE_INPUT_BYTES,
 };
-use holonomy_shell::{Editor, Effect, Intent, Rgba8, QUIET_MD_THEME};
+use holonomy_shell::{
+    DocumentMetrics, Editor, Effect, Intent, PageTheme, Rgba8, QUIET_MD_DARK_THEME,
+    QUIET_MD_THEME,
+};
 use holonomy_text::{
     Alignment, FontFamily, Heading, ListKind, ResidentSet, SegmentSink, SpineDiffHunk,
     SpineDiffKind, StylePatch, TriState, Typing,
@@ -33,6 +37,22 @@ const STATUS_BAR_HEIGHT_PX: i32 = 24;
 const PAGE_PAD_X_PX: i32 = 44;
 const PAGE_PAD_TOP_PX: i32 = 24;
 const PAUSE_AUTOSAVE_MS: u64 = 1_500;
+const CHROME_IDLE_FADE_MS: u64 = 1_200;
+const DOUBLE_CLICK_MS: u64 = 450;
+
+#[inline]
+const fn is_dark_theme(theme: &PageTheme) -> bool {
+    theme.bg_body.r < 128
+}
+
+#[inline]
+const fn desk_bg(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        Rgba8::rgb(0x14, 0x14, 0x13)
+    } else {
+        Rgba8::rgb(0xf6, 0xf7, 0xf9)
+    }
+}
 
 #[inline]
 const fn rgba_to_xrgb(c: Rgba8) -> u32 {
@@ -247,6 +267,7 @@ fn draw_ui_text(
 pub struct PixelSurface {
     fonts: FontSet,
     view: View,
+    theme: PageTheme,
     fb: FrameBuffer,
     page_origin_x: i32,
     page_origin_y: i32,
@@ -255,26 +276,47 @@ pub struct PixelSurface {
     painted_clusters: usize,
     painted_selections: usize,
     caret_rect: Option<(i32, i32, i32, i32)>,
+    last_list_kind: ListKind,
+    last_list_y: i32,
+    ordered_counter: u32,
 }
 
 impl PixelSurface {
     /// Creates a [`PixelSurface`] for a `width × height` window.
     #[must_use]
     pub fn new(fonts: FontSet, view: View, width: u16, height: u16) -> Self {
+        let theme = QUIET_MD_THEME;
         let mut s = Self {
             fonts,
             view,
-            fb: FrameBuffer::new(width.max(320), height.max(240), QUIET_MD_THEME.bg_body),
+            theme,
+            fb: FrameBuffer::new(width.max(320), height.max(240), theme.bg_body),
             page_origin_x: 0,
-            page_origin_y: i32::from(QUIET_MD_THEME.toolbar_height_px) + PAGE_PAD_TOP_PX,
-            page_measure_px: i32::from(QUIET_MD_THEME.page_max_width_px),
+            page_origin_y: i32::from(theme.toolbar_height_px) + PAGE_PAD_TOP_PX,
+            page_measure_px: i32::from(theme.page_max_width_px),
             canvas_clip: Rect::new(0, 0, i32::from(width), i32::from(height)),
             painted_clusters: 0,
             painted_selections: 0,
             caret_rect: None,
+            last_list_kind: ListKind::None,
+            last_list_y: i32::MIN,
+            ordered_counter: 0,
         };
         s.recompute_geometry(width.max(320), height.max(240));
         s
+    }
+
+    /// Active visual paper theme (`QUIET_MD_THEME` light or `QUIET_MD_DARK_THEME` dark).
+    #[must_use]
+    pub const fn theme(&self) -> PageTheme {
+        self.theme
+    }
+
+    /// Switches the active surface theme (`UI-SPEC.md` §2 light/dark paper) and updates geometry.
+    pub fn set_theme(&mut self, theme: PageTheme) {
+        self.theme = theme;
+        let (w, h) = self.window_size();
+        self.recompute_geometry(w, h);
     }
 
     /// Updates zoom/DPI and recomputes centered `820 px` page column margins.
@@ -282,15 +324,15 @@ impl PixelSurface {
         self.view = view;
         self.recompute_geometry(width.max(320), height.max(240));
         self.fb
-            .resize_and_clear(width.max(320), height.max(240), QUIET_MD_THEME.bg_body);
+            .resize_and_clear(width.max(320), height.max(240), self.theme.bg_body);
     }
 
     fn recompute_geometry(&mut self, width: u16, height: u16) {
         let w = i32::from(width);
         let h = i32::from(height);
-        let top = i32::from(QUIET_MD_THEME.toolbar_height_px);
+        let top = i32::from(self.theme.toolbar_height_px);
         let canvas_h = (h - top - STATUS_BAR_HEIGHT_PX).max(60);
-        let max_page = i32::from(QUIET_MD_THEME.page_max_width_px);
+        let max_page = i32::from(self.theme.page_max_width_px);
         let measure = (w - 2 * PAGE_PAD_X_PX).clamp(240, max_page);
         let side_margin = ((w - measure) / 2).max(16);
         self.page_measure_px = measure;
@@ -388,7 +430,35 @@ impl PixelSurface {
             baseline,
             "Begin writing\u{2026}",
             style,
-            QUIET_MD_THEME.text_placeholder,
+            self.theme.text_placeholder,
+            self.canvas_clip,
+        );
+    }
+
+    fn render_scrollbar(&mut self, metrics: DocumentMetrics) {
+        let total_h = metrics.total_height.sixtyfourths();
+        let view_h = self.logical_editor_extent().1.sixtyfourths().max(1);
+        if total_h <= view_h {
+            return;
+        }
+        let bar_x = self.canvas_clip.x + self.canvas_clip.w - 8;
+        let track_top = self.canvas_clip.y + 4;
+        let track_h = (self.canvas_clip.h - 8).max(20);
+        let thumb_h =
+            ((i64::from(track_h) * view_h) / total_h).clamp(24, i64::from(track_h)) as i32;
+        let max_scroll = (total_h - view_h).max(1);
+        let top_off = metrics.scroll_top.sixtyfourths().clamp(0, max_scroll);
+        let travel = i64::from(track_h - thumb_h).max(0);
+        let thumb_y = track_top + ((top_off * travel) / max_scroll) as i32;
+        let thumb_color = Rgba8::rgba_pct(
+            self.theme.text_caption.r,
+            self.theme.text_caption.g,
+            self.theme.text_caption.b,
+            40,
+        );
+        self.fb.fill_rect_clipped(
+            Rect::new(bar_x, thumb_y, 5, thumb_h),
+            thumb_color,
             self.canvas_clip,
         );
     }
@@ -399,17 +469,20 @@ impl Surface for PixelSurface {
         self.painted_clusters = 0;
         self.painted_selections = 0;
         self.caret_rect = None;
-        let bg_desk = Rgba8::rgb(0xf6, 0xf7, 0xf9);
+        self.last_list_kind = ListKind::None;
+        self.last_list_y = i32::MIN;
+        self.ordered_counter = 0;
+        let bg_desk = desk_bg(&self.theme);
         self.fb.fill_rect_clipped(
             self.canvas_clip,
             if self.page_origin_x > 24 {
                 bg_desk
             } else {
-                QUIET_MD_THEME.bg_body
+                self.theme.bg_body
             },
             self.canvas_clip,
         );
-        // Distinct quiet-md white page sheet when desk margins exist.
+        // Distinct quiet-md page sheet when desk margins exist.
         if self.page_origin_x > 24 {
             let sheet = Rect::new(
                 self.page_origin_x - 24,
@@ -418,9 +491,9 @@ impl Surface for PixelSurface {
                 (self.canvas_clip.h - 16).max(32),
             );
             self.fb
-                .fill_rect_clipped(sheet, QUIET_MD_THEME.bg_body, self.canvas_clip);
+                .fill_rect_clipped(sheet, self.theme.bg_body, self.canvas_clip);
             self.fb
-                .stroke_rect(sheet, QUIET_MD_THEME.line_border, self.canvas_clip);
+                .stroke_rect(sheet, self.theme.line_border, self.canvas_clip);
         }
     }
 
@@ -434,7 +507,7 @@ impl Surface for PixelSurface {
         let dh = self.to_px(height).max(1);
         self.fb.fill_rect_clipped(
             Rect::new(dx, dy, dw.max(1), dh),
-            QUIET_MD_THEME.selection,
+            self.theme.selection,
             self.canvas_clip,
         );
     }
@@ -457,7 +530,7 @@ impl Surface for PixelSurface {
                         3,
                         (line_h_px - 4).max(4),
                     ),
-                    QUIET_MD_THEME.quote_bar,
+                    self.theme.quote_bar,
                     self.canvas_clip,
                 );
             }
@@ -472,7 +545,7 @@ impl Surface for PixelSurface {
                         self.page_measure_px,
                         1,
                     ),
-                    QUIET_MD_THEME.line_divider,
+                    self.theme.line_divider,
                     self.canvas_clip,
                 );
             }
@@ -482,15 +555,15 @@ impl Surface for PixelSurface {
         if style.is_code_span() && adv_px > 0 {
             self.fb.fill_rect_clipped(
                 Rect::new(dx, dy + 1, adv_px, (line_h_px - 2).max(4)),
-                QUIET_MD_THEME.code_bg,
+                self.theme.code_bg,
                 self.canvas_clip,
             );
         }
 
         let ink = if style.link_id().is_some() {
-            QUIET_MD_THEME.link
+            self.theme.link
         } else {
-            QUIET_MD_THEME.text
+            self.theme.text
         };
 
         let mut pen_x_64 = self.view.to_device(x).sixtyfourths();
@@ -553,6 +626,73 @@ impl Surface for PixelSurface {
             let ascent_px = self.to_px(self.fonts.ascent(style));
             let baseline_y = dy + ascent_px;
 
+            if run_start == 0 {
+                let list_kind = style.list();
+                let is_para_start = if origin == 0 && clusters[0].byte == 0 {
+                    true
+                } else if let Ok(rel) = usize::try_from(clusters[0].byte.saturating_sub(origin)) {
+                    rel.checked_sub(1)
+                        .and_then(|idx| text.as_bytes().get(idx))
+                        .is_some_and(|&b| b == b'\n' || b == b'\r')
+                } else {
+                    false
+                };
+                if list_kind == ListKind::None {
+                    self.last_list_kind = ListKind::None;
+                    self.ordered_counter = 0;
+                } else if is_para_start && dy != self.last_list_y {
+                    self.last_list_y = dy;
+                    let run_dx_first = self.page_origin_x + self.to_px(clusters[0].x);
+                    let marker_ink = self.theme.text_caption;
+                    match list_kind {
+                        ListKind::Bullet { depth } => {
+                            self.ordered_counter = 0;
+                            self.last_list_kind = list_kind;
+                            let glyph = if depth <= 1 {
+                                "\u{2022}"
+                            } else if depth == 2 {
+                                "\u{25E6}"
+                            } else {
+                                "\u{25AA}"
+                            };
+                            draw_ui_text(
+                                &mut self.fb,
+                                &self.fonts,
+                                (run_dx_first - 16).max(4),
+                                baseline_y,
+                                glyph,
+                                style,
+                                marker_ink,
+                                self.canvas_clip,
+                            );
+                        }
+                        ListKind::Ordered { start, .. } => {
+                            self.ordered_counter =
+                                if matches!(self.last_list_kind, ListKind::Ordered { .. }) {
+                                    self.ordered_counter.saturating_add(1)
+                                } else {
+                                    start
+                                };
+                            self.last_list_kind = list_kind;
+                            let label = format!("{}.", self.ordered_counter);
+                            let label_w =
+                                (self.fonts.advance(&label, style).sixtyfourths() >> 6) as i32;
+                            draw_ui_text(
+                                &mut self.fb,
+                                &self.fonts,
+                                (run_dx_first - label_w - 6).max(4),
+                                baseline_y,
+                                &label,
+                                style,
+                                marker_ink,
+                                self.canvas_clip,
+                            );
+                        }
+                        ListKind::None => {}
+                    }
+                }
+            }
+
             if style.blockquote() > 0 && run[0].x <= Fixed::units(24) {
                 for level in 0..i32::from(style.blockquote().min(4)) {
                     self.fb.fill_rect_clipped(
@@ -562,7 +702,7 @@ impl Surface for PixelSurface {
                             3,
                             (line_h_px - 4).max(4),
                         ),
-                        QUIET_MD_THEME.quote_bar,
+                        self.theme.quote_bar,
                         self.canvas_clip,
                     );
                 }
@@ -577,7 +717,7 @@ impl Surface for PixelSurface {
                             self.page_measure_px,
                             1,
                         ),
-                        QUIET_MD_THEME.line_divider,
+                        self.theme.line_divider,
                         self.canvas_clip,
                     );
                 }
@@ -593,15 +733,15 @@ impl Surface for PixelSurface {
             if style.is_code_span() && run_adv_px > 0 {
                 self.fb.fill_rect_clipped(
                     Rect::new(run_dx, dy + 1, run_adv_px, (line_h_px - 2).max(4)),
-                    QUIET_MD_THEME.code_bg,
+                    self.theme.code_bg,
                     self.canvas_clip,
                 );
             }
 
             let ink = if style.link_id().is_some() {
-                QUIET_MD_THEME.link
+                self.theme.link
             } else {
-                QUIET_MD_THEME.text
+                self.theme.text
             };
 
             let is_rtl = run.len() >= 2 && run[0].byte > run[run.len() - 1].byte;
@@ -688,11 +828,11 @@ impl Surface for PixelSurface {
     fn caret(&mut self, x: Fixed, y: Fixed, height: Fixed) {
         let dx = self.page_origin_x + self.to_px(x);
         let dy = self.page_origin_y + self.to_px(y);
-        let w = i32::from(QUIET_MD_THEME.caret_width_pt).max(1);
+        let w = i32::from(self.theme.caret_width_pt).max(1);
         let h = self.to_px(height).max(8);
         let rect = Rect::new(dx, dy, w, h);
         self.fb
-            .fill_rect_clipped(rect, QUIET_MD_THEME.caret, self.canvas_clip);
+            .fill_rect_clipped(rect, self.theme.caret, self.canvas_clip);
         self.caret_rect = Some((dx, dy, w, h));
     }
 }
@@ -702,6 +842,8 @@ impl Surface for PixelSurface {
 pub enum ToolbarAction {
     /// Cycle font family (`Sans` -> `Serif` -> `Mono`).
     CycleFamily,
+    /// Cycle body font size (`13` -> `15` -> `17` -> `21` -> `25` -> `34` px).
+    CycleSize,
     /// Toggle bold.
     ToggleBold,
     /// Toggle italic.
@@ -712,6 +854,8 @@ pub enum ToolbarAction {
     ToggleStrike,
     /// Toggle inline code span.
     ToggleCode,
+    /// Open or edit hyperlink URL (`Ctrl+K`).
+    OpenLinkDialog,
     /// Toggle `Heading::H1`.
     Heading1,
     /// Toggle `Heading::H2`.
@@ -736,6 +880,12 @@ pub enum ToolbarAction {
     ZoomOut,
     /// Increase zoom (`+10%`, cap `250%`).
     ZoomIn,
+    /// Toggle light/dark Quiet Markdown paper theme (`#FFFFFF` / `#1A1A19`).
+    ToggleTheme,
+    /// Toggle reduced-motion static chrome mode.
+    ToggleReducedMotion,
+    /// Toggle the `⋯` overflow toolbar menu when narrow.
+    ToggleOverflow,
     /// Toggle Block 8 read-only history timeline drawer.
     ToggleHistory,
     /// Toggle live Security Panel (`Ctrl+G`).
@@ -796,6 +946,7 @@ fn draw_toolbar_button(
     label: &str,
     highlight: ButtonHighlight,
     disabled: bool,
+    theme: &PageTheme,
     clip: Rect,
 ) -> (Rect, i32) {
     let style = Style::at(880);
@@ -810,18 +961,18 @@ fn draw_toolbar_button(
                 fb.stroke_rect(rect, Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 45), clip);
             }
             ButtonHighlight::Mixed => {
-                fb.fill_rect_clipped(rect, Rgba8::rgba_pct(0x00, 0x00, 0x00, 5), clip);
-                fb.stroke_rect(rect, QUIET_MD_THEME.line_border, clip);
+                fb.fill_rect_clipped(rect, theme.code_bg, clip);
+                fb.stroke_rect(rect, theme.line_border, clip);
             }
             ButtonHighlight::Off => {}
         }
     }
     let ink = if disabled {
-        QUIET_MD_THEME.text_placeholder
+        theme.text_placeholder
     } else if matches!(highlight, ButtonHighlight::Active) {
-        QUIET_MD_THEME.link
+        theme.link
     } else {
-        QUIET_MD_THEME.text
+        theme.text
     };
     let text_w = label_w as i32;
     let tx = x + (w - text_w) / 2;
@@ -830,15 +981,14 @@ fn draw_toolbar_button(
     if !disabled && matches!(highlight, ButtonHighlight::Mixed) {
         fb.fill_rect_clipped(
             Rect::new(x + w / 2 - 4, y + h - 4, 8, 2),
-            QUIET_MD_THEME.text_caption,
+            theme.text_caption,
             clip,
         );
     }
     (rect, x + w + 4)
 }
 
-/// Renders the fixed `40 px` top Ribbon (`UI-SPEC.md` §3, Law `U0`) directly from `app.editor().toolbar_state()`
-/// and returns hit boxes for every clickable toolbar control.
+/// Renders the fixed `40 px` top Ribbon (`UI-SPEC.md` §3, Law `U0`) directly from `app.editor().toolbar_state()`.
 fn render_toolbar<S, R>(
     app: &mut App<S, R, FontSet, PixelSurface>,
     dot_state: SecurityDotState,
@@ -849,19 +999,45 @@ where
     S: holonomy_text::SegmentSink,
     R: holonomy_text::SegmentSource,
 {
+    render_toolbar_with(
+        app,
+        dot_state,
+        read_only_history,
+        history_open,
+        false,
+        false,
+    )
+}
+
+/// Renders the fixed `40 px` top Ribbon plus optional `⋯` overflow popup (`UI-SPEC.md` §3, Law `U0`)
+/// and returns clickable hit boxes.
+#[allow(clippy::too_many_lines)]
+fn render_toolbar_with<S, R>(
+    app: &mut App<S, R, FontSet, PixelSurface>,
+    dot_state: SecurityDotState,
+    read_only_history: bool,
+    history_open: bool,
+    overflow_open: bool,
+    reduced_motion: bool,
+) -> Vec<ToolbarHit>
+where
+    S: holonomy_text::SegmentSink,
+    R: holonomy_text::SegmentSource,
+{
     let tb = app.editor().toolbar_state();
     let zoom_pct = (app.editor().view().zoom_milli() / 10).clamp(50, 300);
     let surface = app.surface_mut();
-    let (win_w, _) = surface.window_size();
+    let theme = surface.theme();
+    let (win_w, win_h) = surface.window_size();
     let fonts = surface.fonts().clone();
     let fb = surface.framebuffer_mut();
 
-    let bar_h = i32::from(QUIET_MD_THEME.toolbar_height_px);
+    let bar_h = i32::from(theme.toolbar_height_px);
     let bar = Rect::new(0, 0, i32::from(win_w), bar_h);
-    fb.fill_rect_clipped(bar, QUIET_MD_THEME.bg_body, bar);
+    fb.fill_rect_clipped(bar, theme.bg_body, bar);
     fb.fill_rect_clipped(
         Rect::new(0, bar_h - 1, i32::from(win_w), 1),
-        QUIET_MD_THEME.line_divider,
+        theme.line_divider,
         bar,
     );
 
@@ -875,6 +1051,15 @@ where
         TriState::Uniform(FontFamily::Serif) => "Serif",
         TriState::Uniform(FontFamily::Mono) => "Mono",
         TriState::Mixed => "\u{2014}",
+    };
+    let size_label = match tb.size_milli {
+        TriState::Uniform(m) => format!("{}px", (m * 15 + 500) / 1_000),
+        TriState::Mixed => "\u{2014}".to_owned(),
+    };
+    let link_hl = match &tb.link {
+        TriState::Uniform(Some(_)) => ButtonHighlight::Active,
+        TriState::Uniform(None) => ButtonHighlight::Off,
+        TriState::Mixed => ButtonHighlight::Mixed,
     };
     let h_hl = |target: Heading| match tb.heading {
         TriState::Uniform(h) if h == target => ButtonHighlight::Active,
@@ -903,17 +1088,23 @@ where
         TriState::Mixed => ButtonHighlight::Mixed,
         _ => ButtonHighlight::Off,
     };
+    let theme_label = if is_dark_theme(&theme) {
+        "Dark"
+    } else {
+        "Light"
+    };
+    let motion_label = if reduced_motion { "Still" } else { "Anim" };
 
     let dot_w = 24;
     let hist_w = 42;
     let right_reserved = dot_w + hist_w + 18;
     let max_left_x = i32::from(win_w) - right_reserved;
-    let narrow = win_w < QUIET_MD_THEME.toolbar_overflow_width_px;
+    let narrow = win_w < theme.toolbar_overflow_width_px;
 
     let mut hits = Vec::new();
     let mut x = 12;
     let y = 7;
-    let gap = i32::from(QUIET_MD_THEME.toolbar_group_gap_px);
+    let gap = i32::from(theme.toolbar_group_gap_px);
 
     let items: &[(ToolbarAction, &str, ButtonHighlight, bool, bool)] = &[
         (
@@ -926,6 +1117,17 @@ where
             },
             false,
             false,
+        ),
+        (
+            ToolbarAction::CycleSize,
+            size_label.as_str(),
+            if matches!(tb.size_milli, TriState::Mixed) {
+                ButtonHighlight::Mixed
+            } else {
+                ButtonHighlight::Off
+            },
+            false,
+            true,
         ),
         (
             ToolbarAction::Heading1,
@@ -980,8 +1182,15 @@ where
             ToolbarAction::ToggleCode,
             "</>",
             bool_hl(&tb.code_span),
-            true,
             false,
+            false,
+        ),
+        (
+            ToolbarAction::OpenLinkDialog,
+            "Link",
+            link_hl,
+            true,
+            true,
         ),
         (
             ToolbarAction::ToggleBullet,
@@ -1044,14 +1253,41 @@ where
             false,
             true,
         ),
+        (
+            ToolbarAction::ToggleTheme,
+            theme_label,
+            if is_dark_theme(&theme) {
+                ButtonHighlight::Active
+            } else {
+                ButtonHighlight::Off
+            },
+            false,
+            true,
+        ),
+        (
+            ToolbarAction::ToggleReducedMotion,
+            motion_label,
+            if reduced_motion {
+                ButtonHighlight::Active
+            } else {
+                ButtonHighlight::Off
+            },
+            false,
+            true,
+        ),
     ];
 
+    let mut collapsed: Vec<(ToolbarAction, &str, ButtonHighlight)> = Vec::new();
     for &(action, label, hl, end_group, collapsible) in items {
         if narrow && collapsible {
+            collapsed.push((action, label, hl));
             continue;
         }
-        if x + 36 > max_left_x {
-            break;
+        let est_w = (fonts.advance(label, Style::at(880)).sixtyfourths() >> 6) as i32 + 20;
+        let overflow_reserve = if collapsed.is_empty() { 0 } else { 32 };
+        if x + est_w + overflow_reserve > max_left_x {
+            collapsed.push((action, label, hl));
+            continue;
         }
         let (rect, next_x) = draw_toolbar_button(
             fb,
@@ -1061,22 +1297,36 @@ where
             label,
             hl,
             read_only_history && !matches!(action, ToolbarAction::ZoomIn | ToolbarAction::ZoomOut),
+            &theme,
             bar,
         );
         hits.push(ToolbarHit { rect, action });
         x = next_x + if end_group { gap } else { 0 };
     }
-    if narrow && x + 28 < max_left_x {
-        draw_ui_text(
+
+    let mut overflow_anchor = None;
+    if (!collapsed.is_empty() || narrow) && x + 28 <= max_left_x {
+        let (ov_rect, ov_next) = draw_toolbar_button(
             fb,
             &fonts,
-            x + 4,
-            y + 17,
+            x,
+            y,
             "\u{22EF}",
-            Style::at(880),
-            QUIET_MD_THEME.text_caption,
+            if overflow_open {
+                ButtonHighlight::Active
+            } else {
+                ButtonHighlight::Off
+            },
+            false,
+            &theme,
             bar,
         );
+        hits.push(ToolbarHit {
+            rect: ov_rect,
+            action: ToolbarAction::ToggleOverflow,
+        });
+        overflow_anchor = Some(ov_rect);
+        x = ov_next;
     }
 
     // Zoom percentage readout beside right controls if room allows.
@@ -1090,7 +1340,7 @@ where
             y + 17,
             &zoom_text,
             Style::at(820),
-            QUIET_MD_THEME.text_caption,
+            theme.text_caption,
             bar,
         );
     }
@@ -1107,6 +1357,7 @@ where
             ButtonHighlight::Off
         },
         false,
+        &theme,
         bar,
     );
     hits.push(ToolbarHit {
@@ -1123,7 +1374,7 @@ where
     );
     fb.stroke_rect(
         Rect::new(dot_rect.x + 2, dot_rect.y + 2, 12, 12),
-        QUIET_MD_THEME.line_border,
+        theme.line_border,
         bar,
     );
     hits.push(ToolbarHit {
@@ -1131,21 +1382,152 @@ where
         action: ToolbarAction::ToggleSecurity,
     });
 
+    if overflow_open {
+        let items_to_show = if collapsed.is_empty() {
+            vec![
+                (
+                    ToolbarAction::ToggleTheme,
+                    theme_label,
+                    if is_dark_theme(&theme) {
+                        ButtonHighlight::Active
+                    } else {
+                        ButtonHighlight::Off
+                    },
+                ),
+                (
+                    ToolbarAction::ToggleReducedMotion,
+                    motion_label,
+                    if reduced_motion {
+                        ButtonHighlight::Active
+                    } else {
+                        ButtonHighlight::Off
+                    },
+                ),
+            ]
+        } else {
+            collapsed
+        };
+        let menu_w = 240.min(i32::from(win_w) - 24);
+        let anchor_x = overflow_anchor.map_or(12, |r| r.x);
+        let menu_x = anchor_x.min(i32::from(win_w) - menu_w - 12).max(12);
+        let mut mx = menu_x + 8;
+        let mut my = bar_h + 10;
+        let rows_est = ((items_to_show.len() as i32) * 52 / (menu_w - 16).max(40)) + 2;
+        let menu_h = (rows_est * 32 + 12).min(i32::from(win_h) - bar_h - 40);
+        let menu = Rect::new(menu_x, bar_h + 2, menu_w, menu_h.max(44));
+        fb.fill_rect_clipped(menu, theme.bg_body, menu);
+        fb.stroke_rect(menu, theme.line_border, menu);
+        for (action, label, hl) in items_to_show {
+            let est = (fonts.advance(label, Style::at(880)).sixtyfourths() >> 6) as i32 + 20;
+            if mx + est > menu.x + menu.w - 8 {
+                mx = menu.x + 8;
+                my += 30;
+            }
+            if my + 26 > menu.y + menu.h - 4 {
+                break;
+            }
+            let (rect, nx) = draw_toolbar_button(
+                fb,
+                &fonts,
+                mx,
+                my,
+                label,
+                hl,
+                read_only_history
+                    && !matches!(
+                        action,
+                        ToolbarAction::ZoomIn
+                            | ToolbarAction::ZoomOut
+                            | ToolbarAction::ToggleTheme
+                            | ToolbarAction::ToggleReducedMotion
+                    ),
+                &theme,
+                menu,
+            );
+            hits.push(ToolbarHit { rect, action });
+            mx = nx;
+        }
+    }
+
     hits
 }
 
+fn render_recovery_banner(
+    surface: &mut PixelSurface,
+    trailing_bytes: u64,
+    offset_y: i32,
+) -> Option<Rect> {
+    if trailing_bytes == 0 {
+        return None;
+    }
+    let theme = surface.theme();
+    let (w, _) = surface.window_size();
+    let fonts = surface.fonts().clone();
+    let fb = surface.framebuffer_mut();
+    let bar = Rect::new(0, offset_y, i32::from(w), 28);
+    fb.fill_rect_clipped(bar, Rgba8::rgba_pct(0xe2, 0xa0, 0x3f, 22), bar);
+    fb.fill_rect_clipped(
+        Rect::new(0, offset_y + 27, i32::from(w), 1),
+        theme.line_divider,
+        bar,
+    );
+    let msg = format!(
+        "Recovered to the last safe point \u{2014} nothing else was stored ({trailing_bytes} trailing B discarded)."
+    );
+    draw_ui_text(
+        fb,
+        &fonts,
+        12,
+        offset_y + 19,
+        &msg,
+        Style::at(820),
+        theme.text,
+        bar,
+    );
+    let (dismiss_rect, _) = draw_toolbar_button(
+        fb,
+        &fonts,
+        (i32::from(w) - 78).max(12),
+        offset_y + 1,
+        "Dismiss",
+        ButtonHighlight::Off,
+        false,
+        &theme,
+        bar,
+    );
+    Some(dismiss_rect)
+}
+
+fn render_link_bar(surface: &mut PixelSurface, url: &str) {
+    let theme = surface.theme();
+    let (w, h) = surface.window_size();
+    let fonts = surface.fonts().clone();
+    let fb = surface.framebuffer_mut();
+    let rect = Rect::new(0, i32::from(h) - STATUS_BAR_HEIGHT_PX - 30, i32::from(w), 30);
+    fb.fill_rect_clipped(rect, theme.code_bg, rect);
+    fb.stroke_rect(rect, theme.link, rect);
+    let prompt_line = format!("Link URL: {url}|   (Enter set, empty clears, Esc cancel)");
+    draw_ui_text(
+        fb,
+        &fonts,
+        14,
+        rect.y + 20,
+        &prompt_line,
+        Style::at(880),
+        theme.text,
+        rect,
+    );
+}
+
 fn render_status_strip(surface: &mut PixelSurface, status_left: &str, status_right: &str) {
+    let theme = surface.theme();
     let (w, h) = surface.window_size();
     let fonts = surface.fonts().clone();
     let fb = surface.framebuffer_mut();
     let y0 = i32::from(h) - STATUS_BAR_HEIGHT_PX;
     let strip = Rect::new(0, y0, i32::from(w), STATUS_BAR_HEIGHT_PX);
-    fb.fill_rect_clipped(strip, QUIET_MD_THEME.code_gutter, strip);
-    fb.fill_rect_clipped(
-        Rect::new(0, y0, i32::from(w), 1),
-        QUIET_MD_THEME.line_divider,
-        strip,
-    );
+    fb.fill_rect_clipped(strip, theme.code_gutter, strip);
+    fb.fill_rect_clipped(Rect::new(0, y0, i32::from(w), 1), theme.line_divider, strip);
     let st = Style::at(800);
     draw_ui_text(
         fb,
@@ -1154,7 +1536,7 @@ fn render_status_strip(surface: &mut PixelSurface, status_left: &str, status_rig
         y0 + 16,
         status_left,
         st,
-        QUIET_MD_THEME.text_caption,
+        theme.text_caption,
         strip,
     );
     let rw = (fonts.advance(status_right, st).sixtyfourths() >> 6) as i32;
@@ -1167,25 +1549,26 @@ fn render_status_strip(surface: &mut PixelSurface, status_left: &str, status_rig
             y0 + 16,
             status_right,
             st,
-            QUIET_MD_THEME.text_caption,
+            theme.text_caption,
             strip,
         );
     }
 }
 
 fn render_security_overlay(surface: &mut PixelSurface, facts: &Facts) {
+    let theme = surface.theme();
     let (w, _) = surface.window_size();
     let fonts = surface.fonts().clone();
     let fb = surface.framebuffer_mut();
     let lines = facts.lines();
-    let card_w = i32::from(w).min(540) - 24;
+    let card_w = i32::from(w).min(600) - 24;
     let card_h = 40 + (lines.len() as i32) * 20;
     let card_x = (i32::from(w) - card_w - 14).max(12);
-    let card_y = i32::from(QUIET_MD_THEME.toolbar_height_px) + 8;
+    let card_y = i32::from(theme.toolbar_height_px) + 8;
     let card = Rect::new(card_x, card_y, card_w, card_h);
 
-    fb.fill_rect_clipped(card, QUIET_MD_THEME.bg_body, card);
-    fb.stroke_rect(card, QUIET_MD_THEME.line_border, card);
+    fb.fill_rect_clipped(card, theme.bg_body, card);
+    fb.stroke_rect(card, theme.line_border, card);
 
     draw_ui_text(
         fb,
@@ -1194,7 +1577,7 @@ fn render_security_overlay(surface: &mut PixelSurface, facts: &Facts) {
         card_y + 22,
         "Security & Residency (Esc to close)",
         Style::at(920).bold(),
-        QUIET_MD_THEME.text,
+        theme.text,
         card,
     );
     for (idx, line) in lines.iter().enumerate() {
@@ -1205,7 +1588,7 @@ fn render_security_overlay(surface: &mut PixelSurface, facts: &Facts) {
             card_y + 44 + (idx as i32) * 20,
             line,
             Style::at(840),
-            QUIET_MD_THEME.text_caption,
+            theme.text_caption,
             card,
         );
     }
@@ -1269,16 +1652,17 @@ fn render_history_drawer(
     state: &HistoryDrawerState,
     bookmarks: &[holonomy_line::Bookmark],
 ) -> Vec<(Rect, HistoryButton)> {
+    let theme = surface.theme();
     let (w, h) = surface.window_size();
     let fonts = surface.fonts().clone();
     let fb = surface.framebuffer_mut();
-    let top = i32::from(QUIET_MD_THEME.toolbar_height_px);
+    let top = i32::from(theme.toolbar_height_px);
     let drawer_w = (i32::from(w) / 3).clamp(300, 410);
     let drawer_h = (i32::from(h) - top - STATUS_BAR_HEIGHT_PX).max(160);
     let drawer = Rect::new(i32::from(w) - drawer_w, top, drawer_w, drawer_h);
 
-    fb.fill_rect_clipped(drawer, QUIET_MD_THEME.bg_body, drawer);
-    fb.stroke_rect(drawer, QUIET_MD_THEME.line_border, drawer);
+    fb.fill_rect_clipped(drawer, theme.bg_body, drawer);
+    fb.stroke_rect(drawer, theme.line_border, drawer);
 
     let mut hits = Vec::new();
     let pad_x = drawer.x + 14;
@@ -1296,7 +1680,7 @@ fn render_history_drawer(
         y,
         &title,
         Style::at(940).bold(),
-        QUIET_MD_THEME.text,
+        theme.text,
         drawer,
     );
     y += 10;
@@ -1304,8 +1688,8 @@ fn render_history_drawer(
     // Interactive scrubber track across all witnesses with bookmark + search-hit markers.
     let track = Rect::new(pad_x, y, drawer_w - 28, 22);
     let rail = Rect::new(track.x, track.y + 9, track.w, 4);
-    fb.fill_rect_clipped(rail, QUIET_MD_THEME.code_gutter, drawer);
-    fb.stroke_rect(rail, QUIET_MD_THEME.line_border, drawer);
+    fb.fill_rect_clipped(rail, theme.code_gutter, drawer);
+    fb.stroke_rect(rail, theme.line_border, drawer);
 
     let seq_to_x = |seq: u64| -> Option<i32> {
         if total <= 1 {
@@ -1320,11 +1704,7 @@ fn render_history_drawer(
     };
     for hit in &state.search_hits {
         if let Some(hx) = seq_to_x(hit.witness_sequence) {
-            fb.fill_rect_clipped(
-                Rect::new(hx, track.y + 3, 2, 16),
-                QUIET_MD_THEME.link,
-                drawer,
-            );
+            fb.fill_rect_clipped(Rect::new(hx, track.y + 3, 2, 16), theme.link, drawer);
         }
     }
     for bm in bookmarks {
@@ -1344,7 +1724,7 @@ fn render_history_drawer(
                 as i32
     };
     let knob = Rect::new(knob_x, track.y + 3, 10, 16);
-    fb.fill_rect_clipped(knob, QUIET_MD_THEME.link, drawer);
+    fb.fill_rect_clipped(knob, theme.link, drawer);
     hits.push((track, HistoryButton::ScrubTrack(track)));
     y += 28;
 
@@ -1361,6 +1741,7 @@ fn render_history_drawer(
             ButtonHighlight::Off
         },
         false,
+        &theme,
         drawer,
     );
     hits.push((bm_rect, HistoryButton::StartBookmark));
@@ -1376,6 +1757,7 @@ fn render_history_drawer(
             ButtonHighlight::Off
         },
         false,
+        &theme,
         drawer,
     );
     hits.push((sr_rect, HistoryButton::StartSearch));
@@ -1387,6 +1769,7 @@ fn render_history_drawer(
         "Restore",
         ButtonHighlight::Active,
         false,
+        &theme,
         drawer,
     );
     hits.push((rs_rect, HistoryButton::RestoreSelected));
@@ -1398,6 +1781,7 @@ fn render_history_drawer(
         "Live",
         ButtonHighlight::Off,
         false,
+        &theme,
         drawer,
     );
     hits.push((lv_rect, HistoryButton::CloseLive));
@@ -1412,6 +1796,7 @@ fn render_history_drawer(
         "PinBase",
         ButtonHighlight::Off,
         false,
+        &theme,
         drawer,
     );
     hits.push((sb_rect, HistoryButton::SetDiffBase));
@@ -1423,6 +1808,7 @@ fn render_history_drawer(
         "DiffPrev",
         ButtonHighlight::Off,
         false,
+        &theme,
         drawer,
     );
     hits.push((dp_rect, HistoryButton::DiffPrev));
@@ -1435,6 +1821,7 @@ fn render_history_drawer(
             "NextHit",
             ButtonHighlight::Active,
             false,
+            &theme,
             drawer,
         );
         hits.push((nh_rect, HistoryButton::NextSearchHit));
@@ -1444,8 +1831,8 @@ fn render_history_drawer(
     // Inline bookmark or history search input box when active.
     if let Some(ref draft_bm) = state.bookmark_input {
         let box_rect = Rect::new(pad_x, y, drawer_w - 28, 24);
-        fb.fill_rect_clipped(box_rect, QUIET_MD_THEME.code_bg, drawer);
-        fb.stroke_rect(box_rect, QUIET_MD_THEME.link, drawer);
+        fb.fill_rect_clipped(box_rect, theme.code_bg, drawer);
+        fb.stroke_rect(box_rect, theme.link, drawer);
         draw_ui_text(
             fb,
             &fonts,
@@ -1453,14 +1840,14 @@ fn render_history_drawer(
             box_rect.y + 16,
             &format!("Bookmark name: {draft_bm}| (Enter save)"),
             Style::at(800),
-            QUIET_MD_THEME.text,
+            theme.text,
             box_rect,
         );
         y += 28;
     } else if let Some(ref query) = state.search_input {
         let box_rect = Rect::new(pad_x, y, drawer_w - 28, 24);
-        fb.fill_rect_clipped(box_rect, QUIET_MD_THEME.code_bg, drawer);
-        fb.stroke_rect(box_rect, QUIET_MD_THEME.link, drawer);
+        fb.fill_rect_clipped(box_rect, theme.code_bg, drawer);
+        fb.stroke_rect(box_rect, theme.link, drawer);
         draw_ui_text(
             fb,
             &fonts,
@@ -1468,7 +1855,7 @@ fn render_history_drawer(
             box_rect.y + 16,
             &format!("Find across history: {query}| (Enter)"),
             Style::at(800),
-            QUIET_MD_THEME.text,
+            theme.text,
             box_rect,
         );
         y += 28;
@@ -1482,7 +1869,7 @@ fn render_history_drawer(
             y + 12,
             &state.diff_summary,
             Style::at(780),
-            QUIET_MD_THEME.text_caption,
+            theme.text_caption,
             drawer,
         );
         y += 18;
@@ -1496,7 +1883,7 @@ fn render_history_drawer(
             y + 12,
             &state.bookmark_msg,
             Style::at(780),
-            QUIET_MD_THEME.link,
+            theme.link,
             drawer,
         );
         y += 18;
@@ -1519,6 +1906,7 @@ fn render_history_drawer(
                     ButtonHighlight::Off
                 },
                 false,
+                &theme,
                 drawer,
             );
             hits.push((bm_hit, HistoryButton::SelectBookmark(bm.witness_sequence)));
@@ -1550,7 +1938,7 @@ fn render_history_drawer(
                 y + 13,
                 &txt,
                 Style::at(780),
-                QUIET_MD_THEME.link,
+                theme.link,
                 drawer,
             );
             hits.push((row_rect, HistoryButton::SelectSearchHit(h_idx)));
@@ -1591,9 +1979,9 @@ fn render_history_drawer(
             &label,
             Style::at(820),
             if idx == state.selected_idx {
-                QUIET_MD_THEME.link
+                theme.link
             } else {
-                QUIET_MD_THEME.text
+                theme.text
             },
             drawer,
         );
@@ -1603,8 +1991,8 @@ fn render_history_drawer(
 
     // Excerpt preview box
     let prev_rect = Rect::new(drawer.x + 10, drawer.y + drawer_h - 98, drawer_w - 20, 88);
-    fb.fill_rect_clipped(prev_rect, QUIET_MD_THEME.code_bg, drawer);
-    fb.stroke_rect(prev_rect, QUIET_MD_THEME.line_border, drawer);
+    fb.fill_rect_clipped(prev_rect, theme.code_bg, drawer);
+    fb.stroke_rect(prev_rect, theme.line_border, drawer);
     let hdr = format!("Snapshot ({} bytes):", state.preview_len);
     draw_ui_text(
         fb,
@@ -1613,7 +2001,7 @@ fn render_history_drawer(
         prev_rect.y + 15,
         &hdr,
         Style::at(780).bold(),
-        QUIET_MD_THEME.text_caption,
+        theme.text_caption,
         prev_rect,
     );
     for (line_no, line) in state.preview_text.lines().take(3).enumerate() {
@@ -1624,7 +2012,7 @@ fn render_history_drawer(
             prev_rect.y + 34 + (line_no as i32) * 17,
             line,
             Style::at(800),
-            QUIET_MD_THEME.text,
+            theme.text,
             prev_rect,
         );
     }
@@ -1650,6 +2038,26 @@ where
             };
             let _ = app.editor().apply(Intent::Format(StylePatch {
                 family: Some(next),
+                ..StylePatch::default()
+            }))?;
+            app.mark_dirty();
+        }
+        ToolbarAction::CycleSize => {
+            let cur_px = match app.editor().toolbar_state().size_milli {
+                TriState::Uniform(m) => (m * 15 + 500) / 1_000,
+                TriState::Mixed => 15,
+            };
+            let next_px = match cur_px {
+                0..=13 => 15,
+                14..=15 => 17,
+                16..=17 => 21,
+                18..=21 => 25,
+                22..=25 => 34,
+                _ => 13,
+            };
+            let next_milli = (next_px * 1_000) / 15;
+            let _ = app.editor().apply(Intent::Format(StylePatch {
+                size_milli: Some(next_milli),
                 ..StylePatch::default()
             }))?;
             app.mark_dirty();
@@ -1776,18 +2184,104 @@ where
                 app.mark_dirty();
             }
         }
-        ToolbarAction::ToggleHistory | ToolbarAction::ToggleSecurity => {}
+        ToolbarAction::ToggleTheme => {
+            let next = if is_dark_theme(&app.surface().theme()) {
+                QUIET_MD_THEME
+            } else {
+                QUIET_MD_DARK_THEME
+            };
+            app.surface_mut().set_theme(next);
+            app.mark_dirty();
+        }
+        ToolbarAction::OpenLinkDialog
+        | ToolbarAction::ToggleOverflow
+        | ToolbarAction::ToggleReducedMotion
+        | ToolbarAction::ToggleHistory
+        | ToolbarAction::ToggleSecurity => {}
     }
     Ok(())
 }
 
+fn recent_paths_file() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(dir).join("holonomy").join("recent.txt"));
+    }
+    std::env::var_os("HOME")
+        .filter(|s| !s.is_empty())
+        .map(|h| {
+            PathBuf::from(h)
+                .join(".config")
+                .join("holonomy")
+                .join("recent.txt")
+        })
+        .or_else(|| {
+            std::env::var_os("APPDATA")
+                .filter(|s| !s.is_empty())
+                .map(|a| PathBuf::from(a).join("holonomy").join("recent.txt"))
+        })
+}
+
+fn load_opt_in_recent_paths() -> (Vec<String>, bool) {
+    let Some(file) = recent_paths_file() else {
+        return (Vec::new(), false);
+    };
+    if !file.exists() {
+        return (Vec::new(), false);
+    }
+    let Ok(raw) = std::fs::read_to_string(&file) else {
+        return (Vec::new(), true);
+    };
+    let mut paths = Vec::new();
+    for line in raw.lines() {
+        let t = line.trim();
+        if !t.is_empty() && !paths.iter().any(|p| p == t) {
+            paths.push(t.to_owned());
+            if paths.len() >= 5 {
+                break;
+            }
+        }
+    }
+    (paths, true)
+}
+
+fn sync_recent_paths(target: &Path, remember: bool) {
+    let Some(file) = recent_paths_file() else {
+        return;
+    };
+    if !remember {
+        if file.exists() {
+            let _ = std::fs::remove_file(file);
+        }
+        return;
+    }
+    let chosen = target.to_string_lossy().into_owned();
+    let mut entries = vec![chosen];
+    if let Ok(existing) = std::fs::read_to_string(&file) {
+        for line in existing.lines() {
+            let t = line.trim();
+            if !t.is_empty() && !entries.iter().any(|e| e == t) {
+                entries.push(t.to_owned());
+                if entries.len() >= 5 {
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(parent) = file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(file, format!("{}\n", entries.join("\n")));
+}
+
 /// Interactive graphical passphrase / file-path prompt rendered right inside the window when
 /// `holonomy-gui` is launched without a pre-supplied stdin passphrase (`UI-SPEC.md` §5.1–§5.2).
+#[allow(clippy::too_many_lines)]
 fn prompt_gui_document(
     x11: &mut dyn DesktopWindow,
     fonts: &FontSet,
     initial_path: Option<&Path>,
 ) -> Result<Option<(PathBuf, Document)>, Box<dyn std::error::Error>> {
+    let (recent_paths, mut remember_recent) = load_opt_in_recent_paths();
     let mut path_buf = initial_path
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "notes.wavefunction".to_owned());
@@ -1795,14 +2289,17 @@ fn prompt_gui_document(
     let mut pass_buf = Zeroizing::new(Vec::<u8>::with_capacity(MAX_PASSPHRASE_INPUT_BYTES));
     let mut error_msg = String::new();
     let mut dirty = true;
+    let mut recent_hits: Vec<(Rect, String)> = Vec::new();
+    let mut remember_box = Rect::new(0, 0, 0, 0);
 
     loop {
         if dirty {
             let (w, h) = x11.size();
             let mut fb = FrameBuffer::new(w, h, Rgba8::rgb(0xf6, 0xf7, 0xf9));
             let clip = Rect::new(0, 0, i32::from(w), i32::from(h));
-            let card_w = i32::from(w).min(480) - 32;
-            let card_h = 260;
+            let recents_rows = recent_paths.len().min(4) as i32;
+            let card_w = i32::from(w).min(520) - 32;
+            let card_h = 294 + if recents_rows > 0 { 26 + recents_rows * 22 } else { 0 };
             let cx = (i32::from(w) - card_w) / 2;
             let cy = (i32::from(h) - card_h) / 2;
             let card = Rect::new(cx, cy, card_w, card_h);
@@ -1822,7 +2319,7 @@ fn prompt_gui_document(
                 &mut fb,
                 fonts,
                 cx + 24,
-                cy + 38,
+                cy + 36,
                 heading,
                 Style::at(1_250).bold(),
                 QUIET_MD_THEME.text,
@@ -1832,13 +2329,13 @@ fn prompt_gui_document(
                 &mut fb,
                 fonts,
                 cx + 24,
-                cy + 64,
+                cy + 62,
                 "Path:",
                 Style::at(850),
                 QUIET_MD_THEME.text_caption,
                 card,
             );
-            let path_box = Rect::new(cx + 24, cy + 72, card_w - 48, 30);
+            let path_box = Rect::new(cx + 24, cy + 70, card_w - 48, 30);
             fb.fill_rect_clipped(
                 path_box,
                 if editing_path {
@@ -1872,13 +2369,13 @@ fn prompt_gui_document(
                 &mut fb,
                 fonts,
                 cx + 24,
-                cy + 128,
+                cy + 124,
                 "Passphrase (memory-scrubbed; Esc cancels):",
                 Style::at(850),
                 QUIET_MD_THEME.text_caption,
                 card,
             );
-            let pass_box = Rect::new(cx + 24, cy + 136, card_w - 48, 32);
+            let pass_box = Rect::new(cx + 24, cy + 132, card_w - 48, 32);
             fb.fill_rect_clipped(pass_box, QUIET_MD_THEME.bg_body, card);
             fb.stroke_rect(
                 pass_box,
@@ -1902,6 +2399,55 @@ fn prompt_gui_document(
                 pass_box,
             );
 
+            // Live passphrase strength meter (`UI-SPEC.md` §5.2).
+            let meter_track = Rect::new(cx + 24, cy + 172, card_w - 48, 5);
+            fb.fill_rect_clipped(meter_track, QUIET_MD_THEME.code_bg, card);
+            let pass_text = std::str::from_utf8(&pass_buf).unwrap_or("");
+            let strength = estimate_passphrase_strength(pass_text);
+            let (tier_color, fill_pct) = match strength.tier {
+                StrengthTier::Empty => (Rgba8::rgb(0xd9, 0x30, 0x25), 0),
+                StrengthTier::Weak => (Rgba8::rgb(0xd9, 0x77, 0x06), 35),
+                StrengthTier::Fair => (Rgba8::rgb(0xca, 0x8a, 0x04), 60),
+                StrengthTier::Strong => (Rgba8::rgb(0x25, 0x63, 0xeb), 82),
+                StrengthTier::VeryStrong => (Rgba8::rgb(0x16, 0xa3, 0x4a), 100),
+            };
+            if char_count > 0 {
+                let fill_w = (meter_track.w * fill_pct / 100).max(8);
+                fb.fill_rect_clipped(
+                    Rect::new(meter_track.x, meter_track.y, fill_w, meter_track.h),
+                    tier_color,
+                    card,
+                );
+            }
+            let meter_label = if char_count == 0 {
+                format!(
+                    "Argon2id {}-{} MiB (t=3, p=2)",
+                    strength.kdf_min_mib, strength.kdf_max_mib
+                )
+            } else {
+                format!(
+                    "{} (~{} bits) \u{00B7} Argon2id {}-{} MiB, t=3, p=2",
+                    strength.tier.label(),
+                    strength.estimated_bits,
+                    strength.kdf_min_mib,
+                    strength.kdf_max_mib,
+                )
+            };
+            draw_ui_text(
+                &mut fb,
+                fonts,
+                cx + 24,
+                cy + 194,
+                &meter_label,
+                Style::at(780),
+                if char_count == 0 {
+                    QUIET_MD_THEME.text_caption
+                } else {
+                    tier_color
+                },
+                card,
+            );
+
             let footer = if error_msg.is_empty() {
                 if editing_path {
                     "Enter path and press Enter \u{00B7} Tab switches field".to_owned()
@@ -1917,7 +2463,7 @@ fn prompt_gui_document(
                 &mut fb,
                 fonts,
                 cx + 24,
-                cy + 196,
+                cy + 218,
                 &footer,
                 Style::at(820),
                 if error_msg.is_empty() {
@@ -1928,6 +2474,55 @@ fn prompt_gui_document(
                 card,
             );
 
+            // Opt-in recent world-lines toggle (default OFF; plaintext path list only when opted in).
+            remember_box = Rect::new(cx + 24, cy + 234, card_w - 48, 22);
+            let check = if remember_recent { "[x]" } else { "[ ]" };
+            let opt_label = format!(
+                "{check} Remember recent paths (opt-in local path metadata; default OFF)"
+            );
+            draw_ui_text(
+                &mut fb,
+                fonts,
+                remember_box.x,
+                remember_box.y + 16,
+                &opt_label,
+                Style::at(780),
+                QUIET_MD_THEME.text_caption,
+                card,
+            );
+
+            recent_hits.clear();
+            if recents_rows > 0 {
+                let mut ry = cy + 266;
+                draw_ui_text(
+                    &mut fb,
+                    fonts,
+                    cx + 24,
+                    ry + 12,
+                    "Recent world-lines:",
+                    Style::at(780).bold(),
+                    QUIET_MD_THEME.text_caption,
+                    card,
+                );
+                ry += 20;
+                for recent in recent_paths.iter().take(4) {
+                    let row = Rect::new(cx + 24, ry, card_w - 48, 20);
+                    fb.fill_rect_clipped(row, QUIET_MD_THEME.code_bg, card);
+                    draw_ui_text(
+                        &mut fb,
+                        fonts,
+                        row.x + 8,
+                        row.y + 15,
+                        recent,
+                        Style::at(800),
+                        QUIET_MD_THEME.link,
+                        row,
+                    );
+                    recent_hits.push((row, recent.clone()));
+                    ry += 22;
+                }
+            }
+
             x11.present_argb(&fb.pixels, w, h)?;
             dirty = false;
         }
@@ -1936,6 +2531,28 @@ fn prompt_gui_document(
             match ev {
                 DesktopEvent::CloseRequested => return Ok(None),
                 DesktopEvent::Expose | DesktopEvent::Resize { .. } => dirty = true,
+                DesktopEvent::MouseDown { x, y, .. } => {
+                    let px = i32::from(x);
+                    let py = i32::from(y);
+                    if remember_box.contains(px, py) {
+                        remember_recent = !remember_recent;
+                        if !remember_recent {
+                            if let Some(f) = recent_paths_file() {
+                                let _ = std::fs::remove_file(f);
+                            }
+                        }
+                        dirty = true;
+                        continue;
+                    }
+                    if let Some((_, chosen)) =
+                        recent_hits.iter().find(|(r, _)| r.contains(px, py))
+                    {
+                        path_buf = chosen.clone();
+                        editing_path = false;
+                        error_msg.clear();
+                        dirty = true;
+                    }
+                }
                 DesktopEvent::Key { key, modifiers } => {
                     dirty = true;
                     match key {
@@ -1977,7 +2594,10 @@ fn prompt_gui_document(
                                         pass_buf.zeroize();
                                         pass_buf.clear();
                                         match open_res {
-                                            Ok(doc) => return Ok(Some((target, doc))),
+                                            Ok(doc) => {
+                                                sync_recent_paths(&target, remember_recent);
+                                                return Ok(Some((target, doc)));
+                                            }
                                             Err(err) => {
                                                 error_msg = err.to_string();
                                             }
@@ -2156,19 +2776,20 @@ fn run_desktop_with_window(
 
     let lock_cap = probe_capability();
     let mut verified_segments: Option<u64> = None;
+    let mut verified_at: Option<Instant> = None;
     let mut show_security = false;
+    let mut overflow_open = false;
+    let mut reduced_motion = false;
+    let mut idle_chrome_visible = true;
+    let mut recovery_banner_bytes = document.trailing_bytes();
+    let mut recovery_dismiss_rect: Option<Rect> = None;
     let mut history_drawer: Option<HistoryDrawerState> = None;
     let mut history_hits: Vec<(Rect, HistoryButton)> = Vec::new();
     let mut find_bar: Option<FindState> = None;
+    let mut link_bar: Option<String> = None;
     let mut toolbar_hits: Vec<ToolbarHit> = Vec::new();
-    let mut status_msg = if document.trailing_bytes() != 0 {
-        format!(
-            "recovered: discarded {} trailing uncommitted bytes",
-            document.trailing_bytes()
-        )
-    } else {
-        String::new()
-    };
+    let mut status_msg = String::new();
+    let mut last_click: Option<(Instant, i16, i16, u8)> = None;
 
     let mut last_activity = Instant::now();
     let mut pending_paint = true;
@@ -2197,12 +2818,32 @@ fn run_desktop_with_window(
                 }
             }
 
+            let theme = app.surface().theme();
+            let metrics = app.editor().status_metrics();
+            if history_drawer.is_none() && (idle_chrome_visible || reduced_motion) {
+                app.surface_mut().render_scrollbar(metrics);
+            }
+
             let dot_state = SecurityDotState::from_cap(lock_cap, reaper.has_tripped());
             let read_only = history_drawer.is_some();
-            toolbar_hits = render_toolbar(&mut app, dot_state, read_only, read_only);
+            toolbar_hits = render_toolbar_with(
+                &mut app,
+                dot_state,
+                read_only,
+                read_only,
+                overflow_open,
+                reduced_motion,
+            );
+            recovery_dismiss_rect = if history_drawer.is_none() {
+                render_recovery_banner(
+                    app.surface_mut(),
+                    recovery_banner_bytes,
+                    i32::from(theme.toolbar_height_px),
+                )
+            } else {
+                None
+            };
 
-            let segs = document.segment_count();
-            let wits = document.witness_count();
             let save_tag = if app.has_pending() {
                 "unsaved"
             } else {
@@ -2212,25 +2853,40 @@ fn run_desktop_with_window(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("document");
-            let left = if !status_msg.is_empty() {
-                format!("{name} \u{00B7} {status_msg}")
-            } else if let Some(ref h) = history_drawer {
+            let approx = if metrics.words_exact { "" } else { "~" };
+            let words_label = if metrics.total_words == 1 && metrics.words_exact {
+                "1 word".to_owned()
+            } else {
+                format!("{approx}{} words", metrics.total_words)
+            };
+            let note_tail = if status_msg.is_empty() {
+                String::new()
+            } else {
+                format!(" \u{00B7} {status_msg}")
+            };
+            let left = if let Some(ref h) = history_drawer {
                 format!(
                     "{name} \u{00B7} HISTORY READ-ONLY \u{00B7} {}",
                     h.diff_summary
                 )
             } else {
                 format!(
-                    "{name} \u{00B7} {} B \u{00B7} {segs} segs \u{00B7} {wits} witnesses \u{00B7} {save_tag}",
-                    app.document_len()
+                    "{name} \u{00B7} {words_label} \u{00B7} Page {}/{} \u{00B7} {save_tag}{note_tail}",
+                    metrics.current_page, metrics.total_pages
                 )
             };
             let right = Facts::gather_with(app.residency(), &document, lock_cap, verified_segments)
                 .with_cooperative_reaper(&arenas, &canaries, reaper.has_tripped())
+                .with_window_security(
+                    x11.security_info(),
+                    verified_at.map(|t| t.elapsed().as_secs()),
+                    false,
+                )
                 .resident_line();
 
             if let Some(find) = &find_bar {
                 let surface = app.surface_mut();
+                let active_theme = surface.theme();
                 let (w, h) = surface.window_size();
                 let f = surface.fonts().clone();
                 let fb = surface.framebuffer_mut();
@@ -2240,8 +2896,8 @@ fn run_desktop_with_window(
                     i32::from(w),
                     30,
                 );
-                fb.fill_rect_clipped(rect, QUIET_MD_THEME.code_bg, rect);
-                fb.stroke_rect(rect, QUIET_MD_THEME.line_border, rect);
+                fb.fill_rect_clipped(rect, active_theme.code_bg, rect);
+                fb.stroke_rect(rect, active_theme.line_border, rect);
                 let prompt_line = match find {
                     FindState::Find { needle, .. } => {
                         format!("Find: {needle}   (Enter next, Tab replace, Esc close)")
@@ -2260,15 +2916,22 @@ fn run_desktop_with_window(
                     rect.y + 20,
                     &prompt_line,
                     Style::at(880),
-                    QUIET_MD_THEME.text,
+                    active_theme.text,
                     rect,
                 );
+            } else if let Some(ref url) = link_bar {
+                render_link_bar(app.surface_mut(), url);
             }
 
             if show_security {
                 let facts =
                     Facts::gather_with(app.residency(), &document, lock_cap, verified_segments)
-                        .with_cooperative_reaper(&arenas, &canaries, reaper.has_tripped());
+                        .with_cooperative_reaper(&arenas, &canaries, reaper.has_tripped())
+                        .with_window_security(
+                            x11.security_info(),
+                            verified_at.map(|t| t.elapsed().as_secs()),
+                            false,
+                        );
                 render_security_overlay(app.surface_mut(), &facts);
             }
 
@@ -2309,6 +2972,20 @@ fn run_desktop_with_window(
                 let _ = save_gui(&mut app);
                 pending_paint = true;
             }
+            // Fade transient scrollbar chrome after 1.2s of idle (unless reduced-motion or overlay open);
+            // emits at most ONE fade transition frame so true idle stays zero-repaint (`L-5`).
+            if !reduced_motion
+                && idle_chrome_visible
+                && !show_security
+                && history_drawer.is_none()
+                && find_bar.is_none()
+                && link_bar.is_none()
+                && !overflow_open
+                && last_activity.elapsed() >= Duration::from_millis(CHROME_IDLE_FADE_MS)
+            {
+                idle_chrome_visible = false;
+                pending_paint = true;
+            }
             continue;
         }
 
@@ -2336,6 +3013,7 @@ fn run_desktop_with_window(
                     pending_paint = true;
                 }
                 DesktopEvent::Resize { width, height } => {
+                    idle_chrome_visible = true;
                     let cur_view = app.editor().view();
                     app.surface_mut().set_viewport(cur_view, width, height);
                     let (lw, lh) = app.surface().logical_editor_extent();
@@ -2349,7 +3027,9 @@ fn run_desktop_with_window(
                     pending_paint = true;
                 }
                 DesktopEvent::Scroll { delta_lines } => {
-                    let line_px = i64::from(QUIET_MD_THEME.body_line_px) * i64::from(delta_lines);
+                    idle_chrome_visible = true;
+                    let line_px =
+                        i64::from(app.surface().theme().body_line_px) * i64::from(delta_lines);
                     if let Some(ref mut h) = history_drawer {
                         if let Some(ref mut hed) = h.history_editor {
                             hed.scroll_by(Fixed::units(line_px));
@@ -2361,8 +3041,18 @@ fn run_desktop_with_window(
                     pending_paint = true;
                 }
                 DesktopEvent::MouseDown { x, y, modifiers } => {
+                    idle_chrome_visible = true;
                     let px = i32::from(x);
                     let py = i32::from(y);
+
+                    if let Some(dismiss) = recovery_dismiss_rect {
+                        if dismiss.contains(px, py) {
+                            recovery_banner_bytes = 0;
+                            recovery_dismiss_rect = None;
+                            pending_paint = true;
+                            continue;
+                        }
+                    }
 
                     if let Some(hit) = toolbar_hits
                         .iter()
@@ -2370,14 +3060,24 @@ fn run_desktop_with_window(
                         .copied()
                     {
                         match hit.action {
+                            ToolbarAction::ToggleOverflow => {
+                                overflow_open = !overflow_open;
+                            }
+                            ToolbarAction::ToggleReducedMotion => {
+                                reduced_motion = !reduced_motion;
+                                overflow_open = false;
+                            }
                             ToolbarAction::ToggleSecurity => {
+                                overflow_open = false;
                                 show_security = !show_security;
                                 if show_security {
                                     verified_segments =
                                         document.verify().ok().map(|r| r.segments_verified);
+                                    verified_at = verified_segments.map(|_| Instant::now());
                                 }
                             }
                             ToolbarAction::ToggleHistory => {
+                                overflow_open = false;
                                 history_drawer = if history_drawer.is_some() {
                                     None
                                 } else {
@@ -2387,10 +3087,19 @@ fn run_desktop_with_window(
                                     Some(build_history_state(&document, fonts, lw, lh, view))
                                 };
                             }
+                            ToolbarAction::OpenLinkDialog if history_drawer.is_none() => {
+                                overflow_open = false;
+                                find_bar = None;
+                                link_bar = Some(app.editor().link_at_caret().unwrap_or_default());
+                            }
                             other if history_drawer.is_none() => {
+                                overflow_open = false;
                                 let _ = apply_toolbar_action(&mut app, other);
                             }
-                            other @ (ToolbarAction::ZoomIn | ToolbarAction::ZoomOut) => {
+                            other @ (ToolbarAction::ZoomIn
+                            | ToolbarAction::ZoomOut
+                            | ToolbarAction::ToggleTheme) => {
+                                overflow_open = false;
                                 let _ = apply_toolbar_action(&mut app, other);
                                 if let Some(ref mut h) = history_drawer {
                                     let view = app.editor().view();
@@ -2401,10 +3110,16 @@ fn run_desktop_with_window(
                                     }
                                 }
                             }
-                            _ => {}
+                            _ => {
+                                overflow_open = false;
+                            }
                         }
                         pending_paint = true;
                         continue;
+                    }
+                    if overflow_open {
+                        overflow_open = false;
+                        pending_paint = true;
                     }
 
                     if let Some((_, btn)) = history_hits
@@ -2442,17 +3157,48 @@ fn run_desktop_with_window(
                         let Some(pt) = app.surface().canvas_point(x, y) else {
                             continue;
                         };
-                        let intent = if modifiers.shift {
-                            Intent::DragTo(pt)
+                        if modifiers.shift {
+                            last_click = None;
+                            let _ = app.editor().apply(Intent::DragTo(pt));
                         } else {
-                            Intent::Click(pt)
-                        };
-                        let _ = app.editor().apply(intent);
+                            let now = Instant::now();
+                            let count = match last_click {
+                                Some((prev_t, lx, ly, c))
+                                    if now.duration_since(prev_t)
+                                        <= Duration::from_millis(DOUBLE_CLICK_MS)
+                                        && x.abs_diff(lx) <= 4
+                                        && y.abs_diff(ly) <= 4 =>
+                                {
+                                    if c >= 4 {
+                                        1
+                                    } else {
+                                        c + 1
+                                    }
+                                }
+                                _ => 1,
+                            };
+                            last_click = Some((now, x, y, count));
+                            match count {
+                                1 => {
+                                    let _ = app.editor().apply(Intent::Click(pt));
+                                }
+                                2 => {
+                                    let _ = app.editor().select_word_at(pt);
+                                }
+                                3 => {
+                                    let _ = app.editor().select_visual_line_at(pt);
+                                }
+                                _ => {
+                                    let _ = app.editor().select_paragraph_at(pt);
+                                }
+                            }
+                        }
                         app.mark_dirty();
                         pending_paint = true;
                     }
                 }
                 DesktopEvent::MouseDrag { x, y } => {
+                    idle_chrome_visible = true;
                     if let Some(ref mut h) = history_drawer {
                         if h.scrubbing {
                             if let Some((_, HistoryButton::ScrubTrack(track))) = history_hits
@@ -2484,6 +3230,7 @@ fn run_desktop_with_window(
                     }
                 }
                 DesktopEvent::ClipboardPasted(bytes) => {
+                    idle_chrome_visible = true;
                     if history_drawer.is_none() {
                         let Ok(text) = std::str::from_utf8(&bytes) else {
                             continue;
@@ -2493,6 +3240,7 @@ fn run_desktop_with_window(
                     }
                 }
                 DesktopEvent::Key { key, modifiers } => {
+                    idle_chrome_visible = true;
                     if modifiers.control && !modifiers.alt {
                         match key {
                             Key::Character('q') => {
@@ -2518,11 +3266,33 @@ fn run_desktop_with_window(
                                 pending_paint = true;
                                 continue;
                             }
+                            Key::Character('d' | 'D') if modifiers.shift => {
+                                let _ = apply_toolbar_action(&mut app, ToolbarAction::ToggleTheme);
+                                pending_paint = true;
+                                continue;
+                            }
+                            Key::Character('m' | 'M') if modifiers.shift => {
+                                reduced_motion = !reduced_motion;
+                                status_msg = if reduced_motion {
+                                    "reduced motion on".to_owned()
+                                } else {
+                                    "reduced motion off".to_owned()
+                                };
+                                pending_paint = true;
+                                continue;
+                            }
+                            Key::Character('k') if history_drawer.is_none() => {
+                                find_bar = None;
+                                link_bar = Some(app.editor().link_at_caret().unwrap_or_default());
+                                pending_paint = true;
+                                continue;
+                            }
                             Key::Character('g') => {
                                 show_security = !show_security;
                                 if show_security {
                                     verified_segments =
                                         document.verify().ok().map(|r| r.segments_verified);
+                                    verified_at = verified_segments.map(|_| Instant::now());
                                 }
                                 pending_paint = true;
                                 continue;
@@ -2558,6 +3328,7 @@ fn run_desktop_with_window(
                                 continue;
                             }
                             Key::Character('f') if history_drawer.is_none() => {
+                                link_bar = None;
                                 find_bar = Some(FindState::Find {
                                     needle: String::new(),
                                     next_idx: 0,
@@ -2622,14 +3393,32 @@ fn run_desktop_with_window(
                                 continue;
                             }
                         }
-                        if find_bar.take().is_some()
+                        if link_bar.take().is_some()
+                            || find_bar.take().is_some()
+                            || overflow_open
                             || show_security
                             || history_drawer.take().is_some()
                         {
+                            overflow_open = false;
                             show_security = false;
                             pending_paint = true;
                             continue;
                         }
+                        if recovery_banner_bytes != 0 {
+                            recovery_banner_bytes = 0;
+                            recovery_dismiss_rect = None;
+                            pending_paint = true;
+                            continue;
+                        }
+                    }
+
+                    if let Some(ref mut url) = link_bar {
+                        let close_link = handle_link_key(&mut app, url, key, modifiers, &mut status_msg);
+                        if close_link {
+                            link_bar = None;
+                        }
+                        pending_paint = true;
+                        continue;
                     }
 
                     let close_find = if let Some(ref mut find) = find_bar {
@@ -3215,6 +4004,47 @@ fn handle_find_key(
     close
 }
 
+fn handle_link_key(
+    app: &mut App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>,
+    url: &mut String,
+    key: Key,
+    modifiers: Modifiers,
+    status_msg: &mut String,
+) -> bool {
+    match key {
+        Key::Backspace => {
+            url.pop();
+            false
+        }
+        Key::Enter => {
+            let trimmed = url.trim().to_owned();
+            let link_arg = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.clone())
+            };
+            match app.editor().apply(Intent::SetLink(link_arg.clone())) {
+                Ok(_) => {
+                    app.mark_dirty();
+                    *status_msg = match link_arg {
+                        Some(u) => format!("linked -> {u}"),
+                        None => "link cleared".to_owned(),
+                    };
+                }
+                Err(err) => {
+                    *status_msg = format!("link refused: {err}");
+                }
+            }
+            true
+        }
+        Key::Character(ch) if !modifiers.control && !modifiers.alt && url.len() < 512 => {
+            url.push(ch);
+            false
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3422,6 +4252,24 @@ mod tests {
         assert!(
             !hits.iter().any(|h| h.action == ToolbarAction::ZoomIn),
             "narrow width (< 720 px) must collapse overflow controls cleanly"
+        );
+        assert!(
+            hits.iter().any(|h| h.action == ToolbarAction::ToggleOverflow),
+            "narrow toolbar must expose clickable overflow button"
+        );
+        let overflow_hits =
+            render_toolbar_with(&mut app, SecurityDotState::Unprotected, false, false, true, false);
+        assert!(
+            overflow_hits
+                .iter()
+                .any(|h| h.action == ToolbarAction::ZoomIn),
+            "opening overflow popup must reveal collapsed controls"
+        );
+        assert!(
+            overflow_hits
+                .iter()
+                .any(|h| h.action == ToolbarAction::ToggleTheme),
+            "overflow popup must expose light/dark theme toggle"
         );
 
         let facts = Facts::gather_with(app.residency(), &doc, LockCapability::None, None);
@@ -3631,5 +4479,65 @@ mod tests {
         assert_eq!(cut, "alpha ");
         app.press(Key::Delete, Modifiers::none()).expect("delete");
         assert_eq!(app.frame_text().expect("frame"), "beta");
+    }
+
+    #[test]
+    fn dark_theme_size_cycle_lists_link_dialog_and_word_keys_work() {
+        let mut app = open_mem_app(View::IDENTITY, 1_120, 760);
+        for ch in "one two\nthree four".chars() {
+            app.press(Key::Character(ch), Modifiers::none())
+                .expect("type");
+        }
+
+        // Theme toggle switches paper to #1A1A19 dark mode cleanly.
+        apply_toolbar_action(&mut app, ToolbarAction::ToggleTheme).expect("dark mode");
+        assert_eq!(app.surface().theme(), QUIET_MD_DARK_THEME);
+        assert!(app.draw().expect("dark paint"));
+        assert!(app
+            .surface()
+            .pixels()
+            .contains(&rgba_to_xrgb(QUIET_MD_DARK_THEME.bg_body)));
+
+        // CycleSize advances 15px -> 17px -> 21px.
+        app.editor().select_range(0, 3).expect("select one");
+        apply_toolbar_action(&mut app, ToolbarAction::CycleSize).expect("17px");
+        assert_eq!(app.editor().toolbar_state().size_milli, TriState::Uniform(1_133));
+
+        // Visual list markers render without mutating plaintext spine.
+        apply_toolbar_action(&mut app, ToolbarAction::ToggleBullet).expect("bullet");
+        app.editor().select_range(8, 13).expect("select three");
+        apply_toolbar_action(&mut app, ToolbarAction::ToggleNumbered).expect("ordered");
+        app.mark_dirty();
+        assert!(app.draw().expect("draw lists"));
+
+        // Ctrl+Backspace deletes word before caret; Ctrl+Left jumps word.
+        app.editor().select_range(7, 7).expect("after two");
+        app.press(Key::Backspace, Modifiers::control())
+            .expect("ctrl+backspace");
+        assert_eq!(app.frame_text().expect("frame"), "one \nthree four");
+        app.press(Key::Left, Modifiers::control())
+            .expect("ctrl+left");
+        assert_eq!(app.editor().selection().anchor(), 0);
+
+        // SetLink & link_at_caret roundtrip.
+        app.editor().select_range(0, 3).expect("select one");
+        app.editor()
+            .apply(Intent::SetLink(Some("https://holonomy.example".to_owned())))
+            .expect("set link");
+        assert_eq!(
+            app.editor().link_at_caret().as_deref(),
+            Some("https://holonomy.example")
+        );
+
+        // Scrollbar & recovery banner render without panics.
+        let metrics = app.editor().status_metrics();
+        app.surface_mut().render_scrollbar(metrics);
+        let dismiss = render_recovery_banner(
+            app.surface_mut(),
+            42,
+            i32::from(QUIET_MD_THEME.toolbar_height_px),
+        );
+        assert!(dismiss.is_some());
+        render_link_bar(app.surface_mut(), "https://holonomy.example");
     }
 }

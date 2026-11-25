@@ -54,7 +54,7 @@ pub mod theme;
 use std::sync::Arc;
 
 pub use crate::intent::{Effect, Intent, Move};
-pub use crate::theme::{HeadingToken, PageTheme, Rgba8, QUIET_MD_THEME};
+pub use crate::theme::{HeadingToken, PageTheme, Rgba8, QUIET_MD_DARK_THEME, QUIET_MD_THEME};
 
 use holonomy_eye::{
     byte_window, layout_styled_in_paragraph, window_text, Caret, ClusterContext, Clusters, Fixed,
@@ -63,8 +63,38 @@ use holonomy_eye::{
 };
 use holonomy_text::{
     LiveSpan, ResidentSet, SearchMatch, SearchSummary, SegmentSink, SegmentSource, Selection,
-    StylePatch, ToolbarState, Typing, TypingError, WipeRegistry,
+    StylePatch, ToolbarState, TriState, Typing, TypingError, WipeRegistry,
 };
+
+/// Document word and page statistics returned by [`Editor::status_metrics`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DocumentMetrics {
+    /// Current 1-based page at the viewport scroll position (`1..=total_pages`).
+    pub current_page: usize,
+    /// Total pages derived in `O(log N)` from the measured height index (`>= 1`).
+    pub total_pages: usize,
+    /// Words before the caret (`0..=total_words`).
+    pub words_before_caret: u64,
+    /// Total words (exact up to `2 MiB`, byte-proportional estimate above `2 MiB`).
+    pub total_words: u64,
+    /// Whether word counts are exact cluster counts vs O(1) estimates (`L-2` / `L-3`).
+    pub words_exact: bool,
+    /// Total measured document height in logical units.
+    pub total_height: Fixed,
+    /// Current viewport top scroll offset in logical units.
+    pub scroll_top: Fixed,
+    /// Current viewport height in logical units.
+    pub viewport_height: Fixed,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClusterMeta {
+    start: u64,
+    end: u64,
+    is_word: bool,
+    is_space: bool,
+    is_newline: bool,
+}
 
 /// Why an intent could not be carried out.
 #[derive(Debug)]
@@ -320,6 +350,110 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     pub fn toolbar_state(&self) -> ToolbarState {
         let (lo, hi) = self.selection.normalised();
         self.typing.toolbar_state(lo, hi)
+    }
+
+    /// Returns the uniform hyperlink URL at the current caret or selection, if any.
+    #[must_use]
+    pub fn link_at_caret(&self) -> Option<String> {
+        match self.toolbar_state().link {
+            TriState::Uniform(url) => url,
+            TriState::Mixed => None,
+        }
+    }
+
+    /// Computes O(log N) page metrics from the Fenwick height model and exact (<= 2 MiB) or
+    /// bounded O(1) (> 2 MiB) word counts (`UI-SPEC.md` §6, Laws `L-2`, `L-3`).
+    pub fn status_metrics(&mut self) -> DocumentMetrics {
+        const EXACT_WORD_CAP_BYTES: u64 = 2 * 1024 * 1024;
+        let doc_len = self.typing.document_len();
+        let caret = self.typing.caret().min(doc_len);
+        let sealed_h = self.measured.total();
+        let tail_h = self.tail_height().unwrap_or(Fixed::ZERO);
+        let total_height = sealed_h + tail_h;
+        let vp = self.viewport.max(Fixed::ONE);
+        let doc_q = total_height.sixtyfourths().max(0);
+        let vp_q = vp.sixtyfourths().max(1);
+        let total_pages = usize::try_from(((doc_q + vp_q - 1) / vp_q).max(1)).unwrap_or(1);
+        let scroll_q = self.scroll.sixtyfourths().clamp(0, doc_q);
+        let current_page =
+            usize::try_from(((scroll_q / vp_q) + 1).clamp(1, total_pages as i64)).unwrap_or(1);
+
+        if doc_len == 0 {
+            return DocumentMetrics {
+                current_page,
+                total_pages,
+                words_before_caret: 0,
+                total_words: 0,
+                words_exact: true,
+                total_height,
+                scroll_top: self.scroll,
+                viewport_height: self.viewport,
+            };
+        }
+
+        if doc_len <= EXACT_WORD_CAP_BYTES {
+            if let Ok((before, total)) = self.count_words_bounded(caret) {
+                return DocumentMetrics {
+                    current_page,
+                    total_pages,
+                    words_before_caret: before,
+                    total_words: total,
+                    words_exact: true,
+                    total_height,
+                    scroll_top: self.scroll,
+                    viewport_height: self.viewport,
+                };
+            }
+        }
+
+        DocumentMetrics {
+            current_page,
+            total_pages,
+            words_before_caret: if caret == 0 { 0 } else { (caret / 6).max(1) },
+            total_words: (doc_len / 6).max(1),
+            words_exact: false,
+            total_height,
+            scroll_top: self.scroll,
+            viewport_height: self.viewport,
+        }
+    }
+
+    fn count_words_bounded(&mut self, caret: u64) -> Result<(u64, u64), ShellError> {
+        let leaf_count = self.typing.spine().slab_count() as usize;
+        let mut total_words = 0u64;
+        let mut words_before = 0u64;
+        let mut in_word = false;
+        let mut captured_caret = caret == 0;
+
+        for leaf in 0..leaf_count {
+            let Some((start, end)) = self.leaf_bounds(leaf) else {
+                continue;
+            };
+            if start >= end {
+                continue;
+            }
+            let read = self.read(start, end)?;
+            for (rel, ch) in read.text().char_indices() {
+                let byte_pos = start + rel as u64;
+                if !captured_caret && byte_pos >= caret {
+                    words_before = total_words;
+                    captured_caret = true;
+                }
+                let word_char = ch.is_alphanumeric() || ch == '_';
+                if word_char {
+                    if !in_word {
+                        total_words += 1;
+                    }
+                    in_word = true;
+                } else {
+                    in_word = false;
+                }
+            }
+        }
+        if !captured_caret {
+            words_before = total_words;
+        }
+        Ok((words_before, total_words))
     }
 
     /// Applies `patch` over the active selection as one undoable Spine transaction.
@@ -815,10 +949,11 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     /// Moves the caret, extending the selection when `extend` is set.
     ///
     /// Left and right step one **cluster** through the document — the same clusters backspace and
-    /// delete cut — so a mark or a joiner is one move, not two. Up, down, line start and line end
-    /// ask the frame's own geometry where the target is: the point is built from the caret's own
-    /// line box and handed to the same hit test a click goes through, which is what keeps a
-    /// keyboard caret on boundaries the renderer actually drew.
+    /// delete cut — so a mark or a joiner is one move, not two. Word-left and word-right jump
+    /// across contiguous word or punctuation tokens across bounded leaf slices. Up, down, line
+    /// start and line end ask the frame's own geometry where the target is: the point is built from
+    /// the caret's own line box and handed to the same hit test a click goes through, which is what
+    /// keeps a keyboard caret on boundaries the renderer actually drew.
     ///
     /// Reports whether the caret moved; a left at the document's start moves nothing.
     ///
@@ -832,6 +967,8 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             Move::Right => self
                 .cluster_after(caret)?
                 .unwrap_or_else(|| self.typing.document_len()),
+            Move::WordLeft => self.word_before(caret)?,
+            Move::WordRight => self.word_after(caret)?,
             Move::DocumentStart => 0,
             Move::DocumentEnd => self.typing.document_len(),
             Move::Up | Move::Down | Move::LineStart | Move::LineEnd => {
@@ -847,6 +984,351 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let before = self.typing.caret();
         self.place_caret(target, extend)?;
         Ok(self.typing.caret() != before)
+    }
+
+    /// Deletes the word before the caret, or the selection if non-empty (`Ctrl+Backspace`).
+    ///
+    /// # Errors
+    ///
+    /// A read of the leaves around the caret, or a cut the geometry refuses.
+    pub fn delete_word_before(&mut self) -> Result<bool, ShellError> {
+        if !self.selection.is_empty() {
+            return self.delete_selection();
+        }
+        let caret = self.typing.caret();
+        let start = self.word_before(caret)?;
+        if start >= caret {
+            return Ok(false);
+        }
+        let before = self.typing.spine().clone();
+        self.typing.delete(start, caret)?;
+        self.invalidate_after_cut_or_restore(&before);
+        self.selection = Selection::caret(start);
+        Ok(true)
+    }
+
+    /// Deletes the word after the caret, or the selection if non-empty (`Ctrl+Delete`).
+    ///
+    /// # Errors
+    ///
+    /// A read of the leaves around the caret, or a cut the geometry refuses.
+    pub fn delete_word_after(&mut self) -> Result<bool, ShellError> {
+        if !self.selection.is_empty() {
+            return self.delete_selection();
+        }
+        let caret = self.typing.caret();
+        let end = self.word_after(caret)?;
+        if end <= caret {
+            return Ok(false);
+        }
+        let before = self.typing.spine().clone();
+        self.typing.delete(caret, end)?;
+        self.invalidate_after_cut_or_restore(&before);
+        self.selection = Selection::caret(caret);
+        Ok(true)
+    }
+
+    /// Selects the word (or whitespace/cluster token) under `point` (double-click, `L-8`).
+    ///
+    /// # Errors
+    ///
+    /// A frame or bounded leaf read the document refused.
+    pub fn select_word_at(&mut self, point: Point) -> Result<bool, ShellError> {
+        let Some(caret) = self.hit_test(point)? else {
+            return Ok(false);
+        };
+        let (lo, hi) = self.word_bounds_at(caret.byte)?;
+        self.move_caret(hi)?;
+        self.selection = Selection::new(lo, hi);
+        Ok(true)
+    }
+
+    /// Selects the visual line under `point` using the frame's own `Layout` lines (triple-click).
+    ///
+    /// # Errors
+    ///
+    /// A frame the document refused to read.
+    pub fn select_visual_line_at(&mut self, point: Point) -> Result<bool, ShellError> {
+        let Some(caret) = self.hit_test(point)? else {
+            return Ok(false);
+        };
+        let range = {
+            let frame = self.frame()?;
+            let mut matched: Option<(u64, u64)> = None;
+            for line in frame.layout().lines() {
+                if caret.byte >= line.start_byte() && caret.byte <= line.end_byte() {
+                    let is_same_top = (line.top() - caret.top).sixtyfourths().abs() <= 1;
+                    matched = Some((line.start_byte(), line.end_byte()));
+                    if is_same_top {
+                        break;
+                    }
+                }
+            }
+            matched
+        };
+        let Some((lo, hi)) = range else {
+            return Ok(false);
+        };
+        self.move_caret(hi)?;
+        self.selection = Selection::new(lo, hi);
+        Ok(true)
+    }
+
+    /// Selects the newline-delimited paragraph under `point` across bounded leaves (quad-click).
+    ///
+    /// # Errors
+    ///
+    /// A frame or bounded leaf read the document refused.
+    pub fn select_paragraph_at(&mut self, point: Point) -> Result<bool, ShellError> {
+        let Some(caret) = self.hit_test(point)? else {
+            return Ok(false);
+        };
+        let (lo, hi) = self.paragraph_bounds_at(caret.byte)?;
+        self.move_caret(hi)?;
+        self.selection = Selection::new(lo, hi);
+        Ok(true)
+    }
+
+    fn classify_cluster(start: u64, cluster: &str) -> ClusterMeta {
+        ClusterMeta {
+            start,
+            end: start + cluster.len() as u64,
+            is_word: cluster
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_'),
+            is_space: cluster.chars().all(char::is_whitespace),
+            is_newline: matches!(cluster, "\n" | "\r" | "\r\n"),
+        }
+    }
+
+    fn collect_clusters_before(
+        &mut self,
+        at: u64,
+        max_bytes: u64,
+    ) -> Result<Vec<ClusterMeta>, ShellError> {
+        if at == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(mut leaf) = self.leaf_of(at - 1) else {
+            return Ok(Vec::new());
+        };
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        let mut collected = 0u64;
+        let mut cursor_end = at;
+        for _ in 0..8 {
+            let Some((leaf_start, _)) = self.leaf_bounds(leaf) else {
+                break;
+            };
+            if leaf_start < cursor_end {
+                ranges.push((leaf_start, cursor_end));
+                collected = collected.saturating_add(cursor_end - leaf_start);
+                cursor_end = leaf_start;
+            }
+            if leaf == 0 || collected >= max_bytes {
+                break;
+            }
+            leaf -= 1;
+        }
+        let mut out = Vec::new();
+        let mut carry = ClusterContext::START;
+        for &(from, to) in ranges.iter().rev() {
+            let read = self.read(from, to)?;
+            let slice = read.text();
+            let mut clusters = Clusters::continuing(slice, carry);
+            let mut first = true;
+            for (rel, c) in clusters.by_ref() {
+                let abs_start = from + rel as u64;
+                if first && rel == 0 && !out.is_empty() {
+                    if let Some(ch) = c.chars().next() {
+                        if carry.joins(ch) {
+                            if let Some(prev) = out.last_mut() {
+                                prev.end = abs_start + c.len() as u64;
+                                first = false;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                first = false;
+                out.push(Self::classify_cluster(abs_start, c));
+            }
+            carry = clusters.carry();
+        }
+        Ok(out)
+    }
+
+    fn collect_clusters_after(
+        &mut self,
+        at: u64,
+        max_bytes: u64,
+    ) -> Result<Vec<ClusterMeta>, ShellError> {
+        let doc_len = self.typing.document_len();
+        if at >= doc_len {
+            return Ok(Vec::new());
+        }
+        let Some(mut leaf) = self.leaf_of(at) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut collected = 0u64;
+        let mut cursor = at;
+        let mut carry = ClusterContext::START;
+        let leaf_count = self.typing.spine().slab_count() as usize;
+        for _ in 0..8 {
+            if leaf >= leaf_count {
+                break;
+            }
+            let Some((_, leaf_end)) = self.leaf_bounds(leaf) else {
+                break;
+            };
+            let end = leaf_end.min(doc_len);
+            if cursor < end {
+                let read = self.read(cursor, end)?;
+                let slice = read.text();
+                let mut clusters = Clusters::continuing(slice, carry);
+                let mut first = true;
+                for (rel, c) in clusters.by_ref() {
+                    let abs_start = cursor + rel as u64;
+                    if first && rel == 0 && !out.is_empty() {
+                        if let Some(ch) = c.chars().next() {
+                            if carry.joins(ch) {
+                                if let Some(prev) = out.last_mut() {
+                                    prev.end = abs_start + c.len() as u64;
+                                    first = false;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    first = false;
+                    out.push(Self::classify_cluster(abs_start, c));
+                }
+                carry = clusters.carry();
+                collected = collected.saturating_add(end - cursor);
+                cursor = end;
+            }
+            if cursor >= doc_len || collected >= max_bytes {
+                break;
+            }
+            leaf += 1;
+        }
+        Ok(out)
+    }
+
+    fn word_before(&mut self, at: u64) -> Result<u64, ShellError> {
+        if at == 0 {
+            return Ok(0);
+        }
+        let items = self.collect_clusters_before(at, 16 * 1024)?;
+        let mut idx = items.len();
+        while idx > 0 && items[idx - 1].is_space {
+            idx -= 1;
+        }
+        if idx == 0 {
+            return Ok(items.first().map_or(0, |c| c.start));
+        }
+        let want_word = items[idx - 1].is_word;
+        while idx > 0 && !items[idx - 1].is_space && items[idx - 1].is_word == want_word {
+            idx -= 1;
+        }
+        Ok(items.get(idx).map_or(0, |c| c.start))
+    }
+
+    fn word_after(&mut self, at: u64) -> Result<u64, ShellError> {
+        let doc_len = self.typing.document_len();
+        if at >= doc_len {
+            return Ok(doc_len);
+        }
+        let items = self.collect_clusters_after(at, 16 * 1024)?;
+        if items.is_empty() {
+            return Ok(doc_len);
+        }
+        let mut idx = 0usize;
+        while idx < items.len() && items[idx].is_space {
+            idx += 1;
+        }
+        if idx >= items.len() {
+            return Ok(items[items.len() - 1].end);
+        }
+        let want_word = items[idx].is_word;
+        while idx < items.len() && !items[idx].is_space && items[idx].is_word == want_word {
+            idx += 1;
+        }
+        Ok(items
+            .get(idx)
+            .map_or_else(|| items[items.len() - 1].end, |c| c.start))
+    }
+
+    fn word_bounds_at(&mut self, at: u64) -> Result<(u64, u64), ShellError> {
+        let doc_len = self.typing.document_len();
+        if doc_len == 0 {
+            return Ok((0, 0));
+        }
+        let before = self.collect_clusters_before(at, 8 * 1024)?;
+        let after = self.collect_clusters_after(at, 8 * 1024)?;
+        let target_is_word = after
+            .first()
+            .map(|c| c.is_word)
+            .or_else(|| before.last().map(|c| c.is_word))
+            .unwrap_or(false);
+        let target_is_space = after
+            .first()
+            .is_some_and(|c| c.is_space && !c.is_newline);
+
+        let mut lo = at;
+        for c in before.iter().rev() {
+            if (target_is_word && c.is_word)
+                || (target_is_space && c.is_space && !c.is_newline)
+            {
+                lo = c.start;
+            } else {
+                break;
+            }
+        }
+        let mut hi = at;
+        for c in &after {
+            if (target_is_word && c.is_word)
+                || (target_is_space && c.is_space && !c.is_newline)
+            {
+                hi = c.end;
+            } else {
+                break;
+            }
+        }
+        if lo == hi {
+            if let Some(c) = after.first() {
+                return Ok((c.start, c.end));
+            }
+            if let Some(c) = before.last() {
+                return Ok((c.start, c.end));
+            }
+        }
+        Ok((lo, hi))
+    }
+
+    fn paragraph_bounds_at(&mut self, at: u64) -> Result<(u64, u64), ShellError> {
+        let doc_len = self.typing.document_len();
+        if doc_len == 0 {
+            return Ok((0, 0));
+        }
+        let before = self.collect_clusters_before(at, 32 * 1024)?;
+        let after = self.collect_clusters_after(at, 32 * 1024)?;
+        let mut lo = before.first().map_or(0, |c| c.start);
+        for c in before.iter().rev() {
+            if c.is_newline {
+                lo = c.end;
+                break;
+            }
+        }
+        let mut hi = after.last().map_or(at, |c| c.end);
+        for c in &after {
+            if c.is_newline {
+                hi = c.start;
+                break;
+            }
+        }
+        Ok((lo, hi.max(lo)))
     }
 
     /// The device point a geometry move asks about, with the caret brought on screen first.

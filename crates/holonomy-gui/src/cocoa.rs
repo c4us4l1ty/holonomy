@@ -11,7 +11,10 @@ use std::rc::Rc;
 
 use zeroize::Zeroizing;
 
-use crate::platform::{DesktopEvent, DesktopWindow, MAX_CLIPBOARD_BYTES};
+use crate::platform::{
+    CaptureExclusionState, DesktopEvent, DesktopWindow, SecureInputState, WindowSecurityInfo,
+    MAX_CLIPBOARD_BYTES,
+};
 use crate::{Key, Modifiers};
 
 type Id = *mut c_void;
@@ -541,6 +544,78 @@ pub struct CocoaWindow {
     dpi: i64,
     prop_raw: *const RefCell<CocoaQueue>,
     clipboard_change_count: Option<isize>,
+    capture_excluded: bool,
+    secure_input: secure_input::Guard,
+}
+
+mod secure_input {
+    use std::ffi::c_void;
+
+    pub(super) struct Guard {
+        hitoolbox: *mut c_void,
+        enabled: bool,
+    }
+
+    impl Guard {
+        pub(super) fn acquire() -> Self {
+            // SAFETY: dynamically resolves HIToolbox secure-event-input APIs without hard-linking Carbon.
+            unsafe {
+                let hitoolbox = libc::dlopen(
+                    c"/System/Library/Frameworks/Carbon.framework/Frameworks/HIToolbox.framework/HIToolbox".as_ptr(),
+                    libc::RTLD_LAZY,
+                );
+                if hitoolbox.is_null() {
+                    return Self {
+                        hitoolbox: std::ptr::null_mut(),
+                        enabled: false,
+                    };
+                }
+                let sym = libc::dlsym(hitoolbox, c"EnableSecureEventInput".as_ptr());
+                let enabled = if sym.is_null() {
+                    false
+                } else {
+                    let f = std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> i32>(sym);
+                    f() == 0
+                };
+                Self { hitoolbox, enabled }
+            }
+        }
+
+        pub(super) fn is_active(&self) -> bool {
+            if self.hitoolbox.is_null() || !self.enabled {
+                return false;
+            }
+            // SAFETY: queries `IsSecureEventInputEnabled` from the open HIToolbox handle.
+            unsafe {
+                let sym = libc::dlsym(self.hitoolbox, c"IsSecureEventInputEnabled".as_ptr());
+                if sym.is_null() {
+                    return self.enabled;
+                }
+                let f = std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> u8>(sym);
+                f() != 0
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if self.hitoolbox.is_null() {
+                return;
+            }
+            // SAFETY: balances `EnableSecureEventInput` and releases the HIToolbox handle.
+            unsafe {
+                if self.enabled {
+                    let sym = libc::dlsym(self.hitoolbox, c"DisableSecureEventInput".as_ptr());
+                    if !sym.is_null() {
+                        let f =
+                            std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> i32>(sym);
+                        let _ = f();
+                    }
+                }
+                libc::dlclose(self.hitoolbox);
+            }
+        }
+    }
 }
 
 impl CocoaWindow {
@@ -585,6 +660,12 @@ impl CocoaWindow {
             return Err(CocoaError("NSWindow initialization failed".to_owned()));
         }
 
+        // Exclude window contents from macOS window-sharing / ScreenCaptureKit captures.
+        let _: () = msg!(window, sel(b"setSharingType:\0"), 0usize => usize => ());
+        let sharing: usize = msg!(window, sel(b"sharingType\0") => usize);
+        let capture_excluded = sharing == 0;
+        let secure_input = secure_input::Guard::acquire();
+
         let ns_title = make_nsstring(title);
         let _: () = msg!(window, sel(b"setTitle:\0"), ns_title => Id => ());
         let _: () = msg!(ns_title, sel(b"release\0") => ());
@@ -628,6 +709,8 @@ impl CocoaWindow {
             dpi,
             prop_raw,
             clipboard_change_count: None,
+            capture_excluded,
+            secure_input,
         })
     }
 }
@@ -794,6 +877,22 @@ impl DesktopWindow for CocoaWindow {
             if cur_count == owned_count {
                 let _: isize = msg!(pb, sel(b"clearContents\0") => isize);
             }
+        }
+    }
+
+    fn security_info(&self) -> WindowSecurityInfo {
+        WindowSecurityInfo {
+            capture_exclusion: if self.capture_excluded {
+                CaptureExclusionState::Excluded
+            } else {
+                CaptureExclusionState::Unsupported("NSWindowSharingNone did not stick")
+            },
+            secure_input: if self.secure_input.is_active() {
+                SecureInputState::Active
+            } else {
+                SecureInputState::Unsupported("EnableSecureEventInput unavailable or inactive")
+            },
+            clipboard_policy: "NSPasteboard cleared on windowDidResignKey & exit",
         }
     }
 }

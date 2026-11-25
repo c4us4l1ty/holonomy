@@ -121,11 +121,7 @@ Prints `HOLONOMY_FACE …`, `HOLONOMY_FACE_SCALE …` and `HOLONOMY_FACE_LAYOUT 
 the counts are asserted (95 printable ASCII advances, ≥5 scalings, ≥4 sums, >50 caret round trips,
 ≥2 lines), so a green run cannot be a run that read no font.
 
-**What this is not:** shaping. Kerning, ligatures, mark positioning and Arabic joining live in
-`GSUB`/`GPOS`, which nothing reads yet; a cluster's width is the *sum* of its characters, which is
-exactly right for one-glyph-per-character text and a measurement — not a promise — elsewhere. That
-gap is recorded as **OQ-24** in `AUDIT.md`, and Block 5 gate 2's timing half can now be measured
-with these metrics.
+**Update (`OQ-24` closed, D-95):** `holonomy_eye::opentype` now parses `GDEF`/`GSUB`/`GPOS` (`SingleSubst`, `LigatureSubst`, `PairPos` kerning, `MarkBasePos`, `MarkLigPos`, and GDEF glyph classes) and `Face` / `FontSet` compute shaped cluster widths and exact glyph placements (`x_offset`, `y_offset`, `x_advance`), while `PixelSurface::line_clusters` renders shaped glyph runs without splitting the Eye's geometry (`L-8` gated).
 
 ### M4 — The window (Block 6, first half) — **half done**
 
@@ -153,16 +149,20 @@ surface; arrows move a caret and keep the column; shift selects and the next key
 are the loop's own; an unchanged window does not repaint. Counts asserted and printed as
 `HOLONOMY_WINDOW*`.
 
-**M4b-ii — pixel window & GPUI status (`2026-11-25` update, AUDIT D-94):** GPUI itself remains
-unbuilt in this offline `--locked` tree (adding ~200 transitive crates requires crates.io resolution
-and `Cargo.lock` regeneration). Without adding any external crate, `crates/holonomy-eye/src/raster.rs`
-and `crates/holonomy-gui/src/{x11.rs,canvas.rs}` now provide a pure-Rust/`libc` OpenType
-`loca`/`glyf` rasterizer (`Inter-Regular`, `Inter-Bold`, `Inter-Italic`, `JetBrainsMono-Regular`),
-`PixelSurface` rendering `Frame::picture()` directly (`L-8` pointer round-trips pinned across zooms
-and DPIs in `canvas::tests`), and a pure-`libc` X11 desktop window (`holonomy gui <doc>` or
-`holonomy-gui`, keeping PTY `holonomy <doc>` as the default CLI path). Cross-platform GPUI
-(`macOS`/`Windows`/Wayland), `GSUB`/`GPOS` shaping (`OQ-24`), and live X-server screenshot tests
-remain open.
+**M4b-ii — cross-OS pure-FFI pixel window & GPUI status (`2026-11-25` update, AUDIT D-94/D-95):**
+GPUI itself remains unbuilt in this offline `--locked` tree (adding ~200 transitive crates requires
+crates.io resolution and `Cargo.lock` regeneration). Without adding any external crate,
+`crates/holonomy-eye/src/{opentype,raster}.rs` and
+`crates/holonomy-gui/src/{platform,x11,cocoa,win32,canvas}.rs` implement `GDEF`/`GSUB`/`GPOS`
+shaping, an embedded OpenType `loca`/`glyf` rasterizer (`Inter-Regular`, `Inter-Bold`,
+`Inter-Italic`, `JetBrainsMono-Regular`), `PixelSurface` (`quiet-md` light `#FFFFFF` and dark
+`#1A1A19` paper themes, visual bullets/ordinals, link dialog, recovery banner, 1.2s idle chrome
+fade, passphrase strength meter, and opt-in recent world-lines default OFF), plus native pure-FFI
+desktop windows on Linux (`X11Window`), macOS (`CocoaWindow` with `NSWindowSharingNone` +
+HIToolbox `EnableSecureEventInput`), and Windows (`Win32Window` with `SetWindowDisplayAffinity`).
+Linux rendering is live-tested end-to-end under `Xvfb` (`scripts/qualify-x11-gui.sh`), and macOS /
+Windows binaries build and pass `cargo test --locked --workspace` in CI (`cross-os`). Platform IME
+composition and code signing remain open.
 
 **M4b-i, done: the terminal window.** The window this environment *can* build. `holonomy-gui`
 gains `term.rs` — a `CellShaper` whose unit is one grid cell (so the Eye's geometry and the screen are

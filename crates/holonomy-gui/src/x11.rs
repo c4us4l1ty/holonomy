@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::platform::DesktopWindow;
+use crate::platform::{
+    CaptureExclusionState, DesktopWindow, SecureInputState, WindowSecurityInfo,
+};
 pub use crate::platform::{DesktopEvent, MAX_CLIPBOARD_BYTES};
 use crate::{Key, Modifiers};
 
@@ -1735,6 +1737,18 @@ impl DesktopWindow for X11Window {
 
     fn clear_clipboard(&mut self) {
         X11Window::clear_clipboard(self);
+    }
+
+    fn security_info(&self) -> WindowSecurityInfo {
+        WindowSecurityInfo {
+            capture_exclusion: CaptureExclusionState::Unsupported(
+                "X11 allows peer clients to capture root pixels",
+            ),
+            secure_input: SecureInputState::Unsupported(
+                "X11 delivers focus key events without OS secure-input isolation",
+            ),
+            clipboard_policy: "UTF8_STRING cleared on FocusOut, SelectionClear & exit",
+        }
     }
 }
 

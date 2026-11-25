@@ -23,6 +23,7 @@
 use holonomy_seal::{describe_how, probe_capability, CanarySet, LockCapability, SecretArenas};
 use holonomy_text::{ResidentSet, SegmentSource};
 
+use crate::platform::{CaptureExclusionState, SecureInputState, WindowSecurityInfo};
 use crate::store::Document;
 
 /// Every number the panel shows, and the state each came from.
@@ -46,6 +47,8 @@ pub struct Facts {
     pub recovered_bytes: u64,
     /// Segments the last full authentication verified, if one has run.
     pub verified_segments: Option<u64>,
+    /// Seconds elapsed since the last full verification ran, if known.
+    pub verified_age_secs: Option<u64>,
     /// Whether an emergency memory reaper is armed for this session.
     pub reaper_armed: bool,
     /// Number of secret/plaintext arenas currently registered with the reaper.
@@ -58,6 +61,10 @@ pub struct Facts {
     pub reaper_tripped: bool,
     /// Whether the watcher waits for the editor to stop before registering plaintext and wiping.
     pub reaper_cooperative: bool,
+    /// Live OS capture-exclusion, secure-input, and clipboard policy status.
+    pub window_security: WindowSecurityInfo,
+    /// Whether an optional USB key-slot deadbolt is armed (`inactive` by default).
+    pub usb_hardener_armed: bool,
 }
 
 impl Facts {
@@ -91,13 +98,31 @@ impl Facts {
             witnesses: document.witness_count(),
             recovered_bytes: document.trailing_bytes(),
             verified_segments,
+            verified_age_secs: None,
             reaper_armed: false,
             armed_arenas: 0,
             canaries_sampled: 0,
             ghost_canaries: 0,
             reaper_tripped: false,
             reaper_cooperative: false,
+            window_security: WindowSecurityInfo::default(),
+            usb_hardener_armed: false,
         }
+    }
+
+    /// Attaches live OS window security telemetry (`capture`, `input`, `clipboard`), verification
+    /// age, and optional USB hardener state (`UI-SPEC.md` §6).
+    #[must_use]
+    pub fn with_window_security(
+        mut self,
+        window_security: WindowSecurityInfo,
+        verified_age_secs: Option<u64>,
+        usb_hardener_armed: bool,
+    ) -> Self {
+        self.window_security = window_security;
+        self.verified_age_secs = verified_age_secs;
+        self.usb_hardener_armed = usb_hardener_armed;
+        self
     }
 
     /// Enriches these facts with live [`SecretArenas`] and [`CanarySet`] observations (`L-7`,
@@ -163,9 +188,15 @@ impl Facts {
     /// The file's own numbers.
     #[must_use]
     pub fn worldline_line(&self) -> String {
+        let age_suffix = match self.verified_age_secs {
+            Some(0..=2) => " (just now)".to_owned(),
+            Some(secs) if secs < 60 => format!(" ({secs}s ago)"),
+            Some(secs) => format!(" ({}m ago)", secs / 60),
+            None => String::new(),
+        };
         let verification = match self.verified_segments {
-            Some(count) if count == self.segments => format!("verified {count}"),
-            Some(count) => format!("verified {count} of {}", self.segments),
+            Some(count) if count == self.segments => format!("verified {count}{age_suffix}"),
+            Some(count) => format!("verified {count} of {}{age_suffix}", self.segments),
             None => "not verified".to_owned(),
         };
         format!(
@@ -225,6 +256,34 @@ impl Facts {
         )
     }
 
+    /// Live OS capture-exclusion and secure-input mode status (`UI-SPEC.md` §6).
+    #[must_use]
+    pub fn window_security_line(&self) -> String {
+        let cap = match self.window_security.capture_exclusion {
+            CaptureExclusionState::Excluded => "excluded",
+            CaptureExclusionState::Unsupported(why) => why,
+        };
+        let inp = match self.window_security.secure_input {
+            SecureInputState::Active => "secure input active",
+            SecureInputState::Unsupported(why) => why,
+        };
+        format!("capture: {cap} · input: {inp}")
+    }
+
+    /// Clipboard auto-clear policy and optional USB hardener state (`UI-SPEC.md` §6).
+    #[must_use]
+    pub fn clipboard_usb_line(&self) -> String {
+        let usb = if self.usb_hardener_armed {
+            "armed"
+        } else {
+            "inactive (default)"
+        };
+        format!(
+            "clipboard: {} · usb hardener: {usb}",
+            self.window_security.clipboard_policy
+        )
+    }
+
     /// The panel, top to bottom.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
@@ -234,6 +293,8 @@ impl Facts {
             self.reaper_line(),
             self.worldline_line(),
             self.recovery_line(),
+            self.window_security_line(),
+            self.clipboard_usb_line(),
         ]
     }
 }
@@ -278,12 +339,15 @@ mod tests {
             witnesses: 6,
             recovered_bytes: 0,
             verified_segments: Some(5),
+            verified_age_secs: Some(0),
             reaper_armed: true,
             armed_arenas: 6,
             canaries_sampled: 4,
             ghost_canaries: 4,
             reaper_tripped: false,
             reaper_cooperative: false,
+            window_security: WindowSecurityInfo::default(),
+            usb_hardener_armed: false,
         }
     }
 
@@ -344,6 +408,16 @@ mod tests {
         changed.ghost_canaries = 0;
         assert!(changed.reaper_line().contains("TRIPPED"));
         assert!(changed.reaper_line().contains("4/4 canaries zeroized"));
+
+        let mut changed = base;
+        changed.window_security.capture_exclusion = CaptureExclusionState::Excluded;
+        changed.window_security.secure_input = SecureInputState::Active;
+        changed.usb_hardener_armed = true;
+        assert!(changed.window_security_line().contains("excluded"));
+        assert!(changed
+            .window_security_line()
+            .contains("secure input active"));
+        assert!(changed.clipboard_usb_line().contains("armed"));
     }
 
     #[test]

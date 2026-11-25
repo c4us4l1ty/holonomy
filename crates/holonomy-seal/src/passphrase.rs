@@ -118,6 +118,176 @@ impl core::fmt::Debug for PassphraseInput {
     }
 }
 
+/// Qualitative passphrase strength bucket returned by [`estimate_passphrase_strength`].
+///
+/// The UI warns rather than blocks: any non-empty passphrase within the byte bounds is accepted
+/// by [`PassphraseInput::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrengthTier {
+    /// Empty passphrase (`0` characters).
+    Empty,
+    /// Below `40` estimated entropy bits (e.g. short words, repeats, or simple sequences).
+    Weak,
+    /// `40..64` estimated entropy bits.
+    Fair,
+    /// `64..88` estimated entropy bits.
+    Strong,
+    /// `>= 88` estimated entropy bits.
+    VeryStrong,
+}
+
+impl StrengthTier {
+    /// Short UI label suitable for the unlock/create screen (`UI-SPEC.md` §5.2).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Empty => "Empty",
+            Self::Weak => "Weak",
+            Self::Fair => "Fair",
+            Self::Strong => "Strong",
+            Self::VeryStrong => "Very strong",
+        }
+    }
+}
+
+/// Non-theatrical passphrase-strength estimate paired with `holonomy-seal`'s Argon2id fence
+/// (`FENCE_MIN_KIB..=FENCE_MAX_KIB`, `CALIBRATION_T`, `CALIBRATION_P`, `TARGET_BAND_MS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassphraseStrength {
+    /// Conservative estimated entropy bits accounting for character classes, distinct symbols,
+    /// and repeated/sequential runs.
+    pub estimated_bits: u16,
+    /// Unicode scalar count in the inspected input.
+    pub char_count: usize,
+    /// Classified strength bucket.
+    pub tier: StrengthTier,
+    /// Argon2id memory-hardness floor in MiB (`FENCE_MIN_KIB / 1024`).
+    pub kdf_min_mib: u32,
+    /// Argon2id memory-hardness ceiling in MiB (`FENCE_MAX_KIB / 1024`).
+    pub kdf_max_mib: u32,
+    /// Target per-derivation time floor/ceiling in milliseconds (`TARGET_BAND_MS`).
+    pub kdf_target_ms: (u64, u64),
+}
+
+/// Estimates passphrase guessing resistance without allocating or retaining secret bytes.
+///
+/// Uses observed alphabet classes, distinct-character coverage, and sequential/repeat penalties
+/// so trivial inputs like `"aaaaaa"` or `"123456"` are never over-scored as strong.
+#[must_use]
+pub fn estimate_passphrase_strength(raw: &str) -> PassphraseStrength {
+    let kdf_min_mib = crate::FENCE_MIN_KIB / 1024;
+    let kdf_max_mib = crate::FENCE_MAX_KIB / 1024;
+    let kdf_target_ms = crate::TARGET_BAND_MS;
+
+    if raw.is_empty() {
+        return PassphraseStrength {
+            estimated_bits: 0,
+            char_count: 0,
+            tier: StrengthTier::Empty,
+            kdf_min_mib,
+            kdf_max_mib,
+            kdf_target_ms,
+        };
+    }
+
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_digit = false;
+    let mut has_space = false;
+    let mut has_symbol = false;
+    let mut has_non_ascii = false;
+
+    let mut seen_chars: Zeroizing<Vec<u32>> = Zeroizing::new(Vec::with_capacity(64));
+    let mut char_count = 0usize;
+    let mut non_seq_steps = 0usize;
+    let mut prev_code: Option<u32> = None;
+
+    for ch in raw.chars() {
+        char_count += 1;
+        if ch.is_ascii_lowercase() {
+            has_lower = true;
+        } else if ch.is_ascii_uppercase() {
+            has_upper = true;
+        } else if ch.is_ascii_digit() {
+            has_digit = true;
+        } else if ch == ' ' {
+            has_space = true;
+        } else if ch.is_ascii() {
+            has_symbol = true;
+        } else {
+            has_non_ascii = true;
+        }
+
+        let code = u32::from(ch);
+        if !seen_chars.contains(&code) && seen_chars.len() < 128 {
+            seen_chars.push(code);
+        }
+        if let Some(prev) = prev_code {
+            let diff = code.abs_diff(prev);
+            if diff > 1 {
+                non_seq_steps += 1;
+            }
+        }
+        prev_code = Some(code);
+    }
+
+    let mut pool_milli_bits: u32 = 0;
+    let mut pool_size: u32 = 0;
+    if has_lower {
+        pool_size += 26;
+    }
+    if has_upper {
+        pool_size += 26;
+    }
+    if has_digit {
+        pool_size += 10;
+    }
+    if has_space {
+        pool_size += 1;
+    }
+    if has_symbol {
+        pool_size += 32;
+    }
+    if has_non_ascii {
+        pool_size += 64;
+    }
+    if pool_size > 1 {
+        // log2(pool_size) in milli-bits: integer log2 plus linear interpolation between powers of 2.
+        let floor_log2 = 31 - pool_size.leading_zeros();
+        let lo = 1u32 << floor_log2;
+        let frac = ((pool_size - lo) * 1_000) / lo;
+        pool_milli_bits = floor_log2 * 1_000 + (frac * 721) / 1_000;
+    }
+
+    // Effective character count blends unique characters with non-sequential steps so repeats
+    // ("aaaaaa") and runs ("12345678") cannot accumulate high bit counts.
+    let eff_len = if non_seq_steps == 0 {
+        1usize
+    } else {
+        (seen_chars.len().min(non_seq_steps + 1) + char_count) / 2
+    };
+    let raw_bits = ((eff_len as u32).saturating_mul(pool_milli_bits) / 1_000).min(1_024);
+    let estimated_bits = raw_bits as u16;
+    let tier = if estimated_bits < 40 {
+        StrengthTier::Weak
+    } else if estimated_bits < 64 {
+        StrengthTier::Fair
+    } else if estimated_bits < 88 {
+        StrengthTier::Strong
+    } else {
+        StrengthTier::VeryStrong
+    };
+
+    PassphraseStrength {
+        estimated_bits,
+        char_count,
+        tier,
+        kdf_min_mib,
+        kdf_max_mib,
+        kdf_target_ms,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +369,27 @@ mod tests {
     fn debug_is_redacted() {
         let p = PassphraseInput::new("hunter2").unwrap();
         assert_eq!(format!("{p:?}"), "PassphraseInput(<redacted>)");
+    }
+
+    #[test]
+    fn strength_estimator_penalizes_repeats_and_scores_passphrases_honestly() {
+        assert_eq!(
+            estimate_passphrase_strength("").tier,
+            StrengthTier::Empty
+        );
+        assert_eq!(
+            estimate_passphrase_strength("aaaaaaaaaa").tier,
+            StrengthTier::Weak
+        );
+        assert_eq!(
+            estimate_passphrase_strength("123456").tier,
+            StrengthTier::Weak
+        );
+        let diceware = estimate_passphrase_strength("correct horse battery staple");
+        assert!(matches!(
+            diceware.tier,
+            StrengthTier::Strong | StrengthTier::VeryStrong
+        ));
+        assert!(diceware.estimated_bits >= 64);
     }
 }

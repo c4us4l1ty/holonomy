@@ -221,6 +221,7 @@ fn control(byte: u8) -> Input {
         0x0a | 0x0d => Input::Key(Key::Enter, Modifiers::none()),
         0x0c => Input::Key(Key::Character('l'), Modifiers::control()),
         0x11 => Input::Key(Key::Character('q'), Modifiers::control()),
+        0x12 => Input::Key(Key::Character('r'), Modifiers::control()),
         0x13 => Input::Key(Key::Character('s'), Modifiers::control()),
         0x14 => Input::Key(Key::Character('t'), Modifiers::control()),
         0x15 => Input::Key(Key::Character('u'), Modifiers::control()),
@@ -651,5 +652,20 @@ mod tests {
             vec![Input::Key(Key::Character('中'), Modifiers::none())]
         );
         assert_eq!(keys("中 a".as_bytes()).len(), 3);
+    }
+
+    #[test]
+    fn ctrl_r_and_word_navigation_sequences_decode() {
+        assert_eq!(
+            keys(&[0x12]),
+            vec![Input::Key(Key::Character('r'), Modifiers::control())]
+        );
+        assert_eq!(
+            keys(b"\x1b[1;5D\x1b[1;5C"),
+            vec![
+                Input::Key(Key::Left, Modifiers::control()),
+                Input::Key(Key::Right, Modifiers::control()),
+            ]
+        );
     }
 }

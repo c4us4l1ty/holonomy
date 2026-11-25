@@ -11,15 +11,15 @@
 //! through the same commit path the L-6 rehearsal measures.
 //!
 //! Keys: printable text types; arrows, Home, End, PageUp and PageDown move the caret (hold shift to
-//! extend); `Ctrl+Z` undoes a burst and `Ctrl+Y` redoes one; `Ctrl+A` selects all; `Ctrl+S` saves
-//! now; `Ctrl+Q` or `Ctrl+C` saves and quits. A terminal sends `Ctrl+Shift+Z` as the same byte as
-//! `Ctrl+Z`, so `Ctrl+Y` is the redo this window can actually offer (D-45).
+//! extend, `Ctrl/Alt+Left/Right` steps by word); `Backspace`/`Delete` (`Ctrl/Alt` by word) removes;
+//! `Ctrl+Z` undoes a burst and `Ctrl+Y` redoes one; `Ctrl+A` selects all; `Ctrl+S` saves now;
+//! `Ctrl+R` browses and restores witness history; `Ctrl+Q` or `Ctrl+C` saves and quits. A terminal
+//! sends `Ctrl+Shift+Z` as the same byte as `Ctrl+Z`, so `Ctrl+Y` is the redo this window can
+//! actually offer (D-45).
 //!
 //! `Ctrl+G` asks the document for the security panel: what is resident, how the memory is locked,
-//! what the file itself says. `Esc` dismisses it. What is still not here: the GPU backend
-//! (M4b-ii — it needs crates this environment cannot fetch) and the blocks after this one. What
-//! *is* here is the thing the question in `docs/TO-APP.md` asked: you can open the app and start
-//! writing, and what you write is still there when you open it again.
+//! what the file itself says, and window capture/clipboard protections. `Esc` dismisses overlays.
+//! The pure-FFI pixel desktop (`holonomy gui <doc>` / `holonomy-gui`) lives alongside this TUI.
 //!
 //! Durability, stated as it is rather than as it sounds: a **seal** appends and witnesses the
 //! moment the buffer fills, so text survives a crash once it has sealed. Text still in the open
@@ -44,7 +44,7 @@ use holonomy_text::{ResidentSet, Typing};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 /// How long a pause counts as a pause, for the autosave.
@@ -672,6 +672,28 @@ impl SearchPrompt {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TuiHistory {
+    witnesses: Vec<holonomy_line::WitnessSummary>,
+    selected: usize,
+}
+
+impl TuiHistory {
+    fn render(&self) -> String {
+        if let Some(w) = self.witnesses.get(self.selected) {
+            format!(
+                "History #{}/{} ({} segs, {} B) · Up/Down select · Enter restore · Esc close",
+                w.sequence,
+                self.witnesses.len(),
+                w.segment_count,
+                w.plaintext_bytes
+            )
+        } else {
+            "History empty (Esc close)".to_owned()
+        }
+    }
+}
+
 /// How the session ended, in the window's own words.
 ///
 /// The first version printed "saved" whenever the run itself returned `Ok` — and the final save's
@@ -817,7 +839,8 @@ fn run(
     let mut bytes = [0u8; 256];
     let mut message = String::new();
     let mut search: Option<SearchPrompt> = None;
-    let mut panel: Option<(LockCapability, Option<u64>)> = None;
+    let mut history: Option<TuiHistory> = None;
+    let mut panel: Option<(LockCapability, Option<u64>, Option<Instant>)> = None;
     print!("\x1b[?25l\x1b[2J");
     // What the screen currently shows, so an unchanged view is not written again (D-68).
     // `None` means "nothing has been written yet", which is what makes the first pass paint.
@@ -830,7 +853,7 @@ fn run(
         // The panel gives way, never the surface: `1 + panel + 1` lines that do not fit make the
         // terminal scroll, and then the caret the renderer places is a row off (D-48).
         let panel_room = if panel.is_some() {
-            now_rows.saturating_sub(2).min(5)
+            now_rows.saturating_sub(2).min(7)
         } else {
             0
         };
@@ -849,21 +872,34 @@ fn run(
         // swaps the panel.
         let repainted = app.draw()?;
         let panel_lines = match panel {
-            Some((capability, verified)) => {
+            Some((capability, verified, verified_at)) => {
+                let age = verified_at.map(|t| t.elapsed().as_secs());
                 let facts = Facts::gather_with(app.residency(), document, capability, verified)
-                    .with_cooperative_reaper(&arenas, &canaries, reaper.has_tripped());
+                    .with_cooperative_reaper(&arenas, &canaries, reaper.has_tripped())
+                    .with_window_security(
+                        holonomy_gui::platform::WindowSecurityInfo {
+                            clipboard_policy: "terminal selection unmanaged",
+                            ..Default::default()
+                        },
+                        age,
+                        false,
+                    );
                 term::panel_fits(&facts.lines(), now_rows)
             }
             None => Vec::new(),
         };
         let ribbon_or_msg = if let Some(prompt) = &search {
             prompt.render()
+        } else if let Some(hist) = &history {
+            hist.render()
         } else if !message.is_empty() {
             message.clone()
         } else if app.selection().is_some() {
             app.toolbar_summary()
         } else {
-            String::new()
+            let m = app.editor().status_metrics();
+            let approx = if m.words_exact { "" } else { "~" };
+            format!("{approx}{}w · p.{}/{}", m.total_words, m.current_page, m.total_pages)
         };
         let line = status(
             path,
@@ -1048,6 +1084,45 @@ fn run(
                 }
                 continue;
             }
+            if let Some(hist) = history.as_mut() {
+                if modifiers.control && matches!(key, Key::Character('q') | Key::Character('c')) {
+                    quit = true;
+                    continue;
+                }
+                match key {
+                    Key::Escape => {
+                        history = None;
+                    }
+                    Key::Up | Key::Left => {
+                        hist.selected = hist.selected.saturating_sub(1);
+                    }
+                    Key::Down | Key::Right => {
+                        hist.selected =
+                            (hist.selected + 1).min(hist.witnesses.len().saturating_sub(1));
+                    }
+                    Key::Enter => {
+                        if let Some(w) = hist.witnesses.get(hist.selected) {
+                            match document.spine_at_witness(w.sequence) {
+                                Ok(sp) => {
+                                    if app.editor().restore_spine(sp).is_ok() {
+                                        let _ = app.editor().apply(Intent::RevealCaret);
+                                        app.mark_dirty();
+                                        message = format!("restored witness #{}", w.sequence);
+                                    } else {
+                                        message = "restore refused".to_owned();
+                                    }
+                                }
+                                Err(err) => {
+                                    message = format!("history load failed: {err}");
+                                }
+                            }
+                        }
+                        history = None;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if modifiers.control {
                 match key {
                     Key::Character('q') | Key::Character('c') => {
@@ -1069,6 +1144,15 @@ fn run(
                         });
                         continue;
                     }
+                    Key::Character('r') => {
+                        let witnesses = document.witness_history();
+                        let selected = witnesses.len().saturating_sub(1);
+                        history = Some(TuiHistory {
+                            witnesses,
+                            selected,
+                        });
+                        continue;
+                    }
                     Key::Character('g') => {
                         panel = if panel.is_some() {
                             None
@@ -1079,7 +1163,7 @@ fn run(
                                 .verify()
                                 .ok()
                                 .map(|report| report.segments_verified);
-                            Some((probe_capability(), verified))
+                            Some((probe_capability(), verified, verified.map(|_| Instant::now())))
                         };
                         continue;
                     }

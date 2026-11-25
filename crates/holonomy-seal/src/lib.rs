@@ -68,7 +68,8 @@ pub use error::SealError;
 pub use kdf::{MasterKeys, ParamsClass, DERIVE_SALT_BYTES};
 pub use lock::{describe_how, probe_capability, LockCapability, LockReport};
 pub use passphrase::{
-    PassphraseError, PassphraseInput, MAX_PASSPHRASE_BYTES, MAX_PASSPHRASE_INPUT_BYTES,
+    estimate_passphrase_strength, PassphraseError, PassphraseInput, PassphraseStrength,
+    StrengthTier, MAX_PASSPHRASE_BYTES, MAX_PASSPHRASE_INPUT_BYTES,
 };
 pub use reaper::{
     ArenaSlot, CanaryReport, CanarySet, ReaperGuard, ReaperOutcome, SchedClass, SecretArenas,

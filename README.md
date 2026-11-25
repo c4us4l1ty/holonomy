@@ -53,12 +53,14 @@ cargo run -p holonomy-gui --bin holonomy -- notes.wavefunction
 
 The file is created if it does not exist and opened if it does; either way it asks for a
 passphrase. Then: printable text types, arrows and Home/End/PageUp/PageDown move the caret
-(`Shift` extends), backspace and delete remove, `Ctrl+Z` undoes a burst and `Ctrl+Y` redoes one,
+(`Shift` extends, `Ctrl/Option+Arrow` steps by word), backspace and delete remove
+(`Ctrl/Option+Backspace/Delete` removes by word), `Ctrl+Z` undoes a burst and `Ctrl+Y` redoes one,
 `Ctrl+A` selects all, `Ctrl+S` writes through, `Ctrl+F` opens find (Tab switches to replace-all),
-`Ctrl+L` requests a cooperative emergency wipe, and `Ctrl+G` shows what the process can claim
-about its own memory, `Esc` dismisses that panel, and `Ctrl+Q` or `Ctrl+C` quits after sealing what
-is open — if that last save is refused, the window says so and exits non-zero rather than claiming
-success (D-49).
+`Ctrl+K` edits hyperlinks (GUI), `Ctrl+R` (TUI) / `Ctrl+H` (GUI) opens witness history,
+`Ctrl+Shift+D` toggles dark paper (`#1A1A19`), `Ctrl+L` requests a cooperative emergency wipe,
+`Ctrl+G` shows what the process can claim about its own memory and OS window protections, `Esc`
+dismisses overlays, and `Ctrl+Q` or `Ctrl+C` quits after sealing what is open — if that last save
+is refused, the window says so and exits non-zero rather than claiming success (D-49).
 
 A wipe is reported by its own evidence, on that same policy (D-89). The window keeps the reaper's
 measured outcome instead of discarding it: **confirmed** prints the bytes, arenas, canaries and
@@ -89,15 +91,15 @@ detail lives.
 | Sealed world-line, append + witness + spine manifest + compaction | **Real, measured in CI** | `holonomy-line`; L-6 and L-10 are separate CI jobs |
 | Slab spine, history, resident set | **Real, measured in CI** | `holonomy-text`; zero-allocation keystroke claim counted by an allocator in CI |
 | Commit boundary (seal + manifest → world-line) | **Real, measured in CI** | `holonomy-text`; proven against the real container |
-| Eye geometry: clusters, UAX #9 BiDi, cell display width, run tree, zoom/DPI, height index | **Real, measured in CI** | `holonomy-eye`; 30 M-word real-`Face` viewport latency (`OQ-12`) + UAX #9 `script_gate` (`OQ-11`) |
+| Eye geometry: clusters, UAX #9 BiDi, `GDEF`/`GSUB`/`GPOS` OpenType shaping, cell display width, run tree, zoom/DPI, height index | **Real, measured in CI (`L-8` gated)** | `holonomy-eye`; 30 M-word real-`Face` viewport latency (`OQ-12`), `GSUB`/`GPOS` (`OQ-24`), + UAX #9 `script_gate` (`OQ-11`) |
 | Editor loop: intents in, measured frames out | **Real, measured in CI** | `holonomy-shell` |
-| Terminal window, X11 pixel desktop, & CLI: open, type, save, unlock, panel, `gui`, `import`, `export`, `migrate-v5`, `verify`, `compact` | **Real** (`holonomy <doc>` PTY verified in CI; `holonomy gui` X11 pixel/wire tests pass headless, live X server unrun in CI) | `holonomy-gui`, `holonomy-eye::raster`, `AUDIT.md` D-94 |
+| Terminal window, cross-OS native desktop (`X11` / `Cocoa` / `Win32`), & CLI: open, type, save, unlock, panel, `gui`, `import`, `export`, `migrate-v5`, `verify`, `compact` | **Real** (`holonomy <doc>` PTY verified + `holonomy-gui` Xvfb framebuffer/xdotool E2E verified on Linux + cross-compiled/tested on macOS & Windows) | `holonomy-gui`, `holonomy-eye::raster`, `scripts/qualify-x11-gui.sh`, `AUDIT.md` D-94/D-95 |
 | That binary, driven end to end by CI | **Real** — created, sealed, reopened, `verify`, `compact`, `import`, `export`, wrong/empty passphrases refused | `scripts/smoke-install.sh` (D-72), `tests/transfer_migrate.rs` |
-| A packaged release or installer | **An unsigned Linux x86_64 tarball** per `v*` tag, built from the lockfile and smoke-tested before packaging (D-90). No installer, no signature, no macOS/Windows build | `docs/TO-APP.md` M8, `.github/workflows/release.yml` |
-| Opening a copied file on a fresh profile (`L-9`) | **The process half is measured**: a copy is imported in a second process with a scrubbed environment and an empty state tree that must stay empty, so no account, token, device or config is required (D-92). A second *machine* — different kernel, libc, filesystem — is still unmeasured | `scripts/qualify-l9-portability.sh`, CI job `portability` |
-| GPUI / macOS / Windows native shells, `GSUB`/`GPOS` shaping, IME | **Not built** — pure-`libc` X11 pixel desktop + `loca`/`glyf` rasterizer (`holonomy gui`) exist on Linux alongside the terminal grid; GPUI & `GSUB`/`GPOS` (`OQ-24`) remain open | `docs/TO-APP.md` M4b-ii, `AUDIT.md` D-94 |
+| A packaged release or installer | **Unsigned archives for Linux x86_64, macOS arm64, and Windows x86_64** per `v*` tag, built from the lockfile and smoke-tested before packaging. No installer, no signing/notarization | `docs/TO-APP.md` M8, `.github/workflows/release.yml` |
+| Opening a copied file on a fresh profile (`L-9`) | **Process half + 3-OS compilation measured**: imported under `env -i` with empty state tree (`HOME`/`XDG_*`/`TMPDIR` untouched; GUI recent list opt-in OFF by default), plus macOS/Windows CI builds. A second *physical* machine remains unmeasured | `scripts/qualify-l9-portability.sh`, CI jobs `portability` & `cross-os` |
+| GPUI & platform IME | **Not built** — pure-FFI X11/Cocoa/Win32 native desktop shells + `FontSet` OpenType rasterizer & `GDEF`/`GSUB`/`GPOS` shaper (`OQ-24` closed) exist on all three OSes; GPUI (requires crates.io resolution) & IME composition remain open | `docs/TO-APP.md` M4b-ii, `AUDIT.md` D-94/D-95 |
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
-| Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection** (`displaced = 0`, split selection spans); contextual glyph joining (`GSUB`/`GPOS`) is not built | OQ-11 (D-77), OQ-24 |
+| Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection + `GDEF`/`GSUB`/`GPOS` shaping** (`displaced = 0`, split selection spans, kerning/ligatures/marks) | OQ-11 (D-77), OQ-24 (D-95) |
 | Emergency wipe & zeroize canaries (`L-7`) | **Not qualified.** Historical headless tests wipe selected buffers and canaries; the live reaper is cooperative and can stall with the UI, so a blocked window cannot meet the 50 ms deadline. The window now reports a wipe by the reaper's own outcome and exits 1 when it cannot be confirmed (D-89), but that is a receipt for *registered* arenas, not complete plaintext coverage. A Linux isolated-supervisor test is not wired into the editor. | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-82–D-89) |
 | Crash before a save | **Unsaved edits can be lost.** The open typing buffer and unsaved structural changes are not durable until a successful commit; physical power-loss behavior remains unqualified. | D-64, OQ-29/OQ-30 |
 | Search and replace | **Streaming find + streaming dense replace-all** — `find_all` still refuses > 16,384 positions, while `replace_all` streams dense replacements (`30,013,649` matches in CI, `1.83 MiB` heap delta vs `4 MiB` bound) via `StreamingTx` whenever the sink supports streaming | `holonomy-text::search`, `AUDIT.md` D-94, `docs/BOUNDED_SEARCH_AND_WIPE.md` |
@@ -114,40 +116,32 @@ One document per window is a scope decision, not a defect.
 
 ## Status
 
-**Zero of the ten laws are `gated`.** `docs/GATES.md` lists all ten as `spec`; that file is
-generated from `crates/holonomy-ledger/src/laws.rs`, and `xtask gates --check` fails the build if
-the two ever disagree. A law becomes `gated` when an enforcing block lands and CI measures it — not
-before, and not by editing prose.
+**Three of the ten laws (`L-1`, `L-2`, `L-8`) are `gated`.** The remaining seven (`L-3`..`L-7`,
+`L-9`, `L-10`) remain `spec` in `docs/GATES.md`; that file is generated from
+`crates/holonomy-ledger/src/laws.rs`, and `xtask gates --check` fails the build if the two ever
+disagree. A law becomes `gated` only when its enforcing measurements run cleanly in CI — not by
+editing prose.
 
 `docs/TO-APP.md` tracks the app in milestones; `ROADMAP.md` tracks the ten construction blocks.
-**M0–M7 are done. M8 is partially done and M4b-ii is blocked** — see `docs/TO-APP.md`. The build is
-not packaged and there is no per-platform release; the gates that remain are the ones about a
-shipped app on reference hardware. Block 6's deliverable — a GPUI window with quiet-md's page — is
-**not** met; its terminal half is.
+**M0–M7 are done, M8 produces unsigned release bundles for Linux, macOS, and Windows, and
+pure-FFI X11/Cocoa/Win32 desktop windows replace GPUI in this offline `--locked` tree** — see
+`docs/TO-APP.md` and `AUDIT.md` D-94/D-95.
 
 ## Installing it
 
-**There is no installer, and nothing is signed.** What exists is an unsigned, experimental tarball
-for one platform, published only on a `v*` tag by `.github/workflows/release.yml` (D-90). It is
-built from the committed lockfile, driven through `scripts/smoke-install.sh` *before* it is packaged,
-and it carries a `.sha256`, a `.provenance.txt`, and a `README-RELEASE.txt` whose first line says it
-is unsigned and not for irreplaceable work. There is no macOS or Windows build, so for anyone else
-the only way to run the app is from source with a Rust toolchain — clone the repository and run it
-from there:
+**There is no installer, and nothing is signed or notarized.** `.github/workflows/release.yml`
+builds unsigned experimental archives for Linux (`x86_64`), macOS (`aarch64`), and Windows
+(`x86_64`) on `v*` tags from the committed lockfile, drives the Linux binary through
+`scripts/smoke-install.sh` before packaging, and ships `.sha256`, `.provenance.txt`, and
+`README-RELEASE.txt`. You can also build from source with a Rust toolchain:
 
 ```text
 cargo run --release -p holonomy-gui --bin holonomy -- notes.wavefunction
+cargo run --release -p holonomy-gui --bin holonomy-gui -- notes.wavefunction
 ```
 
-The binary is named `holonomy` if you want to install it yourself
-(`cargo install --path crates/holonomy-gui`); note that the crate is marked `publish = false` and
-that command is **not exercised by CI**, so treat it as untested. The `cargo run` line above is the
-one the smoke test uses and the one this README can stand behind.
-
-That is a real gap rather than a stylistic one: the remaining artifacts need signing and two more
-platforms this project does not have, and L-9's "opens on any machine" claim cannot be measured
-until the same file has been opened on a second machine — a tarball is the prerequisite for that
-drill, not the drill itself.
+`L-9`'s full cross-machine physical drill (opening the same copied `.wavefunction` across separate
+physical hardware) remains `spec` in `docs/GATES.md`.
 
 ## Verifying it yourself
 

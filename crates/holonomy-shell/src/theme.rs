@@ -180,6 +180,35 @@ pub const QUIET_MD_THEME: PageTheme = PageTheme {
     ],
 };
 
+/// Dark-mode `quiet-md` surface palette (`docs/UI-SPEC.md` §1 & §7, `#1A1A19` dark paper).
+///
+/// Shares identical typographic geometry (`page_max_width_px`, `body_size_px`, `body_line_px`,
+/// `paragraph_gap_px`, `headings`) with [`QUIET_MD_THEME`] so light/dark switching never reflows
+/// or breaks `Law L-8`.
+pub const QUIET_MD_DARK_THEME: PageTheme = PageTheme {
+    toolbar_height_px: QUIET_MD_THEME.toolbar_height_px,
+    toolbar_group_gap_px: QUIET_MD_THEME.toolbar_group_gap_px,
+    toolbar_overflow_width_px: QUIET_MD_THEME.toolbar_overflow_width_px,
+    page_max_width_px: QUIET_MD_THEME.page_max_width_px,
+    body_size_px: QUIET_MD_THEME.body_size_px,
+    body_line_px: QUIET_MD_THEME.body_line_px,
+    paragraph_gap_px: QUIET_MD_THEME.paragraph_gap_px,
+    caret_width_pt: QUIET_MD_THEME.caret_width_pt,
+    bg_body: Rgba8::rgb(0x1a, 0x1a, 0x19),
+    text: Rgba8::rgb(0xed, 0xed, 0xea),
+    text_caption: Rgba8::rgb(0xa3, 0xa3, 0x9e),
+    text_placeholder: Rgba8::rgb(0x74, 0x74, 0x70),
+    caret: Rgba8::rgb(0x5b, 0x9d, 0xff),
+    selection: Rgba8::rgba_pct(0x5b, 0x9d, 0xff, 28),
+    link: Rgba8::rgb(0x6c, 0xb6, 0xff),
+    line_divider: Rgba8::rgba_pct(0xff, 0xff, 0xff, 8),
+    line_border: Rgba8::rgba_pct(0xff, 0xff, 0xff, 12),
+    quote_bar: Rgba8::rgba_pct(0xed, 0xed, 0xea, 82),
+    code_bg: Rgba8::rgb(0x23, 0x23, 0x21),
+    code_gutter: Rgba8::rgb(0x20, 0x20, 0x1e),
+    headings: QUIET_MD_THEME.headings,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +286,17 @@ mod tests {
                 "docs/UI-SPEC.md drifted from QUIET_MD_THEME row: {expected_row}"
             );
         }
+    }
+
+    #[test]
+    fn dark_theme_matches_ui_spec_dark_paper_and_preserves_geometry() {
+        let spec = include_str!("../../../docs/UI-SPEC.md");
+        assert!(spec.contains("#1A1A19"));
+        assert_eq!(QUIET_MD_DARK_THEME.bg_body.hex_rgb(), "#1a1a19");
+        assert_eq!(
+            QUIET_MD_DARK_THEME.page_max_width_px,
+            QUIET_MD_THEME.page_max_width_px
+        );
+        assert_eq!(QUIET_MD_DARK_THEME.headings, QUIET_MD_THEME.headings);
     }
 }
