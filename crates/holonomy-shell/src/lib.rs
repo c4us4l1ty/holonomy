@@ -1130,7 +1130,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             }
             leaf -= 1;
         }
-        let mut out = Vec::new();
+        let mut out: Vec<ClusterMeta> = Vec::new();
         let mut carry = ClusterContext::START;
         for &(from, to) in ranges.iter().rev() {
             let read = self.read(from, to)?;
@@ -1170,7 +1170,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         let Some(mut leaf) = self.leaf_of(at) else {
             return Ok(Vec::new());
         };
-        let mut out = Vec::new();
+        let mut out: Vec<ClusterMeta> = Vec::new();
         let mut collected = 0u64;
         let mut cursor = at;
         let mut carry = ClusterContext::START;
@@ -1272,15 +1272,14 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             .map(|c| c.is_word)
             .or_else(|| before.last().map(|c| c.is_word))
             .unwrap_or(false);
-        let target_is_space = after
-            .first()
-            .is_some_and(|c| c.is_space && !c.is_newline);
+        let target_is_space = after.first().is_some_and(|c| c.is_space && !c.is_newline);
+        let matches = |c: &ClusterMeta| {
+            (target_is_word && c.is_word) || (target_is_space && c.is_space && !c.is_newline)
+        };
 
         let mut lo = at;
         for c in before.iter().rev() {
-            if (target_is_word && c.is_word)
-                || (target_is_space && c.is_space && !c.is_newline)
-            {
+            if matches(c) {
                 lo = c.start;
             } else {
                 break;
@@ -1288,9 +1287,7 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         }
         let mut hi = at;
         for c in &after {
-            if (target_is_word && c.is_word)
-                || (target_is_space && c.is_space && !c.is_newline)
-            {
+            if matches(c) {
                 hi = c.end;
             } else {
                 break;

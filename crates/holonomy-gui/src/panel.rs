@@ -414,9 +414,7 @@ mod tests {
         changed.window_security.secure_input = SecureInputState::Active;
         changed.usb_hardener_armed = true;
         assert!(changed.window_security_line().contains("excluded"));
-        assert!(changed
-            .window_security_line()
-            .contains("secure input active"));
+        assert!(changed.window_security_line().contains("secure input active"));
         assert!(changed.clipboard_usb_line().contains("armed"));
     }
 

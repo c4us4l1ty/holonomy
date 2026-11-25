@@ -452,32 +452,28 @@ fn word_navigation_multi_click_and_status_metrics_work_across_leaves() {
     shell.reflow().expect("reflowed");
 
     // WordRight / WordLeft navigation & DeleteWordBefore / DeleteWordAfter.
-    shell
-        .apply(Intent::Move {
-            to: Move::DocumentStart,
-            extend: false,
-        })
-        .expect("home");
-    shell
-        .apply(Intent::Move {
-            to: Move::WordRight,
-            extend: false,
-        })
-        .expect("word right");
+    let home = Intent::Move {
+        to: Move::DocumentStart,
+        extend: false,
+    };
+    shell.apply(home).expect("home");
+    let word_r = Intent::Move {
+        to: Move::WordRight,
+        extend: false,
+    };
+    shell.apply(word_r).expect("word right");
     assert_eq!(shell.caret(), 5);
-    shell
-        .apply(Intent::Move {
-            to: Move::WordRight,
-            extend: true,
-        })
-        .expect("word right extend");
+    let word_r_ext = Intent::Move {
+        to: Move::WordRight,
+        extend: true,
+    };
+    shell.apply(word_r_ext).expect("word right extend");
     assert_eq!(shell.selection().normalised(), (5, 10));
-    shell
-        .apply(Intent::Move {
-            to: Move::WordLeft,
-            extend: false,
-        })
-        .expect("word left");
+    let word_l = Intent::Move {
+        to: Move::WordLeft,
+        extend: false,
+    };
+    shell.apply(word_l).expect("word left");
     assert_eq!(shell.caret(), 6);
 
     // Double-click word, triple-click line, quad-click paragraph via painted geometry.
@@ -488,13 +484,9 @@ fn word_navigation_multi_click_and_status_metrics_work_across_leaves() {
     };
     assert!(shell.select_word_at(frame_pt).expect("double click"));
     assert_eq!(shell.selection().normalised(), (6, 10));
-    assert!(shell
-        .select_visual_line_at(frame_pt)
-        .expect("triple click"));
+    assert!(shell.select_visual_line_at(frame_pt).expect("triple click"));
     assert_eq!(shell.selection().normalised().0, 0);
-    assert!(shell
-        .select_paragraph_at(frame_pt)
-        .expect("quad click"));
+    assert!(shell.select_paragraph_at(frame_pt).expect("quad click"));
     assert_eq!(shell.selection().normalised(), (0, 16));
 
     // DeleteWordAfter / DeleteWordBefore parity with intents.
@@ -508,13 +500,9 @@ fn word_navigation_multi_click_and_status_metrics_work_across_leaves() {
 
     // Link inspection and status metrics.
     shell.select_range(1, 5).expect("select beta");
-    shell
-        .apply(Intent::SetLink(Some("https://holonomy.invalid/word".to_owned())))
-        .expect("link");
-    assert_eq!(
-        shell.link_at_caret().as_deref(),
-        Some("https://holonomy.invalid/word")
-    );
+    let set_link = Intent::SetLink(Some("https://holonomy.invalid/word".to_owned()));
+    shell.apply(set_link).expect("link");
+    assert_eq!(shell.link_at_caret().as_deref(), Some("https://holonomy.invalid/word"));
     let metrics = shell.status_metrics();
     assert!(metrics.words_exact);
     assert!(metrics.total_words >= 4);

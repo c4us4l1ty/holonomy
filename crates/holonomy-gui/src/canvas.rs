@@ -3413,7 +3413,8 @@ fn run_desktop_with_window(
                     }
 
                     if let Some(ref mut url) = link_bar {
-                        let close_link = handle_link_key(&mut app, url, key, modifiers, &mut status_msg);
+                        let close_link =
+                            handle_link_key(&mut app, url, key, modifiers, &mut status_msg);
                         if close_link {
                             link_bar = None;
                         }
@@ -4257,20 +4258,18 @@ mod tests {
             hits.iter().any(|h| h.action == ToolbarAction::ToggleOverflow),
             "narrow toolbar must expose clickable overflow button"
         );
-        let overflow_hits =
-            render_toolbar_with(&mut app, SecurityDotState::Unprotected, false, false, true, false);
-        assert!(
-            overflow_hits
-                .iter()
-                .any(|h| h.action == ToolbarAction::ZoomIn),
-            "opening overflow popup must reveal collapsed controls"
+        let overflow_hits = render_toolbar_with(
+            &mut app,
+            SecurityDotState::Unprotected,
+            false,
+            false,
+            true,
+            false,
         );
-        assert!(
-            overflow_hits
-                .iter()
-                .any(|h| h.action == ToolbarAction::ToggleTheme),
-            "overflow popup must expose light/dark theme toggle"
-        );
+        let has_zoom = overflow_hits.iter().any(|h| h.action == ToolbarAction::ZoomIn);
+        assert!(has_zoom, "opening overflow popup must reveal collapsed controls");
+        let has_theme = overflow_hits.iter().any(|h| h.action == ToolbarAction::ToggleTheme);
+        assert!(has_theme, "overflow popup must expose light/dark theme toggle");
 
         let facts = Facts::gather_with(app.residency(), &doc, LockCapability::None, None);
         render_security_overlay(app.surface_mut(), &facts);
@@ -4493,10 +4492,8 @@ mod tests {
         apply_toolbar_action(&mut app, ToolbarAction::ToggleTheme).expect("dark mode");
         assert_eq!(app.surface().theme(), QUIET_MD_DARK_THEME);
         assert!(app.draw().expect("dark paint"));
-        assert!(app
-            .surface()
-            .pixels()
-            .contains(&rgba_to_xrgb(QUIET_MD_DARK_THEME.bg_body)));
+        let dark_px = rgba_to_xrgb(QUIET_MD_DARK_THEME.bg_body);
+        assert!(app.surface().pixels().contains(&dark_px));
 
         // CycleSize advances 15px -> 17px -> 21px.
         app.editor().select_range(0, 3).expect("select one");
@@ -4512,31 +4509,22 @@ mod tests {
 
         // Ctrl+Backspace deletes word before caret; Ctrl+Left jumps word.
         app.editor().select_range(7, 7).expect("after two");
-        app.press(Key::Backspace, Modifiers::control())
-            .expect("ctrl+backspace");
+        app.press(Key::Backspace, Modifiers::control()).expect("ctrl+backspace");
         assert_eq!(app.frame_text().expect("frame"), "one \nthree four");
-        app.press(Key::Left, Modifiers::control())
-            .expect("ctrl+left");
+        app.press(Key::Left, Modifiers::control()).expect("ctrl+left");
         assert_eq!(app.editor().selection().anchor(), 0);
 
         // SetLink & link_at_caret roundtrip.
         app.editor().select_range(0, 3).expect("select one");
-        app.editor()
-            .apply(Intent::SetLink(Some("https://holonomy.example".to_owned())))
-            .expect("set link");
-        assert_eq!(
-            app.editor().link_at_caret().as_deref(),
-            Some("https://holonomy.example")
-        );
+        let link = Intent::SetLink(Some("https://holonomy.example".to_owned()));
+        app.editor().apply(link).expect("set link");
+        assert_eq!(app.editor().link_at_caret().as_deref(), Some("https://holonomy.example"));
 
         // Scrollbar & recovery banner render without panics.
         let metrics = app.editor().status_metrics();
         app.surface_mut().render_scrollbar(metrics);
-        let dismiss = render_recovery_banner(
-            app.surface_mut(),
-            42,
-            i32::from(QUIET_MD_THEME.toolbar_height_px),
-        );
+        let bar_y = i32::from(QUIET_MD_THEME.toolbar_height_px);
+        let dismiss = render_recovery_banner(app.surface_mut(), 42, bar_y);
         assert!(dismiss.is_some());
         render_link_bar(app.surface_mut(), "https://holonomy.example");
     }
