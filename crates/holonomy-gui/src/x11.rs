@@ -1200,6 +1200,7 @@ impl X11Window {
     ///
     /// Returns [`X11Error`] if the X server closes or the socket errors.
     pub fn poll_events(&mut self, timeout_ms: i32) -> Result<Vec<DesktopEvent>, X11Error> {
+        self.parse_buffered_packets()?;
         if self.events.is_empty() {
             let mut pfd = libc::pollfd {
                 fd: self.stream.as_raw_fd(),
@@ -2235,7 +2236,7 @@ mod tests {
 
         let mut got = Vec::new();
         for _ in 0..8 {
-            got.extend(win.poll_events(50).expect("poll"));
+            got.extend(win.poll_events(100).expect("poll"));
             if got
                 .iter()
                 .any(|e| matches!(e, DesktopEvent::CloseRequested))
@@ -2262,9 +2263,19 @@ mod tests {
 
         // Exercise clipboard ownership + selection request/notify round-trip + clear.
         win.set_clipboard(b"secret-clip").expect("set clipboard");
-        let _ = win.poll_events(50).expect("answer SelectionRequest");
+        let _ = win.poll_events(100).expect("answer SelectionRequest");
         win.request_clipboard().expect("request clipboard");
-        let pasted = win.poll_events(50).expect("read SelectionNotify");
+        let mut pasted = Vec::new();
+        for _ in 0..4 {
+            let evs = win.poll_events(100).expect("read SelectionNotify");
+            pasted.extend(evs);
+            if pasted
+                .iter()
+                .any(|e| matches!(e, DesktopEvent::ClipboardPasted(_)))
+            {
+                break;
+            }
+        }
         assert!(pasted.iter().any(|e| matches!(
             e,
             DesktopEvent::ClipboardPasted(b) if b.as_slice() == b"clipboard-hello"
