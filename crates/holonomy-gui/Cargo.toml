@@ -17,11 +17,13 @@ holonomy-shell = { path = "../holonomy-shell" }
 holonomy-eye = { path = "../holonomy-eye" }
 # The document engine, for building a session — the same one the shell tests use.
 holonomy-text = { path = "../holonomy-text" }
-# Raw mode and the window size, for the terminal front end. Already in the lockfile for the
-# seal's page locking, so this adds no dependency to the tree.
-libc.workspace = true
 # The document's file: a `.wavefunction` world-line, appended one sealed leaf at a time.
 holonomy-line = { path = "../holonomy-line" }
 # The passphrase, the capsule and the DEM key the segments are sealed with.
 holonomy-seal = { path = "../holonomy-seal" }
 zeroize = { workspace = true }
+
+# Raw mode and the window size, for the Unix terminal and X11 front ends. Already in the
+# lockfile for the seal's page locking, so this adds no dependency to the tree.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

@@ -22,6 +22,8 @@ shake.workspace = true
 argon2.workspace = true
 rand_core.workspace = true
 zeroize.workspace = true
-libc.workspace = true
 unicode-normalization.workspace = true
 getrandom = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

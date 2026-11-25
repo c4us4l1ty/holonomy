@@ -807,13 +807,13 @@ fn cold_open_30m_word_document_stays_under_residency_budget() {
     editor.set_view(View::IDENTITY);
     let frame = editor.frame().expect("first frame boots lazily");
     let open_ms = open_start.elapsed().as_millis();
-
-    let resident = editor.residency().resident_bytes();
-    let segments = editor.residency().resident_segments();
     assert!(
         !frame.text().is_empty() && frame.text().starts_with("alpha "),
         "first viewport must render live 30M-word prose"
     );
+
+    let resident = editor.residency().resident_bytes();
+    let segments = editor.residency().resident_segments();
     assert!(
         resident <= store::BUDGET && resident <= 2 * 1024 * 1024,
         "cold open must fault only viewport leaves, not the 183 MiB document (got {resident} B)"
