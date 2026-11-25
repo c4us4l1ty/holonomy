@@ -1155,7 +1155,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(rep.slot_count, 2);
+        let expected_slots = payload.len().div_ceil(V5_PAYLOAD_PLAINTEXT_PER_SLOT);
+        assert_eq!(rep.slot_count, expected_slots);
         assert_eq!(recovered, payload);
 
         // Wrong passphrase or wrong kappa rejects cleanly

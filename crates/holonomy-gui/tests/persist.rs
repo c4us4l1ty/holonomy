@@ -625,8 +625,14 @@ fn dense_streaming_replace_all_over_real_document_persists_and_undoes() {
     drop(source);
 
     let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens dense");
-    assert_eq!(String::from_utf8(all_bytes(&reopened)).unwrap(), "XYZ ".repeat(17_000));
-    assert_eq!(open_window(&reopened).document_len(), ("XYZ ".len() * 17_000) as u64);
+    assert_eq!(
+        String::from_utf8(all_bytes(&reopened)).unwrap(),
+        "XYZ ".repeat(17_000)
+    );
+    assert_eq!(
+        open_window(&reopened).document_len(),
+        ("XYZ ".len() * 17_000) as u64
+    );
     reopened.verify().unwrap();
     drop(reopened);
 
