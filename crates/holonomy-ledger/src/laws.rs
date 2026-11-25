@@ -51,14 +51,14 @@ pub const LAWS: &[Law] = &[
         name: "Lifetime scale",
         bound: "\u{2265} 30,000,000 words, \u{2265} 10,000 pages, 60 years of daily growth",
         block: "Block 4 \u{2014} The Spine",
-        status: LawStatus::Spec,
+        status: LawStatus::Gated,
     },
     Law {
         id: "L-2",
         name: "Eyes-only residency",
         bound: "resident plaintext bounded by the viewport neighborhood; the same bound at 1 page and at 30M words; zero allocations on the keystroke path",
         block: "Block 4 \u{2014} The Spine",
-        status: LawStatus::Spec,
+        status: LawStatus::Gated,
     },
     Law {
         id: "L-3",
@@ -100,7 +100,7 @@ pub const LAWS: &[Law] = &[
         name: "One geometry",
         bound: "for every shaped glyph: hit_test(paint_point(glyph)) == glyph, at every zoom and DPI",
         block: "Block 5 \u{2014} The Eye",
-        status: LawStatus::Spec,
+        status: LawStatus::Gated,
     },
     Law {
         id: "L-9",
@@ -149,31 +149,35 @@ pub const BUDGETS: &[Budget] = &[
         vision: "Document size: \u{2265} 30,000,000 words, \u{2265} 10,000 pages, 60-year growth",
         law: "L-1",
         measured_by: Some(
-            "`holonomy-text` tests::open_memory and tests::keystroke_latency both build a \
-             30 M-word / 44,000-leaf spine, so the scale is exercised, not argued",
+            "`holonomy-text` tests::open_memory and tests::keystroke_latency (30 M-word spine), \
+             `holonomy-eye` viewport_latency (30 M-word shaped layout), and `holonomy-gui` \
+             persist::{sixty_year_21900_witness_scrub_and_reverify, \
+             cold_open_30m_word_document_stays_under_residency_budget}",
         ),
-        owes: "the surviving-life requirement: growth, seal, reopen and re-verify over simulated \
-               decades, which is Block 8's history scrub",
+        owes: "nothing in software: 30 M-word scale and 60-year (21,900 witness) growth, \
+               reopen, scrub, and re-verify are all asserted in CI",
     },
     Budget {
         vision: "Open: cold open of a maximum-size document in seconds, not minutes",
         law: "L-3",
         measured_by: Some(
-            "`holonomy-text` tests::open_memory prints HOLONOMY_OPEN_MEMORY per size, with the \
-             index asserted",
+            "`holonomy-text` tests::open_memory prints HOLONOMY_OPEN_MEMORY per size, and \
+             `holonomy-gui` persist::cold_open_30m_word_document_stays_under_residency_budget \
+             times a real sealed 30 M-word reopen + first frame (HOLONOMY_COLD_OPEN_30M <= 10 s)",
         ),
-        owes: "an actual clock on a cold open of a sealed 30 M-word file, which needs the real \
-               reader and reference hardware",
+        owes: "reference-hardware calibration on target consumer hardware (Block 10)",
     },
     Budget {
         vision: "Resident plaintext: bounded by viewport neighborhood, independent of length",
         law: "L-2",
         measured_by: Some(
             "`holonomy-text` tests::open_memory asserts the ResidentSet bound at two sizes; \
-             tests::keystroke_allocations counts zero allocations on the keystroke path",
+             tests::keystroke_allocations counts zero allocations on the keystroke path; \
+             `holonomy-gui` persist::cold_open_30m_word_document_stays_under_residency_budget \
+             asserts <= 2 MiB resident at 30 M words",
         ),
-        owes: "nothing for the plaintext bound itself — this is the one row whose measured half \
-               is the whole claim, and the index is separate (D-36)",
+        owes: "nothing for the plaintext bound itself \u{2014} this is the one row whose measured \
+               half is the whole claim, and the index is separate (D-36)",
     },
     Budget {
         vision: "Character echo: under one display refresh, at any offset, at any size",
@@ -182,18 +186,18 @@ pub const BUDGETS: &[Budget] = &[
             "`holonomy-text` tests::keystroke_latency interleaves offset 0 and N-1 and prints \
              HOLONOMY_KEYSTROKE_LATENCY p50/p99",
         ),
-        owes: "the p99 on reference hardware and the paint half — keystroke-to-*paint*, not \
+        owes: "the p99 on reference hardware and the paint half \u{2014} keystroke-to-*paint*, not \
                keystroke-to-edit, which needs Block 6's renderer",
     },
     Budget {
         vision: "Idle work: zero repaint, zero background scanning when nothing changes",
         law: "L-5",
         measured_by: Some(
-            "`holonomy-gui` bin tests::an_idle_window_writes_nothing, verified by breaking it \
-             (AUDIT D-68)",
+            "`holonomy-gui` bin tests::an_idle_window_writes_nothing and `holonomy-gui` \
+             canvas::tests::desktop_app_idle_draw_performs_zero_repaints (AUDIT D-68)",
         ),
-        owes: "the same guarantee inside Block 6's GPU paint path; on the character grid it is \
-               tested but the law names Block 6 (D-69)",
+        owes: "the same guarantee inside Block 6's GPUI GPU paint path (unbuilt under --locked); \
+               tested on both CellSurface and PixelSurface (D-68/D-69)",
     },
     Budget {
         vision: "Save: touches appended segments only; atomic; survives power loss",
@@ -223,12 +227,10 @@ pub const BUDGETS: &[Budget] = &[
         measured_by: Some(
             "`scripts/qualify-l9-portability.sh` (CI job `portability`) copies a document and \
              imports it in a second process under `env -i` with every `HOME`/`XDG_*`/`TMPDIR` \
-             pointed at an empty directory that must stay empty — the process half of the law \
-             (`HOLONOMY_PORTABILITY L-9=partial`)",
+             pointed at an empty directory that must stay empty (`HOLONOMY_PORTABILITY \
+             L-9=partial`), plus cross-OS matrix compilation and tests on Linux, macOS, and Windows",
         ),
-        owes: "a copied file opened on a second machine and platform — the drill above carries \
-               the file, the passphrase and nothing else, but it is still one kernel and one \
-               libc, which is Block 10's release matrix",
+        owes: "a copied file opened on a second physical machine in the Block 10 release drill",
     },
     Budget {
         vision: "Tail-only sync: backing up after a save transfers O(appended bytes)",

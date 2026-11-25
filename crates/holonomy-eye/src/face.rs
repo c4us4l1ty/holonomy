@@ -1,36 +1,25 @@
-//! A real face: OpenType metrics read straight out of a font file (`docs/TO-APP.md` M3).
+//! A real face: OpenType metrics and `GDEF`/`GSUB`/`GPOS` shaping read straight out of a font
+//! file (`docs/TO-APP.md` M3, `AUDIT OQ-24`).
 //!
-//! Everything in this crate until now was arithmetic over a [`Shaper`](crate::Shaper) that a test
-//! wrote. This module reads the numbers from an actual font — `head`, `hhea`, `hmtx`, `maxp` and
-//! `cmap` — so proportional advances, the font's own ascent and descent, and a character-to-glyph
-//! map are real rather than assumed. Nothing else is read: no outlines, no hinting, no GPOS.
-//!
-//! # What this is, and what it is not
-//!
-//! It is **metrics**. `advance` for a cluster is the sum of its characters' horizontal advances,
-//! which is exactly right for a font whose shaping is one glyph per character — the Latin case
-//! this editor's first release is typed in — and is a *measurement*, not a guess, for every
-//! character in the file's `cmap`.
-//!
-//! It is not **shaping**. Kerning, ligatures, mark positioning, Arabic joining and every other
-//! substitution live in `GSUB`/`GPOS`, which this module does not read; complex scripts need a real
-//! shaper (HarfBuzz or equivalent) behind the same [`Shaper`] trait, and until one is there,
-//! `AUDIT.md` records that as open rather than pretending the sum is the width. The trait is the
-//! boundary on purpose: swapping in a shaper that reads `GSUB`/`GPOS` changes no geometry code.
+//! This module reads `head`, `hhea`, `hmtx`, `maxp`, `cmap` plus optional OpenType `GDEF`, `GSUB`,
+//! and `GPOS` layout tables (parsed by `opentype.rs` with zero external dependencies and zero
+//! `unsafe`), so proportional advances, kerning (`PairPos`), ligatures/contextual forms (`GSUB`),
+//! mark attachment (`MarkToBase`/`MarkToLigature`/`MarkToMark`), and Arabic/Syriac/N'Ko/Adlam
+//! joining are real measurements rather than assumed per-character sums.
 //!
 //! # Why the file is parsed here and not by a library
 //!
-//! A parser for five tables is a few hundred lines of integer arithmetic with no unsafe, and this
-//! crate may not add a dependency for it: the workspace's lockfile is committed and CI builds
-//! `--locked`, so a dependency is a supply-chain decision, not a convenience. The tables read here
-//! are the ones a metrics contract needs; if shaping arrives, the crate that brings it brings its
-//! own parser and this module becomes a fallback that the tests keep honest.
+//! The workspace lockfile is committed and CI builds `--locked`, so adding a dependency like
+//! `harfbuzz`/`rustybuzz` is a supply-chain decision, not a convenience. Reading the OpenType
+//! tables directly in pure Rust preserves zero dependencies while satisfying [`Shaper`] for both
+//! `Layout` and `PixelSurface`.
 //!
 //! Sizes are scaled exactly: `advance_units * size_milli * 64 / (units_per_em * 1000)` in `i64`,
 //! rounded down, so a 2× size is within one sixty-fourth of a unit of twice the width rather than
 //! drifting by a rounding error per glyph.
 
 use crate::geom::Fixed;
+use crate::opentype::{ShapedGlyph, ShapingTables};
 use crate::shaper::Shaper;
 use crate::style::Style;
 use std::collections::BTreeMap;
@@ -76,10 +65,13 @@ pub struct Face {
     advances: Vec<u16>,
     /// Character → glyph, sorted, so a lookup is a binary search.
     cmap: BTreeMap<u32, u16>,
+    /// Optional OpenType `GDEF`/`GSUB`/`GPOS` shaping tables (`OQ-24`).
+    shaping: ShapingTables,
 }
 
 impl Face {
-    /// Reads a face's metrics from an OpenType or TrueType file's bytes.
+    /// Reads a face's metrics and optional OpenType `GDEF`/`GSUB`/`GPOS` shaping tables from an
+    /// OpenType or TrueType file's bytes.
     ///
     /// # Errors
     ///
@@ -120,12 +112,18 @@ impl Face {
             advances.push(advance);
         }
         let cmap = tables.get(bytes, b"cmap").and_then(read_cmap)?;
+        let shaping = ShapingTables::parse(
+            tables.get(bytes, b"GDEF").ok(),
+            tables.get(bytes, b"GSUB").ok(),
+            tables.get(bytes, b"GPOS").ok(),
+        );
         Ok(Self {
             units_per_em,
             ascender,
             descender,
             advances,
             cmap,
+            shaping,
         })
     }
 
@@ -175,6 +173,23 @@ impl Face {
             .unwrap_or_default()
     }
 
+    /// Shapes a slice of grapheme clusters through this face's OpenType `GDEF`/`GSUB`/`GPOS`
+    /// tables, returning positioned glyphs in font design units.
+    #[must_use]
+    pub fn shape(&self, clusters: &[&str]) -> Vec<ShapedGlyph> {
+        self.shaping.shape(
+            clusters,
+            |ch| self.glyph(ch).unwrap_or(0),
+            |gid| i32::from(self.advances.get(usize::from(gid)).copied().unwrap_or(0)),
+        )
+    }
+
+    /// Scales `units` font units to logical units at `style`.
+    #[must_use]
+    pub fn scaled_signed(&self, units: i32, style: Style) -> Fixed {
+        self.scaled(i64::from(units), style)
+    }
+
     /// Scales `units` font units to logical units at `style`.
     pub(crate) fn scaled(&self, units: i64, style: Style) -> Fixed {
         let numerator = units * style.size_milli() * 64;
@@ -193,11 +208,67 @@ impl Shaper for Face {
         if Self::is_break(cluster) {
             return Fixed::ZERO;
         }
-        let units: i64 = cluster
-            .chars()
-            .map(|character| i64::from(self.advance_units(character)))
-            .sum();
+        let mut chars = cluster.chars();
+        let Some(first) = chars.next() else {
+            return Fixed::ZERO;
+        };
+        if chars.next().is_none() && (first as u32) < 0x0600 {
+            return self.scaled(i64::from(self.advance_units(first)), style);
+        }
+        let shaped = self.shape(&[cluster]);
+        let units: i64 = shaped.iter().map(|g| i64::from(g.x_advance)).sum();
         self.scaled(units, style)
+    }
+
+    fn shape_clusters(&self, clusters: &[&str], style: Style, out: &mut Vec<Fixed>) {
+        let mut fast_units = Vec::new();
+        if self.shaping.shape_clusters_latin_fast(
+            clusters,
+            |ch| self.glyph(ch).unwrap_or(0),
+            |gid| i32::from(self.advances.get(usize::from(gid)).copied().unwrap_or(0)),
+            &mut fast_units,
+        ) {
+            out.clear();
+            out.reserve(fast_units.len());
+            for units in fast_units {
+                out.push(self.scaled(i64::from(units), style));
+            }
+            return;
+        }
+
+        out.clear();
+        out.resize(clusters.len(), Fixed::ZERO);
+        if clusters.is_empty() {
+            return;
+        }
+        let glyphs = self.shape(clusters);
+        let mut per_cluster_units = vec![0i64; clusters.len()];
+        for g in &glyphs {
+            if g.cluster >= clusters.len() {
+                continue;
+            }
+            if g.cluster_span <= 1 {
+                per_cluster_units[g.cluster] += i64::from(g.x_advance);
+            }
+        }
+        for (idx, &units) in per_cluster_units.iter().enumerate() {
+            if !Self::is_break(clusters[idx]) {
+                out[idx] = self.scaled(units, style);
+            }
+        }
+        for g in &glyphs {
+            if g.cluster < clusters.len() && g.cluster_span > 1 {
+                let span = g.cluster_span.min(clusters.len() - g.cluster);
+                let total = self.scaled(i64::from(g.x_advance), style).sixtyfourths();
+                for j in 0..span {
+                    let lo = total * (j as i64) / (span as i64);
+                    let hi = total * (j as i64 + 1) / (span as i64);
+                    if !Self::is_break(clusters[g.cluster + j]) {
+                        out[g.cluster + j] += Fixed::from_64ths(hi - lo);
+                    }
+                }
+            }
+        }
     }
 
     fn line_height(&self, style: Style) -> Fixed {

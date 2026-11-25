@@ -665,3 +665,165 @@ fn witness_excerpt_trims_split_multibyte_utf8_boundaries() {
     let mid = document.read_witness_excerpt(1, 319, 326).unwrap();
     assert_eq!(mid, "tail");
 }
+
+fn fast_temp_path(label: &str) -> TempPath {
+    let dir = if std::path::Path::new("/dev/shm").is_dir() {
+        std::path::PathBuf::from("/dev/shm")
+    } else {
+        std::env::temp_dir()
+    };
+    let id = holonomy_seal::generate_container_id().expect("entropy");
+    let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+    TempPath(dir.join(format!("holonomy-persist-{label}-{hex}.wavefunction")))
+}
+
+#[test]
+#[ignore = "60-year (21,900 witness) benchmark; run in release CI `persist` job"]
+fn sixty_year_21900_witness_scrub_and_reverify() {
+    use std::time::Instant;
+
+    const DAYS: u64 = 60 * 365; // 21,900 daily witnesses
+    let path = fast_temp_path("60yr-21900w");
+    let document = Document::create_with(&path.0, PASSPHRASE, store::test_params())
+        .expect("creates 60-year world-line");
+    let mut typing = Typing::new(document.sink(), store::CAPACITY);
+
+    let write_start = Instant::now();
+    for day in 1..=DAYS {
+        let entry = if day % 3650 == 0 {
+            format!("decade-{day} milestone entry\n")
+        } else {
+            format!("d{day}\n")
+        };
+        typing.insert(entry.as_bytes()).expect("insert daily note");
+        typing.flush().expect("seal daily witness");
+    }
+    let write_ms = write_start.elapsed().as_millis();
+    drop(typing);
+
+    // Bookmarks across years 1, 10, 30, 60.
+    for (seq, name) in [
+        (365u64, "year-01"),
+        (3_650, "year-10"),
+        (10_950, "year-30"),
+        (DAYS, "year-60"),
+    ] {
+        document
+            .add_bookmark(seq, 1_700_000_000 + seq as i64 * 86_400, name)
+            .expect("bookmark");
+    }
+    drop(document);
+
+    // Cold reopen + witness scrub across all 60 years.
+    let reopen_start = Instant::now();
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens 60-year document");
+    let reopen_ms = reopen_start.elapsed().as_millis();
+    assert_eq!(reopened.witness_history().len() as u64, DAYS + 1);
+    assert_eq!(reopened.bookmarks().len(), 4);
+
+    let scrub_start = Instant::now();
+    let w_y1 = reopened.spine_at_witness(365).expect("y1 spine");
+    let w_y30 = reopened.spine_at_witness(10_950).expect("y30 spine");
+    let w_y60 = reopened.spine_at_witness(DAYS).expect("y60 spine");
+    assert!(w_y1.len() < w_y30.len() && w_y30.len() < w_y60.len());
+    let diff = reopened.diff_witnesses(10_950, DAYS).expect("diff y30->y60");
+    assert!(!diff.is_empty());
+    let excerpt = reopened
+        .read_witness_excerpt(3_650, 0, w_y30.len().min(64))
+        .expect("y10 excerpt");
+    assert!(!excerpt.is_empty());
+    let scrub_ms = scrub_start.elapsed().as_millis();
+
+    let hits = reopened
+        .find_nth_at_witness(DAYS, "milestone entry", 0)
+        .expect("bounded witness search at year 60");
+    assert_eq!(hits.count, 6);
+
+    let report = reopened.verify().expect("full 60-year witness chain verifies");
+    assert_eq!(report.segments_verified, DAYS);
+    println!(
+        "HOLONOMY_60YR_SCRUB witnesses={} write_ms={} reopen_ms={} scrub_ms={} bytes={}",
+        DAYS + 1,
+        write_ms,
+        reopen_ms,
+        scrub_ms,
+        report.plaintext_bytes_verified
+    );
+}
+
+#[test]
+#[ignore = "30M-word cold-open and bounded residency benchmark; run in release CI `persist` job"]
+fn cold_open_30m_word_document_stays_under_residency_budget() {
+    use holonomy_eye::{Fixed, FontSet, View};
+    use holonomy_shell::Editor;
+    use holonomy_text::{ResidentSet, SegmentSink, StyleMap};
+    use std::time::Instant;
+
+    let path = fast_temp_path("30m-words");
+    let document = Document::create_with(&path.0, PASSPHRASE, store::test_params())
+        .expect("creates 30M-word document");
+    let chunk = "alpha ".repeat(21_845); // ~131,070 B (~128 KiB, 21,845 words) per leaf
+    const LEAVES: usize = 1_400; // 1,400 * 21,845 = 30,583,000 words (~183.5 MiB)
+
+    let build_start = Instant::now();
+    {
+        let mut sink = document.sink();
+        let mut writer = sink.begin_stream_publish().expect("stream publish");
+        let mut slabs = Vec::with_capacity(LEAVES);
+        for _ in 0..LEAVES {
+            let seg = writer.write_chunk(chunk.as_bytes()).expect("write leaf");
+            slabs.push(holonomy_text::Slab::new(seg, 0, chunk.len() as u32));
+        }
+        writer
+            .finish(&slabs, &StyleMap::empty())
+            .expect("commit 30M-word manifest");
+    }
+    let build_ms = build_start.elapsed().as_millis();
+    drop(document);
+
+    // Cold reopen + first frame (bootstrap only, zero full-document scan or decryption).
+    let open_start = Instant::now();
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("cold open 30M-word document");
+    let spine = reopened.spine().expect("spine");
+    assert!(
+        spine.len() > 180_000_000,
+        "must exceed 30M words (~180 MB): got {} B",
+        spine.len()
+    );
+    let residency =
+        ResidentSet::new(reopened.source(), store::BUDGET, store::SLACK).expect("residency");
+    let fonts = FontSet::embedded(14).expect("embedded fonts");
+    let mut editor = Editor::new(
+        Typing::resume(reopened.sink(), spine, store::CAPACITY),
+        residency,
+        fonts,
+        Fixed::units(680),
+        Fixed::units(800),
+    );
+    editor.set_view(View::IDENTITY);
+    let frame = editor.frame().expect("first frame boots lazily");
+    let open_ms = open_start.elapsed().as_millis();
+
+    let resident = editor.residency().resident_bytes();
+    let segments = editor.residency().resident_segments();
+    assert!(
+        !frame.text().is_empty() && frame.text().starts_with("alpha "),
+        "first viewport must render live 30M-word prose"
+    );
+    assert!(
+        resident <= store::BUDGET && resident <= 2 * 1024 * 1024,
+        "cold open must fault only viewport leaves, not the 183 MiB document (got {resident} B)"
+    );
+    assert!(
+        open_ms < 10_000,
+        "30M-word cold open took {open_ms} ms (> 10s ceiling)"
+    );
+    println!(
+        "HOLONOMY_COLD_OPEN_30M bytes={} build_ms={} open_ms={} resident_bytes={} resident_segments={}",
+        editor.document_len(),
+        build_ms,
+        open_ms,
+        resident,
+        segments
+    );
+}

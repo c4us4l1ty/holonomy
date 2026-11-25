@@ -12,7 +12,8 @@
 //! 3. the face is **proportional** — `i` is not `m` — so a monospace assumption anywhere in the
 //!    geometry would show up as a failure rather than as a coincidence;
 //! 4. scaling is exact to within one sixty-fourth of a unit when the size doubles;
-//! 5. a cluster's width is the sum of its characters' advances, and a hard break has no width;
+//! 5. unkerned pairs equal the sum of their characters' advances, `GPOS`-kerned pairs tighten,
+//!    combining marks anchor at zero net advance, and `GSUB` `calt` substitutes real glyph forms;
 //! 6. line height is the font's ascender minus its descender, and ascent sits inside it;
 //! 7. a paragraph laid out with this face keeps the law the Eye exists for:
 //!    `hit_test(paint_point(c)) == c` for every caret the layout offers.
@@ -29,6 +30,10 @@ use holonomy_eye::{Face, Fixed, Shaper, Style};
 const FONT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../holonomy-old/assets/fonts/Inter-Regular.ttf"
+));
+const MONO_FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../holonomy-old/assets/fonts/JetBrainsMono-Regular.ttf"
 ));
 
 fn face() -> Face {
@@ -115,9 +120,9 @@ fn scaling_and_sums_are_the_fonts_own_arithmetic() {
         scalings += 1;
     }
 
-    // A cluster is the sum of its characters: no kerning is claimed, and no kerning is invented.
+    // Unkerned clusters equal the sum of their characters, while `GPOS`-kerned pairs tighten.
     let mut sums = 0u64;
-    for pair in ["ab", "ma", "W.", "i'm"] {
+    for pair in ["ab", "ma", "i'm"] {
         let mut total = Fixed::ZERO;
         for character in pair.chars() {
             total += face.advance(&character.to_string(), small);
@@ -129,6 +134,28 @@ fn scaling_and_sums_are_the_fonts_own_arithmetic() {
         );
         sums += 1;
     }
+
+    let mut kerns = 0u64;
+    for pair in ["W.", "AV", "To"] {
+        let mut unkerned = Fixed::ZERO;
+        for character in pair.chars() {
+            unkerned += face.advance(&character.to_string(), small);
+        }
+        let shaped = face.advance(pair, small);
+        assert!(
+            shaped < unkerned,
+            "expected GPOS negative kern on {pair:?}: shaped={shaped:?}, unkerned={unkerned:?}"
+        );
+        kerns += 1;
+    }
+
+    // Combining marks attach to base via GPOS `mark` with zero net advance on the cluster.
+    let base_e = face.advance("e", small);
+    let accented = face.advance("e\u{0301}", small);
+    assert!(
+        near(accented, base_e),
+        "e+acute should retain e's advance: base={base_e:?}, accented={accented:?}"
+    );
 
     // A hard break has no width; it ends a line rather than occupying one.
     for line in ["\n", "\r\n"] {
@@ -146,13 +173,58 @@ fn scaling_and_sums_are_the_fonts_own_arithmetic() {
     );
 
     println!(
-        "HOLONOMY_FACE_SCALE scalings={scalings} sums={sums} line_height={} ascent={} \
-         tick_64ths={}",
+        "HOLONOMY_FACE_SCALE scalings={scalings} sums={sums} kerns={kerns} line_height={} \
+         ascent={} tick_64ths={}",
         height.sixtyfourths(),
         ascent.sixtyfourths(),
         TICK.sixtyfourths()
     );
-    assert!(scalings >= 5 && sums >= 4);
+    assert!(scalings >= 5 && sums >= 3 && kerns >= 3);
+}
+
+#[test]
+fn opentype_gsub_and_gpos_shape_real_fonts() {
+    let inter = face();
+    let mono = Face::parse(MONO_FONT).expect("JetBrainsMono-Regular.ttf parses");
+
+    // Inter: `W.` receives GPOS PairPos kerning (`-197` units) inside layout & shaping.
+    let shaped_w = inter.shape(&["W", "."]);
+    assert_eq!(shaped_w.len(), 2);
+    let unkerned_w = i32::from(inter.advance_units('W'));
+    assert!(
+        shaped_w[0].x_advance < unkerned_w,
+        "Inter GPOS kern should narrow W before '.': got {} vs {unkerned_w}",
+        shaped_w[0].x_advance
+    );
+
+    // Inter: layout on kerned + accented text keeps L-8 caret bijection.
+    let text = "W. AV To e\u{0301}x";
+    let laid = holonomy_eye::layout_window(text, 0, Fixed::units(400), &inter);
+    assert_eq!(laid.lines().len(), 1);
+    assert!(
+        laid.lines()[0].end_x() < {
+            let mut sum = Fixed::ZERO;
+            for ch in text.chars() {
+                sum += inter.advance(&ch.to_string(), Style::DEFAULT);
+            }
+            sum
+        },
+        "laid-out line width must include GPOS kerning"
+    );
+    for (_, byte) in laid.lines()[0].boundaries() {
+        let p = laid.paint_point(byte).expect("paint");
+        let b = laid.hit_test(p.point()).expect("hit");
+        assert_eq!(b.byte, byte);
+    }
+
+    // JetBrains Mono: `->` triggers `calt` contextual substitution away from raw cmap glyph IDs.
+    let raw_dash = mono.glyph('-').expect("dash");
+    let raw_gt = mono.glyph('>').expect("gt");
+    let arrow = mono.shape(&["-", ">"]);
+    assert!(
+        arrow.iter().any(|g| g.glyph_id != raw_dash && g.glyph_id != raw_gt),
+        "JetBrainsMono GSUB `calt` should substitute contextual arrow glyph(s) for `->`: {arrow:?}"
+    );
 }
 
 #[test]

@@ -15,10 +15,10 @@
 //! - `180MB@0`: top neighborhood of a 43,945-leaf (30 M-word / 180 MB) document;
 //! - `180MB@end`: tail neighborhood (> 99.99% through the 30 M-word document).
 //!
-//! Honesty scope: `Face` parses real `head`/`hhea`/`hmtx`/`maxp`/`cmap` proportional metrics from
-//! `Inter-Regular.ttf`; complex-script `GSUB`/`GPOS` shaping remains `OQ-24`, and shared CI
-//! runners enforce relative invariance (`p50` within 2x, `p99` within 4x) plus a frame ceiling
-//! rather than certifying reference-hardware numbers.
+//! Honesty scope: `Face` parses real `head`/`hhea`/`hmtx`/`maxp`/`cmap` metrics plus OpenType
+//! `GDEF`/`GSUB`/`GPOS` shaping tables from `Inter-Regular.ttf`, and shared CI runners enforce
+//! relative invariance (`p50` within 2x, `p99` within 4x) plus a frame ceiling rather than
+//! certifying reference-hardware numbers.
 
 use std::hint::black_box;
 use std::sync::Arc;

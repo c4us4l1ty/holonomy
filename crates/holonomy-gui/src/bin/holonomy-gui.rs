@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use holonomy_gui::canvas::{run_x11_desktop, DesktopEnd, GuiWipeUnconfirmed};
+use holonomy_gui::canvas::{run_desktop, DesktopEnd, GuiWipeUnconfirmed};
 
 const USAGE: &str = "usage:\n  holonomy-gui [--deadman <ms>] [document.wavefunction]";
 
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
-    match run_x11_desktop(doc.as_deref(), deadman)? {
+    match run_desktop(doc.as_deref(), deadman)? {
         DesktopEnd::Saved | DesktopEnd::NothingToWrite | DesktopEnd::Cancelled => Ok(()),
         DesktopEnd::SaveFailed => {
             eprintln!(

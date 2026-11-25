@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    needs: [fmt, clippy, test, gates, sync, filesystem, portability]
+    needs: [fmt, clippy, test, gates, sync, filesystem, portability, xvfb, cross-os]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -269,6 +269,14 @@ jobs:
           grep 'HOLONOMY_PERSIST order' "$RUNNER_TEMP/persist.log" > "$RUNNER_TEMP/persist.txt"
           grep 'HOLONOMY_PERSIST erase' "$RUNNER_TEMP/persist.log" >> "$RUNNER_TEMP/persist.txt"
           cat "$RUNNER_TEMP/persist.txt"
+      # L-1 / L-2 / L-3 release benchmarks: 60-year (21,900 witness) scrub + 30 M-word cold open.
+      - name: Measure 60-year witness scrub and 30 M-word cold open (L-1, L-2, L-3)
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-gui --release --test persist -- --ignored --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/persist-scale.log"
+          grep -E 'HOLONOMY_(60YR_SCRUB|COLD_OPEN_30M)' "$RUNNER_TEMP/persist-scale.log" \
+            | tee -a "$RUNNER_TEMP/persist.txt"
       # The step above prints a test's `--nocapture` output, and this repository's job logs are not
       # retrievable from the environment the audit runs in. So the numbers go where the other
       # measurements go: the audit issue, base64 because the workflow is watched for plaintext.
@@ -277,10 +285,54 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          { echo '### OQ-29 / OQ-30 — what a reopen and a deletion do to a document';
+          { echo '### OQ-29 / OQ-30 / L-1 / L-2 — persistence & 60yr/30M scale';
             echo '```text'; cat "$RUNNER_TEMP/persist.txt"; echo '```'; } \
             > "$RUNNER_TEMP/persist-comment.md"
           gh issue comment 51 --body-file "$RUNNER_TEMP/persist-comment.md"
+
+  xvfb:
+    name: X11 GUI live Xvfb qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Ensure Xvfb, xdotool, and xwd are installed
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-apps xdotool
+      - name: Launch holonomy-gui on Xvfb and verify framebuffer + persisted container
+        run: |
+          set -o pipefail
+          scripts/qualify-x11-gui.sh 2>&1 | tee "$RUNNER_TEMP/xvfb.log"
+          grep 'HOLONOMY_XVFB_CAPTURE' "$RUNNER_TEMP/xvfb.log" > "$RUNNER_TEMP/xvfb.txt"
+      - name: Record Xvfb GUI evidence in the audit issue
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { echo '### X11 GUI live Xvfb qualification'; echo '```text'; cat "$RUNNER_TEMP/xvfb.txt"; echo '```'; } \
+            > "$RUNNER_TEMP/xvfb-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/xvfb-comment.md"
+
+  cross-os:
+    name: cross-OS build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: cargo build --locked --release -p holonomy-gui --bin holonomy --bin holonomy-gui
 
   sync:
     name: L-10 rsync transfer measurement

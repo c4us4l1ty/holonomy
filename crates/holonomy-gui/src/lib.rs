@@ -24,10 +24,16 @@
 //! the advances the Eye measured, so a GPU backend draws exactly the picture the tests assert.
 
 pub mod canvas;
+#[cfg(target_os = "macos")]
+pub mod cocoa;
 pub mod panel;
+pub mod platform;
 pub mod store;
 pub mod term;
 pub mod transfer;
+#[cfg(windows)]
+pub mod win32;
+#[cfg(unix)]
 pub mod x11;
 
 use std::sync::Arc;
@@ -244,6 +250,23 @@ pub trait Surface {
     fn size(&mut self, width: Fixed, height: Fixed);
     /// One cluster, its left edge and top, and the advance it was measured with.
     fn cluster(&mut self, x: Fixed, y: Fixed, text: &str, advance: Fixed, style: Style);
+    /// Renders all clusters on one horizontal line sharing exact [`Layout`](holonomy_eye::Layout)
+    /// positions, allowing OpenType-aware surfaces to shape ligatures, kerning, and contextual
+    /// glyph forms across adjacent clusters (`OQ-24`).
+    fn line_clusters(
+        &mut self,
+        y: Fixed,
+        text: &str,
+        origin: u64,
+        clusters: &[holonomy_eye::PictureCluster],
+    ) {
+        for cluster in clusters {
+            let from = usize::try_from(cluster.byte.saturating_sub(origin)).unwrap_or(0);
+            let to = from + cluster.len;
+            let slice = text.get(from..to).unwrap_or_default();
+            self.cluster(cluster.x, y, slice, cluster.advance, cluster.style);
+        }
+    }
     /// A selection run: a rectangle in logical units.
     fn selection(&mut self, x: Fixed, y: Fixed, width: Fixed, height: Fixed);
     /// The caret, when the frame has one on screen.
@@ -812,13 +835,8 @@ where
                 self.surface
                     .selection(span.x, line.top, span.end - span.x, line.height);
             }
-            for cluster in picture.clusters_on(index) {
-                let from = usize::try_from(cluster.byte.saturating_sub(origin)).unwrap_or(0);
-                let to = from + cluster.len;
-                let text = text.get(from..to).unwrap_or_default();
-                self.surface
-                    .cluster(cluster.x, line.top, text, cluster.advance, cluster.style);
-            }
+            self.surface
+                .line_clusters(line.top, &text, origin, picture.clusters_on(index));
         }
         if let Some(caret) = picture.caret {
             self.surface.caret(caret.x, caret.top, caret.height);

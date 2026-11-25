@@ -476,7 +476,47 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
     let mut continued = !start_x.is_zero();
 
     let mut segments = Clusters::continuing(text, context);
-    for (offset, cluster) in segments.by_ref() {
+    let mut items: Vec<(usize, &'a str)> = Vec::new();
+    for pair in segments.by_ref() {
+        items.push(pair);
+    }
+    let mut advances: Vec<Fixed> = vec![Fixed::ZERO; items.len()];
+    let mut run_texts: Vec<&'a str> = Vec::new();
+    let mut idx = 0usize;
+    while idx < items.len() {
+        let (off0, cl0) = items[idx];
+        if cl0 == "\n" || cl0 == "\r" || cl0 == "\r\n" {
+            idx += 1;
+            continue;
+        }
+        let run_style = if has_styles {
+            styled.style_at(off0 as u64)
+        } else {
+            Style::DEFAULT
+        };
+        let start = idx;
+        run_texts.clear();
+        while idx < items.len() {
+            let (off, cl) = items[idx];
+            if cl == "\n" || cl == "\r" || cl == "\r\n" {
+                break;
+            }
+            if has_styles && styled.style_at(off as u64) != run_style {
+                break;
+            }
+            run_texts.push(cl);
+            idx += 1;
+        }
+        let mut shaped = Vec::new();
+        shaper.shape_clusters(&run_texts, run_style, &mut shaped);
+        for (k, adv) in shaped.into_iter().enumerate() {
+            if start + k < advances.len() {
+                advances[start + k] = adv;
+            }
+        }
+    }
+
+    for (pos, &(offset, cluster)) in items.iter().enumerate() {
         let byte = origin + offset as u64;
         if cluster == "\n" || cluster == "\r" || cluster == "\r\n" {
             // The line's content ends before the break; the next line starts after it.
@@ -508,7 +548,7 @@ pub fn layout_styled_in_paragraph<'a, S: Shaper + ?Sized>(
         if has_styles && !continued {
             x = indent_for(style, width);
         }
-        let advance = shaper.advance(cluster, style);
+        let advance = advances[pos];
         if continued && x + advance > width {
             // The carried line is already full: it ends here, in this window, with no clusters of
             // its own and no caret — its own window already offered the caret that ends it.

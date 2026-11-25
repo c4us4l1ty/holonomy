@@ -23,6 +23,21 @@ pub trait Shaper {
     /// Called once per cluster per layout, never from hit-test.
     fn advance(&self, cluster: &str, style: Style) -> Fixed;
 
+    /// Shapes a contiguous homogeneous-style slice of grapheme clusters (`OQ-24`), filling `out`
+    /// with one horizontal advance (`Fixed`) per input cluster in `clusters`.
+    ///
+    /// Backends backed by OpenType `GSUB`/`GPOS` (`Face`, `FontSet`) apply kerning, ligatures, mark
+    /// attachment, and contextual script joining across cluster boundaries while keeping exact
+    /// per-cluster coordinates for [`Layout`](crate::Layout). The default implementation falls back
+    /// to shaping each cluster independently via [`Self::advance`].
+    fn shape_clusters(&self, clusters: &[&str], style: Style, out: &mut Vec<Fixed>) {
+        out.clear();
+        out.reserve(clusters.len());
+        for cluster in clusters {
+            out.push(self.advance(cluster, style));
+        }
+    }
+
     /// The height of one line of text at `style`, in logical units.
     ///
     /// Must be positive: hit-testing picks a line by `y`, and a zero-height line box would make
