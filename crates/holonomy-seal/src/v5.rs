@@ -241,9 +241,9 @@ impl core::fmt::Display for V5Error {
             Self::TestScheduleRefused => {
                 f.write_str("test-only kdf schedule refused in release build")
             }
-            Self::Rejected => {
-                f.write_str("v5.1.0 container rejected: wrong credentials, cursor, or altered bytes")
-            }
+            Self::Rejected => f.write_str(
+                "v5.1.0 container rejected: wrong credentials, cursor, or altered bytes",
+            ),
             Self::Consumer(reason) => write!(f, "{reason}"),
         }
     }
@@ -528,8 +528,11 @@ impl V5SectorReader {
         &mut self,
         container: &mut R,
         block_index: usize,
-        out: &mut [u8; V5_SLOT_BYTES],
+        out: &mut [u8],
     ) -> Result<(), V5Error> {
+        if out.len() != V5_SLOT_BYTES {
+            return Err(V5Error::Rejected);
+        }
         let offset = (block_index as u64) * (V5_SLOT_BYTES as u64);
         container.seek(SeekFrom::Start(offset))?;
         container.read_exact(out)?;
@@ -565,7 +568,7 @@ struct V5Unlocked {
     stratum: u8,
     k_dem: [u8; 32],
     n_epoch: [u8; NONCE_BYTES],
-    directory: Box<[u8; DIRECTORY_PLAINTEXT_BYTES]>,
+    directory: Vec<u8>,
 }
 
 fn directory_aad() -> [u8; 30] {
@@ -629,8 +632,11 @@ fn derive_v5_dem_key(
 fn open_v5_directory(
     k_dem: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
-    sealed: &[u8; SEALED_DIRECTORY_BYTES],
-) -> Option<Zeroizing<Box<[u8; DIRECTORY_PLAINTEXT_BYTES]>>> {
+    sealed: &[u8],
+) -> Option<Zeroizing<Vec<u8>>> {
+    if sealed.len() != SEALED_DIRECTORY_BYTES {
+        return None;
+    }
     let cipher = XChaCha20Poly1305::new_from_slice(k_dem).ok()?;
     let mut buf = Zeroizing::new(sealed[..DIRECTORY_PLAINTEXT_BYTES].to_vec());
     let tag = Tag::from_slice(&sealed[DIRECTORY_PLAINTEXT_BYTES..]);
@@ -638,18 +644,19 @@ fn open_v5_directory(
     cipher
         .decrypt_in_place_detached(XNonce::from_slice(nonce), &aad, &mut buf[..], tag)
         .ok()?;
-    let mut fixed = Zeroizing::new(Box::new([0u8; DIRECTORY_PLAINTEXT_BYTES]));
-    fixed.copy_from_slice(&buf);
-    Some(fixed)
+    Some(buf)
 }
 
 fn unlock_v5_capsule(
     passphrase: &V5Passphrase,
     salt: &[u8; V5_SALT_BYTES],
-    capsule_bytes: &[u8; V5_SLOT_BYTES],
+    capsule_bytes: &[u8],
     kappa_usb: &[u8; 32],
     params: ParamsClass,
 ) -> Result<V5Unlocked, V5Error> {
+    if capsule_bytes.len() != V5_SLOT_BYTES {
+        return Err(V5Error::Rejected);
+    }
     let root = derive_root_secret_raw(passphrase.as_bytes(), salt, params)?;
 
     let mut pos = 0usize;
@@ -680,7 +687,7 @@ fn unlock_v5_capsule(
         x25519: ct_x,
     };
 
-    let mut dir_sealed = Zeroizing::new(Box::new([0u8; SEALED_DIRECTORY_BYTES]));
+    let mut dir_sealed = Zeroizing::new(vec![0u8; SEALED_DIRECTORY_BYTES]);
     dir_sealed[..DIRECTORY_PLAINTEXT_BYTES].copy_from_slice(dir_ct_slice);
     dir_sealed[DIRECTORY_PLAINTEXT_BYTES..].copy_from_slice(dir_poly_slice);
 
@@ -704,15 +711,19 @@ fn unlock_v5_capsule(
         };
         drop(dk);
         let (k_dem, n_epoch) = derive_v5_dem_key(&ss.pq, &ss.ecc, &ct, &k_unwrap, kappa_usb);
-        let expected_p2 = cmt4_tag(&k_dem, &dir_nonce, b"HOLONOMY_V51_DIRECTORY", &dir_sealed[..]);
+        let expected_p2 = cmt4_tag(
+            &k_dem,
+            &dir_nonce,
+            b"HOLONOMY_V51_DIRECTORY",
+            &dir_sealed[..],
+        );
         if !cmt4_verify(&expected_p2, &phase2_tag) {
             continue;
         }
         let Some(mut directory) = open_v5_directory(&k_dem, &dir_nonce, &dir_sealed) else {
             continue;
         };
-        let mut owned_dir = Box::new([0u8; DIRECTORY_PLAINTEXT_BYTES]);
-        std::mem::swap(&mut *owned_dir, &mut *directory);
+        let owned_dir = std::mem::take(&mut *directory);
         return Ok(V5Unlocked {
             stratum: index,
             k_dem: *k_dem,
@@ -754,7 +765,9 @@ fn v5_slot_nonce(
     stratum: u8,
 ) -> [u8; NONCE_BYTES] {
     let mut n = *base;
-    let counter = save_cursor.wrapping_shl(32).wrapping_add(u64::from(slot_index));
+    let counter = save_cursor
+        .wrapping_shl(32)
+        .wrapping_add(u64::from(slot_index));
     let mut tail = [0u8; 16];
     tail[0..8].copy_from_slice(&counter.to_le_bytes());
     tail[8] = stratum;
@@ -798,7 +811,7 @@ where
 
     let mut reader = V5SectorReader::open(pad, kappa_usb)?;
 
-    let mut slot_buf = Zeroizing::new(Box::new([0u8; V5_SLOT_BYTES]));
+    let mut slot_buf = Zeroizing::new(vec![0u8; V5_SLOT_BYTES]);
     reader.read_slot(container, V5_SALT_SLOT_INDEX, &mut slot_buf)?;
     let mut salt = [0u8; V5_SALT_BYTES];
     salt.copy_from_slice(&slot_buf[..V5_SALT_BYTES]);

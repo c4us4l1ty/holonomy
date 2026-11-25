@@ -52,7 +52,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match run_x11_desktop(doc.as_deref(), deadman)? {
         DesktopEnd::Saved | DesktopEnd::NothingToWrite | DesktopEnd::Cancelled => Ok(()),
         DesktopEnd::SaveFailed => {
-            eprintln!("holonomy-gui: final save refused — bytes after last witness are unpersisted");
+            eprintln!(
+                "holonomy-gui: final save refused — bytes after last witness are unpersisted"
+            );
             std::process::exit(1);
         }
         DesktopEnd::Wiped(receipt) => {

@@ -179,7 +179,10 @@ impl SegmentSink for Shared {
                 if !styles.is_empty() {
                     return Err("fixture unexpectedly styled".to_owned());
                 }
-                let tx = self.tx.take().ok_or_else(|| "streaming tx closed".to_owned())?;
+                let tx = self
+                    .tx
+                    .take()
+                    .ok_or_else(|| "streaming tx closed".to_owned())?;
                 let manifest = LineManifest {
                     slabs: slabs
                         .iter()

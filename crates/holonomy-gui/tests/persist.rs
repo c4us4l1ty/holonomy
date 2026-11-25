@@ -561,7 +561,9 @@ fn document_witness_history_bookmarks_diff_search_and_restore_persist() {
     let mut typing = Typing::new(document.sink(), store::CAPACITY);
     typing.insert(b"chapter one alpha\n").unwrap();
     typing.flush().unwrap();
-    document.add_bookmark(1, 1_700_000_010, "Chapter One").unwrap();
+    document
+        .add_bookmark(1, 1_700_000_010, "Chapter One")
+        .unwrap();
 
     typing.insert(b"chapter two beta\n").unwrap();
     typing.flush().unwrap();

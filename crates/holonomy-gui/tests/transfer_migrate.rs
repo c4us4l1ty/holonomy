@@ -8,10 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use holonomy_gui::store::{test_params, Document};
 use holonomy_gui::transfer::{
-    export_to_path, export_to_writer, import_from_reader, migrate_v5_container_with,
-    TransferError, TransferFormat, PLAINTEXT_EGRESS_DISCLOSURE,
+    export_to_path, export_to_writer, import_from_reader, migrate_v5_container_with, TransferError,
+    TransferFormat, PLAINTEXT_EGRESS_DISCLOSURE,
 };
-use holonomy_seal::v5::{write_v5_test_container, V5PadSource, V5Passphrase, V5_PAYLOAD_PLAINTEXT_PER_SLOT};
+use holonomy_seal::v5::{
+    write_v5_test_container, V5PadSource, V5Passphrase, V5_PAYLOAD_PLAINTEXT_PER_SLOT,
+};
 use holonomy_seal::{ParamsClass, PassphraseInput};
 use holonomy_text::{Heading, ListKind, CAPACITY};
 
@@ -20,7 +22,10 @@ fn temp_file(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("holonomy-xfer-{tag}-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "holonomy-xfer-{tag}-{}-{nanos}",
+        std::process::id()
+    ))
 }
 
 #[test]
@@ -91,7 +96,10 @@ Plain paragraph tail.
 
     let reopened = Document::open_input(&dest, &pass).unwrap();
     let spine = reopened.spine().unwrap();
-    assert!(spine.styles().links().contains(&"https://holonomy.example/spec".to_owned()));
+    assert!(spine
+        .styles()
+        .links()
+        .contains(&"https://holonomy.example/spec".to_owned()));
     assert_eq!(spine.styles().style_at(0).heading, Heading::H1);
 
     let has_bullet = spine
@@ -108,12 +116,15 @@ Plain paragraph tail.
     assert!(has_num);
 
     let mut md_out = Vec::new();
-    let exp_rep = export_to_writer(&reopened, &mut md_out, "<mem>", TransferFormat::Markdown).unwrap();
+    let exp_rep =
+        export_to_writer(&reopened, &mut md_out, "<mem>", TransferFormat::Markdown).unwrap();
     assert_eq!(exp_rep.disclosure, PLAINTEXT_EGRESS_DISCLOSURE);
     let roundtrip = String::from_utf8(md_out).unwrap();
     assert!(roundtrip.contains("# Main Title\n"));
     assert!(roundtrip.contains("- First bullet\n"));
-    assert!(roundtrip.contains("2. Numbered *italic* ~~old~~ [doc](https://holonomy.example/spec)\n"));
+    assert!(
+        roundtrip.contains("2. Numbered *italic* ~~old~~ [doc](https://holonomy.example/spec)\n")
+    );
     assert!(roundtrip.contains("---\n"));
     let _ = fs::remove_file(&dest);
 }

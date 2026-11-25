@@ -631,13 +631,14 @@ impl Document {
         let mut source = self.source();
         let draft = Draft::new();
         let sources = OpenSources::new();
-        find_streaming(&spine, &draft, &sources, &[], needle, &mut source).map_err(|err| match err
-        {
-            SearchError::MatchLimitExceeded { limit } => {
-                StoreError::Line(format!("exceeded {limit} collected matches"))
-            }
-            other => StoreError::Line(other.to_string()),
-        })
+        find_streaming(&spine, &draft, &sources, &[], needle, &mut source).map_err(
+            |err| match err {
+                SearchError::MatchLimitExceeded { limit } => {
+                    StoreError::Line(format!("exceeded {limit} collected matches"))
+                }
+                other => StoreError::Line(other.to_string()),
+            },
+        )
     }
 }
 

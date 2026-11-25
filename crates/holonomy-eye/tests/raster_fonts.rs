@@ -2,7 +2,7 @@
 //! 4x4 A8 scanline rasterization, and embedded [`FontSet`] layout parity (`L-8`, `UI-SPEC.md`).
 
 use holonomy_eye::{
-    layout_styled, Fixed, FontSet, FontVariant, Shaper, Style, StyledRun, StyledText, View,
+    layout_styled, Fixed, FontSet, FontVariant, Point, Shaper, Style, StyledRun, StyledText, View,
 };
 use holonomy_text::FontFamily;
 
@@ -89,28 +89,43 @@ fn font_set_preserves_single_geometry_hit_test_across_styles_and_zooms() {
     let fonts = FontSet::embedded(15).unwrap();
     let sample = "Quiet Markdown: café, **bold**, code(); end.";
     let styles = [
-        StyledRun::new(0, 15, Style::DEFAULT),
-        StyledRun::new(15, 21, Style::DEFAULT.italic()),
-        StyledRun::new(21, 31, Style::DEFAULT.bold()),
-        StyledRun::new(31, 40, Style::DEFAULT.code_span()),
-        StyledRun::new(40, sample.len(), Style::DEFAULT),
+        StyledRun {
+            start: 0,
+            style: Style::DEFAULT,
+        },
+        StyledRun {
+            start: 15,
+            style: Style::DEFAULT.italic(),
+        },
+        StyledRun {
+            start: 21,
+            style: Style::DEFAULT.bold(),
+        },
+        StyledRun {
+            start: 31,
+            style: Style::DEFAULT.code_span(),
+        },
+        StyledRun {
+            start: 40,
+            style: Style::DEFAULT,
+        },
     ];
     let styled = StyledText::new(sample, &styles);
-    let layout = layout_styled(styled, Fixed::units(280), &fonts);
+    let layout = layout_styled(styled, 0, Fixed::units(280), &fonts);
 
     for zoom in [750, 1_000, 1_250, 1_500, 2_000] {
         for dpi in [96, 144] {
             let view = View::new(zoom, dpi).expect("positive zoom and dpi");
             for (idx, _) in sample.char_indices() {
-                let pt = layout
-                    .paint_point(idx)
+                let offset = u64::try_from(idx).expect("offset fits u64");
+                let dev = view
+                    .paint_point(&layout, offset)
                     .expect("char index sits on cluster boundary");
-                let dev = view.paint_point(pt);
                 let caret = view
-                    .hit_test(&layout, dev)
+                    .hit_test(&layout, Point::new(dev.x, dev.top + dev.height / 2))
                     .expect("hit_test finds device point");
                 assert_eq!(
-                    caret.byte, idx,
+                    caret.byte, offset,
                     "round-trip drifted at zoom={zoom} dpi={dpi} byte={idx}"
                 );
             }

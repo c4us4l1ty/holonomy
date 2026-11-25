@@ -1541,7 +1541,9 @@ impl<S: SegmentSink> Typing<S> {
         limit: usize,
     ) -> Result<usize, TypingError> {
         if !self.sink.supports_stream_publish() {
-            return Err(TypingError::Search(SearchError::MatchLimitExceeded { limit }));
+            return Err(TypingError::Search(SearchError::MatchLimitExceeded {
+                limit,
+            }));
         }
         let checkpoint =
             (self.open.is_some() || self.structure_dirty).then(|| ReplaceCheckpoint::capture(self));
@@ -3111,7 +3113,10 @@ mod tests {
                 slabs: &[Slab],
                 styles: &crate::StyleMap,
             ) -> Result<(), String> {
-                self.0.borrow_mut().spines.push((slabs.to_vec(), styles.clone()));
+                self.0
+                    .borrow_mut()
+                    .spines
+                    .push((slabs.to_vec(), styles.clone()));
                 Ok(())
             }
             fn supports_stream_publish(&self) -> bool {
@@ -3136,8 +3141,14 @@ mod tests {
         let doc = unit.repeat(20_000);
         let half = doc.len() / 2;
         let split_at = (0..=half).rev().find(|&i| doc.is_char_boundary(i)).unwrap();
-        store.borrow_mut().segments.push(doc.as_bytes()[..split_at].to_vec());
-        store.borrow_mut().segments.push(doc.as_bytes()[split_at..].to_vec());
+        store
+            .borrow_mut()
+            .segments
+            .push(doc.as_bytes()[..split_at].to_vec());
+        store
+            .borrow_mut()
+            .segments
+            .push(doc.as_bytes()[split_at..].to_vec());
         let initial_styles = crate::StyleMap::empty()
             .apply_patch(
                 doc.len() as u64,
@@ -3146,7 +3157,12 @@ mod tests {
                 &StylePatch::new().with_bold(true),
             )
             .unwrap()
-            .set_link(doc.len() as u64, 0, unit.len() as u64 * 10, Some("https://holonomy.example"))
+            .set_link(
+                doc.len() as u64,
+                0,
+                unit.len() as u64 * 10,
+                Some("https://holonomy.example"),
+            )
             .unwrap();
         let initial_spine = Spine::from_slabs_and_styles(
             vec![
@@ -3180,13 +3196,11 @@ mod tests {
         let mut reconstructed = Vec::new();
         for span in typing.spine().spans_in(0, typing.spine().len()) {
             let seg = source.load(span.slab().segment()).unwrap();
-            reconstructed.extend_from_slice(&seg[span.slab().start() as usize..span.slab().end() as usize]);
+            reconstructed
+                .extend_from_slice(&seg[span.slab().start() as usize..span.slab().end() as usize]);
         }
         assert_eq!(reconstructed, expected.as_bytes());
-        assert_eq!(
-            typing.spine().style_at(0).bold,
-            true
-        );
+        assert_eq!(typing.spine().style_at(0).bold, true);
         assert_eq!(
             typing.spine().styles().links(),
             &["https://holonomy.example".to_owned()]

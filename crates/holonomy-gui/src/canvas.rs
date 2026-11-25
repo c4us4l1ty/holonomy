@@ -141,9 +141,17 @@ impl FrameBuffer {
     /// Draws a 1 px stroked outline inside `rect`.
     pub fn stroke_rect(&mut self, rect: Rect, color: Rgba8, clip: Rect) {
         self.fill_rect_clipped(Rect::new(rect.x, rect.y, rect.w, 1), color, clip);
-        self.fill_rect_clipped(Rect::new(rect.x, rect.y + rect.h - 1, rect.w, 1), color, clip);
+        self.fill_rect_clipped(
+            Rect::new(rect.x, rect.y + rect.h - 1, rect.w, 1),
+            color,
+            clip,
+        );
         self.fill_rect_clipped(Rect::new(rect.x, rect.y, 1, rect.h), color, clip);
-        self.fill_rect_clipped(Rect::new(rect.x + rect.w - 1, rect.y, 1, rect.h), color, clip);
+        self.fill_rect_clipped(
+            Rect::new(rect.x + rect.w - 1, rect.y, 1, rect.h),
+            color,
+            clip,
+        );
     }
 
     /// Alpha-blends a rasterized A8 glyph bitmap at `(dst_x, dst_y)`.
@@ -186,14 +194,20 @@ impl FrameBuffer {
                 } else {
                     ((u16::from(cov) * color_a) / 100) as u8
                 };
-                self.pixels[row_off + (px as usize)] =
-                    blend_pixel(self.pixels[row_off + (px as usize)], color.r, color.g, color.b, eff_a);
+                self.pixels[row_off + (px as usize)] = blend_pixel(
+                    self.pixels[row_off + (px as usize)],
+                    color.r,
+                    color.g,
+                    color.b,
+                    eff_a,
+                );
             }
         }
     }
 }
 
 /// Draws a single line of text at `baseline_y` using `FontSet` at `(zoom_milli = 1000, dpi = 96)`.
+#[allow(clippy::too_many_arguments)]
 fn draw_ui_text(
     fb: &mut FrameBuffer,
     fonts: &FontSet,
@@ -211,7 +225,13 @@ fn draw_ui_text(
         let adv = fonts.advance(s, style).sixtyfourths();
         let px = ((pen_64ths + 32) >> 6) as i32;
         if let Some(bmp) = fonts.rasterize_char(style, 1_000, 96, ch) {
-            fb.blend_glyph(px + bmp.bearing_x, baseline_y - bmp.bearing_y, &bmp, color, clip);
+            fb.blend_glyph(
+                px + bmp.bearing_x,
+                baseline_y - bmp.bearing_y,
+                &bmp,
+                color,
+                clip,
+            );
         }
         pen_64ths += adv;
     }
@@ -426,7 +446,12 @@ impl Surface for PixelSurface {
         if style.blockquote() > 0 && x <= Fixed::units(24) {
             for level in 0..i32::from(style.blockquote().min(4)) {
                 self.fb.fill_rect_clipped(
-                    Rect::new(self.page_origin_x - 14 - level * 8, dy + 2, 3, (line_h_px - 4).max(4)),
+                    Rect::new(
+                        self.page_origin_x - 14 - level * 8,
+                        dy + 2,
+                        3,
+                        (line_h_px - 4).max(4),
+                    ),
                     QUIET_MD_THEME.quote_bar,
                     self.canvas_clip,
                 );
@@ -436,7 +461,12 @@ impl Surface for PixelSurface {
         if style.is_horizontal_rule() {
             if x <= Fixed::units(16) {
                 self.fb.fill_rect_clipped(
-                    Rect::new(self.page_origin_x, dy + line_h_px / 2, self.page_measure_px, 1),
+                    Rect::new(
+                        self.page_origin_x,
+                        dy + line_h_px / 2,
+                        self.page_measure_px,
+                        1,
+                    ),
                     QUIET_MD_THEME.line_divider,
                     self.canvas_clip,
                 );
@@ -465,9 +495,15 @@ impl Surface for PixelSurface {
                 continue;
             }
             let s = ch.encode_utf8(&mut tmp);
-            let ch_adv = self.view.to_device(self.fonts.advance(s, style)).sixtyfourths();
+            let ch_adv = self
+                .view
+                .to_device(self.fonts.advance(s, style))
+                .sixtyfourths();
             let gx = self.page_origin_x + (((pen_x_64 + 32) >> 6) as i32);
-            if let Some(bmp) = self.fonts.rasterize_char(style, self.view.zoom_milli(), self.view.dpi(), ch) {
+            if let Some(bmp) =
+                self.fonts
+                    .rasterize_char(style, self.view.zoom_milli(), self.view.dpi(), ch)
+            {
                 self.fb.blend_glyph(
                     gx + bmp.bearing_x,
                     baseline_y - bmp.bearing_y,
@@ -488,11 +524,8 @@ impl Surface for PixelSurface {
         }
         if style.is_strikethrough() && adv_px > 0 {
             let mid = baseline_y - (ascent_px / 3).max(2);
-            self.fb.fill_rect_clipped(
-                Rect::new(dx, mid, adv_px, 1),
-                ink,
-                self.canvas_clip,
-            );
+            self.fb
+                .fill_rect_clipped(Rect::new(dx, mid, adv_px, 1), ink, self.canvas_clip);
         }
     }
 
@@ -572,7 +605,9 @@ impl SecurityDotState {
             Self::Tripped
         } else if matches!(
             cap,
-            LockCapability::DirectMapExcluded | LockCapability::ResidentNoDump | LockCapability::Resident
+            LockCapability::DirectMapExcluded
+                | LockCapability::ResidentNoDump
+                | LockCapability::Resident
         ) {
             Self::Protected
         } else {
@@ -596,6 +631,7 @@ enum ButtonHighlight {
     Mixed,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_toolbar_button(
     fb: &mut FrameBuffer,
     fonts: &FontSet,
@@ -731,11 +767,41 @@ fn render_toolbar(
             false,
             false,
         ),
-        (ToolbarAction::Heading1, "H1", h_hl(Heading::H1), false, false),
-        (ToolbarAction::Heading2, "H2", h_hl(Heading::H2), false, false),
-        (ToolbarAction::Heading3, "H3", h_hl(Heading::H3), true, false),
-        (ToolbarAction::ToggleBold, "B", bool_hl(&tb.bold), false, false),
-        (ToolbarAction::ToggleItalic, "I", bool_hl(&tb.italic), false, false),
+        (
+            ToolbarAction::Heading1,
+            "H1",
+            h_hl(Heading::H1),
+            false,
+            false,
+        ),
+        (
+            ToolbarAction::Heading2,
+            "H2",
+            h_hl(Heading::H2),
+            false,
+            false,
+        ),
+        (
+            ToolbarAction::Heading3,
+            "H3",
+            h_hl(Heading::H3),
+            true,
+            false,
+        ),
+        (
+            ToolbarAction::ToggleBold,
+            "B",
+            bool_hl(&tb.bold),
+            false,
+            false,
+        ),
+        (
+            ToolbarAction::ToggleItalic,
+            "I",
+            bool_hl(&tb.italic),
+            false,
+            false,
+        ),
         (
             ToolbarAction::ToggleUnderline,
             "U",
@@ -757,9 +823,21 @@ fn render_toolbar(
             true,
             false,
         ),
-        (ToolbarAction::ToggleBullet, "\u{2022}", bullet_hl, false, false),
+        (
+            ToolbarAction::ToggleBullet,
+            "\u{2022}",
+            bullet_hl,
+            false,
+            false,
+        ),
         (ToolbarAction::ToggleNumbered, "1.", num_hl, false, false),
-        (ToolbarAction::CycleQuote, "\u{275D}", quote_hl, false, false),
+        (
+            ToolbarAction::CycleQuote,
+            "\u{275D}",
+            quote_hl,
+            false,
+            false,
+        ),
         (
             ToolbarAction::CycleAlign,
             align_label,
@@ -778,10 +856,34 @@ fn render_toolbar(
             true,
             true,
         ),
-        (ToolbarAction::Undo, "Undo", ButtonHighlight::Off, false, true),
-        (ToolbarAction::Redo, "Redo", ButtonHighlight::Off, true, true),
-        (ToolbarAction::ZoomOut, "-", ButtonHighlight::Off, false, true),
-        (ToolbarAction::ZoomIn, "+", ButtonHighlight::Off, false, true),
+        (
+            ToolbarAction::Undo,
+            "Undo",
+            ButtonHighlight::Off,
+            false,
+            true,
+        ),
+        (
+            ToolbarAction::Redo,
+            "Redo",
+            ButtonHighlight::Off,
+            true,
+            true,
+        ),
+        (
+            ToolbarAction::ZoomOut,
+            "-",
+            ButtonHighlight::Off,
+            false,
+            true,
+        ),
+        (
+            ToolbarAction::ZoomIn,
+            "+",
+            ButtonHighlight::Off,
+            false,
+            true,
+        ),
     ];
 
     for &(action, label, hl, end_group, collapsible) in items {
@@ -872,11 +974,7 @@ fn render_toolbar(
     hits
 }
 
-fn render_status_strip(
-    surface: &mut PixelSurface,
-    status_left: &str,
-    status_right: &str,
-) {
+fn render_status_strip(surface: &mut PixelSurface, status_left: &str, status_right: &str) {
     let (w, h) = surface.window_size();
     let fonts = surface.fonts().clone();
     let fb = surface.framebuffer_mut();
@@ -1059,11 +1157,7 @@ fn render_history_drawer(
     for (idx, w_sum) in state.witnesses.iter().enumerate().take(end).skip(start) {
         let row_rect = Rect::new(drawer.x + 8, y, drawer_w - 16, 20);
         if idx == state.selected_idx {
-            fb.fill_rect_clipped(
-                row_rect,
-                Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 16),
-                drawer,
-            );
+            fb.fill_rect_clipped(row_rect, Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 16), drawer);
         }
         let bm_tag = bookmarks
             .iter()
@@ -1094,12 +1188,7 @@ fn render_history_drawer(
     }
 
     // Excerpt preview box
-    let prev_rect = Rect::new(
-        drawer.x + 10,
-        drawer.y + drawer_h - 104,
-        drawer_w - 20,
-        94,
-    );
+    let prev_rect = Rect::new(drawer.x + 10, drawer.y + drawer_h - 104, drawer_w - 20, 94);
     fb.fill_rect_clipped(prev_rect, QUIET_MD_THEME.code_bg, drawer);
     fb.stroke_rect(prev_rect, QUIET_MD_THEME.line_border, drawer);
     let hdr = format!("Snapshot ({} bytes):", state.preview_len);
@@ -1657,7 +1746,11 @@ pub fn run_x11_desktop(
 
             let segs = document.segment_count();
             let wits = document.witness_count();
-            let save_tag = if app.has_pending() { "unsaved" } else { "saved" };
+            let save_tag = if app.has_pending() {
+                "unsaved"
+            } else {
+                "saved"
+            };
             let name = doc_path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -1679,7 +1772,12 @@ pub fn run_x11_desktop(
                 let (w, h) = surface.window_size();
                 let f = surface.fonts().clone();
                 let fb = surface.framebuffer_mut();
-                let rect = Rect::new(0, i32::from(h) - STATUS_BAR_HEIGHT_PX - 30, i32::from(w), 30);
+                let rect = Rect::new(
+                    0,
+                    i32::from(h) - STATUS_BAR_HEIGHT_PX - 30,
+                    i32::from(w),
+                    30,
+                );
                 fb.fill_rect_clipped(rect, QUIET_MD_THEME.code_bg, rect);
                 fb.stroke_rect(rect, QUIET_MD_THEME.line_border, rect);
                 let prompt_line = match find {
@@ -1689,7 +1787,9 @@ pub fn run_x11_desktop(
                     FindState::Replace {
                         needle,
                         replacement,
-                    } => format!("Replace '{needle}' -> '{replacement}'   (Enter apply, Esc close)"),
+                    } => {
+                        format!("Replace '{needle}' -> '{replacement}'   (Enter apply, Esc close)")
+                    }
                 };
                 draw_ui_text(
                     fb,
@@ -1727,7 +1827,8 @@ pub fn run_x11_desktop(
         let events = x11.poll_events(100)?;
         if events.is_empty() {
             // Autosave after 1.5s typing pause (`D-64`, matches TUI loop).
-            if app.has_pending() && last_activity.elapsed() >= Duration::from_millis(PAUSE_AUTOSAVE_MS)
+            if app.has_pending()
+                && last_activity.elapsed() >= Duration::from_millis(PAUSE_AUTOSAVE_MS)
             {
                 let _ = save_gui(&mut app);
                 pending_paint = true;
@@ -1766,7 +1867,10 @@ pub fn run_x11_desktop(
                     let px = i32::from(x);
                     let py = i32::from(y);
 
-                    if let Some(hit) = toolbar_hits.iter().find(|h| h.rect.contains(px, py)).copied()
+                    if let Some(hit) = toolbar_hits
+                        .iter()
+                        .find(|h| h.rect.contains(px, py))
+                        .copied()
                     {
                         match hit.action {
                             ToolbarAction::ToggleSecurity => {
@@ -1795,10 +1899,18 @@ pub fn run_x11_desktop(
                         continue;
                     }
 
-                    if let Some((_, btn)) =
-                        history_hits.iter().find(|(r, _)| r.contains(px, py)).copied()
+                    if let Some((_, btn)) = history_hits
+                        .iter()
+                        .find(|(r, _)| r.contains(px, py))
+                        .copied()
                     {
-                        handle_history_button(&mut app, &document, &mut history_drawer, btn, &mut status_msg);
+                        handle_history_button(
+                            &mut app,
+                            &document,
+                            &mut history_drawer,
+                            btn,
+                            &mut status_msg,
+                        );
                         pending_paint = true;
                         continue;
                     }
@@ -1938,7 +2050,14 @@ pub fn run_x11_desktop(
                     }
 
                     if let Some(ref mut find) = find_bar {
-                        handle_find_key(&mut app, find, key, modifiers, &mut find_bar, &mut status_msg);
+                        handle_find_key(
+                            &mut app,
+                            find,
+                            key,
+                            modifiers,
+                            &mut find_bar,
+                            &mut status_msg,
+                        );
                         pending_paint = true;
                         continue;
                     }
@@ -2187,7 +2306,11 @@ fn handle_find_key(
                     if summary.count == 0 {
                         *status_msg = format!("0 matches for '{needle}'");
                     } else {
-                        let idx = if *next_idx < summary.count { *next_idx } else { 0 };
+                        let idx = if *next_idx < summary.count {
+                            *next_idx
+                        } else {
+                            0
+                        };
                         if let Some(hit) = summary.selected {
                             let _ = app.editor().select_range(hit.start, hit.end);
                             let _ = app.editor().apply(Intent::RevealCaret);
@@ -2313,20 +2436,19 @@ mod tests {
             "bold button hit-box must exist"
         );
         assert!(
-            hits.iter().any(|h| h.action == ToolbarAction::ToggleHistory),
+            hits.iter()
+                .any(|h| h.action == ToolbarAction::ToggleHistory),
             "history button hit-box must exist"
         );
         assert!(
-            hits.iter().any(|h| h.action == ToolbarAction::ToggleSecurity),
+            hits.iter()
+                .any(|h| h.action == ToolbarAction::ToggleSecurity),
             "security dot hit-box must exist"
         );
 
         // Clicking ToggleBold on a mixed selection promotes all bytes to Bold (Uniform(true)).
         apply_toolbar_action(&mut app, ToolbarAction::ToggleBold).expect("promote bold");
-        assert_eq!(
-            app.editor().toolbar_state().bold,
-            TriState::Uniform(true)
-        );
+        assert_eq!(app.editor().toolbar_state().bold, TriState::Uniform(true));
 
         // Zoom step updates both Editor::view and PixelSurface geometry together.
         apply_toolbar_action(&mut app, ToolbarAction::ZoomIn).expect("zoom in");
@@ -2373,7 +2495,8 @@ mod tests {
             app.press(Key::Character(ch), Modifiers::none())
                 .expect("type");
         }
-        assert!(app.press(Key::Character('s'), Modifiers::control())
+        assert!(app
+            .press(Key::Character('s'), Modifiers::control())
             .expect("save")
             .iter()
             .any(|e| matches!(e, Effect::Saved)));
@@ -2390,9 +2513,15 @@ mod tests {
         let hist = build_history_state(&doc);
         let hist_hits = render_history_drawer(app.surface_mut(), &hist, &doc.bookmarks());
         assert!(
-            hist_hits.iter().any(|(_, b)| *b == HistoryButton::RestoreSelected),
+            hist_hits
+                .iter()
+                .any(|(_, b)| *b == HistoryButton::RestoreSelected),
             "history drawer must expose Restore button"
         );
-        render_status_strip(app.surface_mut(), "doc.wavefunction", facts.resident_line().as_str());
+        render_status_strip(
+            app.surface_mut(),
+            "doc.wavefunction",
+            facts.resident_line().as_str(),
+        );
     }
 }

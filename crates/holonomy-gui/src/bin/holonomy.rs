@@ -1211,8 +1211,9 @@ fn read_usb_key_32(path: &Path) -> Result<Zeroizing<[u8; 32]>, Box<dyn std::erro
 fn run_migrate_v5(cfg: &MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
     let _echo = EchoGuard::acquire()?;
     let raw_v5 = prompt_raw_line("unlock v5 container", &cfg.source)?;
-    let v5_pass = V5Passphrase::new(&raw_v5)
-        .ok_or_else(|| std::io::Error::other("v5 passphrase is empty or exceeds 255 UTF-8 bytes"))?;
+    let v5_pass = V5Passphrase::new(&raw_v5).ok_or_else(|| {
+        std::io::Error::other("v5 passphrase is empty or exceeds 255 UTF-8 bytes")
+    })?;
     drop(raw_v5);
     let v6_pass = prompt("create v6 destination", &cfg.destination)?;
     let kappa_usb = match &cfg.usb_key {
@@ -1238,9 +1239,9 @@ fn run_migrate_v5(cfg: &MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
                 },
                 ParamsClass::Production,
             )?;
-            cursor = *hits
-                .first()
-                .ok_or_else(|| std::io::Error::other("no matching v5 pad cursor found on device"))?;
+            cursor = *hits.first().ok_or_else(|| {
+                std::io::Error::other("no matching v5 pad cursor found on device")
+            })?;
         }
         V5PadSource::DeviceFile {
             path: dev.clone(),
@@ -1289,11 +1290,16 @@ fn run_migrate_v5(cfg: &MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_gui_command(doc: Option<&Path>, deadman: Option<Duration>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_gui_command(
+    doc: Option<&Path>,
+    deadman: Option<Duration>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match run_x11_desktop(doc, deadman)? {
         DesktopEnd::Saved | DesktopEnd::NothingToWrite | DesktopEnd::Cancelled => Ok(()),
         DesktopEnd::SaveFailed => {
-            eprintln!("holonomy gui: final save refused — bytes after last witness are unpersisted");
+            eprintln!(
+                "holonomy gui: final save refused — bytes after last witness are unpersisted"
+            );
             std::process::exit(1);
         }
         DesktopEnd::Wiped(receipt) => {
@@ -1762,7 +1768,13 @@ mod tests {
         assert_eq!(parse_import_args(&s(&["only_one.txt"])), None);
 
         assert_eq!(
-            parse_export_args(&s(&["--force", "--format", "plain", "doc.wavefunction", "out.txt"])),
+            parse_export_args(&s(&[
+                "--force",
+                "--format",
+                "plain",
+                "doc.wavefunction",
+                "out.txt"
+            ])),
             Some((
                 PathBuf::from("doc.wavefunction"),
                 PathBuf::from("out.txt"),

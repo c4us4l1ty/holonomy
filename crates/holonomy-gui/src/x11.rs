@@ -344,7 +344,10 @@ impl<'a> Rdr<'a> {
     }
 
     fn take(&mut self, n: usize) -> &'a [u8] {
-        let end = self.at.checked_add(n).expect("X11 packet field out of bounds");
+        let end = self
+            .at
+            .checked_add(n)
+            .expect("X11 packet field out of bounds");
         let slice = &self.buf[self.at..end];
         self.at = end;
         slice
@@ -1086,7 +1089,12 @@ impl X11Window {
     /// # Errors
     ///
     /// Returns [`X11Error`] if dimensions exceed server limits or writing fails.
-    pub fn present_argb(&mut self, pixels: &[u32], width: u16, height: u16) -> Result<(), X11Error> {
+    pub fn present_argb(
+        &mut self,
+        pixels: &[u32],
+        width: u16,
+        height: u16,
+    ) -> Result<(), X11Error> {
         let w = usize::from(width);
         let h = usize::from(height);
         if w == 0 || h == 0 || pixels.len() < w.saturating_mul(h) {
@@ -1096,9 +1104,9 @@ impl X11Window {
             .saturating_mul(4)
             .min(MAX_REQUEST_BYTES);
         let header_bytes = 24usize;
-        let row_bytes = w.checked_mul(4).ok_or_else(|| {
-            X11Error::Protocol("framebuffer row byte length overflow".to_owned())
-        })?;
+        let row_bytes = w
+            .checked_mul(4)
+            .ok_or_else(|| X11Error::Protocol("framebuffer row byte length overflow".to_owned()))?;
         if header_bytes + row_bytes > max_req {
             return Err(X11Error::Protocol(format!(
                 "single scanline ({row_bytes} B) exceeds X11 request ceiling ({max_req} B)"
@@ -1414,11 +1422,7 @@ impl X11Window {
         let reply_prop = if selection != self.clipboard_atom || self.clipboard_owned.is_empty() {
             0
         } else if target == self.targets_atom {
-            let targets = [
-                self.targets_atom,
-                self.utf8_string,
-                atom::STRING,
-            ];
+            let targets = [self.targets_atom, self.utf8_string, atom::STRING];
             let mut raw = Vec::with_capacity(12);
             for t in targets {
                 raw.extend_from_slice(&t.to_le_bytes());
@@ -1585,7 +1589,9 @@ impl X11Window {
 
             let now = Instant::now();
             if now >= deadline {
-                return Err(X11Error::Protocol("timed out waiting for X11 reply".to_owned()));
+                return Err(X11Error::Protocol(
+                    "timed out waiting for X11 reply".to_owned(),
+                ));
             }
             let rem_ms = deadline.duration_since(now).as_millis().min(500) as i32;
             let mut pfd = libc::pollfd {
@@ -1670,7 +1676,9 @@ fn parse_setup_body(body: &[u8]) -> Result<SetupInfo, X11Error> {
     let vendor_padded = (vendor_len + 3) & !3;
     let needed = 32 + vendor_padded + nformats * 8 + 40;
     if body.len() < needed {
-        return Err(X11Error::Unsupported("truncated X11 setup formats/screen".to_owned()));
+        return Err(X11Error::Unsupported(
+            "truncated X11 setup formats/screen".to_owned(),
+        ));
     }
     r.skip(vendor_padded);
     let mut has_root_32 = false;

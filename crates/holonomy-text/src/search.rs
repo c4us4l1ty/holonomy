@@ -422,11 +422,13 @@ impl<'a> StyleCursor<'a> {
             .checked_add(len)
             .ok_or(StreamReplaceError::OffsetOverflow)?;
         if !self.orig_runs.is_empty() {
-            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].end <= src_start
+            while self.run_idx < self.orig_runs.len()
+                && self.orig_runs[self.run_idx].end <= src_start
             {
                 self.run_idx += 1;
             }
-            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].start < src_end
+            while self.run_idx < self.orig_runs.len()
+                && self.orig_runs[self.run_idx].start < src_end
             {
                 let run = &self.orig_runs[self.run_idx];
                 let ov_start = run.start.max(src_start);
@@ -457,7 +459,8 @@ impl<'a> StyleCursor<'a> {
             .checked_add(needle_len)
             .ok_or(StreamReplaceError::OffsetOverflow)?;
         if !self.orig_runs.is_empty() {
-            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].end <= src_start
+            while self.run_idx < self.orig_runs.len()
+                && self.orig_runs[self.run_idx].end <= src_start
             {
                 self.run_idx += 1;
             }
@@ -476,7 +479,8 @@ impl<'a> StyleCursor<'a> {
                     }
                 }
             }
-            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].end <= src_end {
+            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].end <= src_end
+            {
                 self.run_idx += 1;
             }
         }
@@ -585,7 +589,8 @@ pub fn stream_replace_chunks<R: SegmentSource>(
     let last_byte = needle[m - 1];
 
     let mut cached: Option<(SegmentId, Zeroizing<Vec<u8>>)> = None;
-    let mut holdback: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(keep + SCAN_WINDOW_BYTES as usize));
+    let mut holdback: Zeroizing<Vec<u8>> =
+        Zeroizing::new(Vec::with_capacity(keep + SCAN_WINDOW_BYTES as usize));
     let mut out_buf: Zeroizing<Vec<u8>> =
         Zeroizing::new(Vec::with_capacity(max_chunk_bytes.saturating_add(4096)));
     let mut style_cursor = StyleCursor::new(spine.styles());

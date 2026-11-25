@@ -5,9 +5,8 @@
 //! same parsed SFNT faces so the desktop canvas obeys `UI-SPEC.md` Law `U0` and GATES Law `L-8`.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use holonomy_text::FontFamily;
 
@@ -35,6 +34,8 @@ const JETBRAINS_MONO_TTF: &[u8] = include_bytes!(concat!(
 
 const MAX_COMPOUND_DEPTH: usize = 8;
 const MAX_GLYPH_CACHE_ENTRIES: usize = 4_096;
+
+type RawContours = Vec<Vec<(f32, f32, bool)>>;
 
 /// Which embedded font face corresponds to a styled run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -203,11 +204,7 @@ impl FontOutlines {
         }
     }
 
-    fn decode_raw_contours(
-        &self,
-        glyph_id: u16,
-        depth: usize,
-    ) -> Result<Vec<Vec<(f32, f32, bool)>>, FaceError> {
+    fn decode_raw_contours(&self, glyph_id: u16, depth: usize) -> Result<RawContours, FaceError> {
         if depth > MAX_COMPOUND_DEPTH {
             return Err(FaceError::BadTable("glyf"));
         }
@@ -235,11 +232,7 @@ impl FontOutlines {
         }
     }
 
-    fn decode_compound_glyph(
-        &self,
-        record: &[u8],
-        depth: usize,
-    ) -> Result<Vec<Vec<(f32, f32, bool)>>, FaceError> {
+    fn decode_compound_glyph(&self, record: &[u8], depth: usize) -> Result<RawContours, FaceError> {
         const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
         const ARGS_ARE_XY_VALUES: u16 = 0x0002;
         const WE_HAVE_A_SCALE: u16 = 0x0008;
@@ -351,10 +344,7 @@ fn f2dot14(raw: i16) -> f32 {
     f32::from(raw) / 16_384.0
 }
 
-fn decode_simple_glyph(
-    record: &[u8],
-    num_contours: usize,
-) -> Result<Vec<Vec<(f32, f32, bool)>>, FaceError> {
+fn decode_simple_glyph(record: &[u8], num_contours: usize) -> Result<RawContours, FaceError> {
     let bad = || FaceError::BadTable("glyf");
     if num_contours == 0 {
         return Ok(Vec::new());
@@ -406,7 +396,11 @@ fn decode_simple_glyph(
         let dx = if short {
             let v = i32::from(*record.get(off).ok_or_else(bad)?);
             off += 1;
-            if same_or_pos { v } else { -v }
+            if same_or_pos {
+                v
+            } else {
+                -v
+            }
         } else if same_or_pos {
             0
         } else {
@@ -426,7 +420,11 @@ fn decode_simple_glyph(
         let dy = if short {
             let v = i32::from(*record.get(off).ok_or_else(bad)?);
             off += 1;
-            if same_or_pos { v } else { -v }
+            if same_or_pos {
+                v
+            } else {
+                -v
+            }
         } else if same_or_pos {
             0
         } else {
@@ -529,11 +527,7 @@ fn subdivide_quad(
 /// Rasterizes `outline` into an 8-bit antialiased bitmap (`0..=255`) using 4x4 vertical
 /// supersampling and analytic horizontal span integration under the non-zero winding rule.
 #[must_use]
-pub fn rasterize_outline(
-    outline: &GlyphOutline,
-    units_per_em: u16,
-    px_size: f32,
-) -> GlyphBitmap {
+pub fn rasterize_outline(outline: &GlyphOutline, units_per_em: u16, px_size: f32) -> GlyphBitmap {
     let scale = px_size.max(1.0) / f32::from(units_per_em.max(1));
     let mut scaled_contours: Vec<Vec<(f32, f32)>> = Vec::with_capacity(outline.contours.len());
     let mut min_x = f32::INFINITY;
@@ -655,22 +649,10 @@ pub fn rasterize_outline(
 }
 
 #[inline]
-fn accumulate_span(
-    row: &mut [f32],
-    ix0: i32,
-    width: usize,
-    x_start: f32,
-    x_end: f32,
-    weight: f32,
-) {
+fn accumulate_span(row: &mut [f32], ix0: i32, width: usize, x_start: f32, x_end: f32, weight: f32) {
     let col_lo = ((x_start.floor() as i32) - ix0).max(0) as usize;
     let col_hi = (((x_end.ceil() as i32) - ix0).min(width as i32)).max(0) as usize;
-    for (col, cell) in row
-        .iter_mut()
-        .enumerate()
-        .take(col_hi)
-        .skip(col_lo)
-    {
+    for (col, cell) in row.iter_mut().enumerate().take(col_hi).skip(col_lo) {
         let px0 = (ix0 + col as i32) as f32;
         let px1 = px0 + 1.0;
         let cov = (x_end.min(px1) - x_start.max(px0)).max(0.0);
@@ -698,7 +680,7 @@ struct FontSetInner {
     italic: ParsedFont,
     mono: ParsedFont,
     body_px: u16,
-    cache: RefCell<BTreeMap<(FontVariant, u16, u16), Arc<GlyphBitmap>>>,
+    cache: Mutex<BTreeMap<(FontVariant, u16, u16), Arc<GlyphBitmap>>>,
 }
 
 /// Embedded proportional & monospace OpenType font set (`Inter-Regular`, `Inter-Bold`,
@@ -720,7 +702,7 @@ impl FontSet {
             italic: ParsedFont::from_static(INTER_ITALIC_TTF)?,
             mono: ParsedFont::from_static(JETBRAINS_MONO_TTF)?,
             body_px: body_px.max(1),
-            cache: RefCell::new(BTreeMap::new()),
+            cache: Mutex::new(BTreeMap::new()),
         })))
     }
 
@@ -784,7 +766,13 @@ impl FontSet {
         let px_quarter = (px_size * 4.0).round().clamp(4.0, 2_400.0) as u16;
         let key = (variant, gid, px_quarter);
 
-        if let Some(hit) = self.0.cache.borrow().get(&key) {
+        if let Some(hit) = self
+            .0
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
             return Some(Arc::clone(hit));
         }
 
@@ -801,7 +789,11 @@ impl FontSet {
         if bmp.width == 0 || bmp.height == 0 {
             return None;
         }
-        let mut cache = self.0.cache.borrow_mut();
+        let mut cache = self
+            .0
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if cache.len() >= MAX_GLYPH_CACHE_ENTRIES {
             cache.clear();
         }

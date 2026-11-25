@@ -181,7 +181,13 @@ pub fn import_from_path(
     format: Option<TransferFormat>,
 ) -> Result<(Document, ImportReport), TransferError> {
     let calibration = holonomy_seal::calibrate();
-    import_from_path_with(source_path, dest_path, passphrase, calibration.params, format)
+    import_from_path_with(
+        source_path,
+        dest_path,
+        passphrase,
+        calibration.params,
+        format,
+    )
 }
 
 /// Imports a `.txt` or `.md` file into a new encrypted v6 `.wavefunction` using `params`.
@@ -669,13 +675,10 @@ fn stream_import_markdown<R: BufRead>(
             let mut style = DocStyle::default();
 
             let mut bq = 0u8;
-            while let Some(after) = rest.strip_prefix("> ").or_else(|| {
-                if rest == ">" {
-                    Some("")
-                } else {
-                    None
-                }
-            }) {
+            while let Some(after) =
+                rest.strip_prefix("> ")
+                    .or_else(|| if rest == ">" { Some("") } else { None })
+            {
                 bq = bq.saturating_add(1).min(8);
                 rest = after;
             }
@@ -767,7 +770,9 @@ pub fn export_to_path(
     let file = match opts.open(dest_path) {
         Ok(f) => f,
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(TransferError::AlreadyExists(dest_path.display().to_string()));
+            return Err(TransferError::AlreadyExists(
+                dest_path.display().to_string(),
+            ));
         }
         Err(err) => return Err(TransferError::Io(err)),
     };
@@ -795,9 +800,7 @@ pub fn export_to_writer<W: Write>(
             for span in spine.spans_in(0, spine.len()) {
                 let slab = span.slab();
                 if cached_id != Some(slab.segment()) {
-                    let loaded = source
-                        .load(slab.segment())
-                        .map_err(TransferError::Line)?;
+                    let loaded = source.load(slab.segment()).map_err(TransferError::Line)?;
                     *cached_buf = loaded;
                     cached_id = Some(slab.segment());
                     segments_read += 1;
@@ -808,7 +811,8 @@ pub fn export_to_writer<W: Write>(
             }
         }
         TransferFormat::Markdown => {
-            bytes_written = export_markdown_streaming(&spine, &mut source, &mut writer, &mut segments_read)?;
+            bytes_written =
+                export_markdown_streaming(&spine, &mut source, &mut writer, &mut segments_read)?;
         }
     }
     writer.flush()?;
@@ -847,8 +851,8 @@ fn export_markdown_streaming<W: Write>(
                       writer: &mut W,
                       written: &mut u64|
      -> Result<(), TransferError> {
-        let text = std::str::from_utf8(line_buf)
-            .map_err(|e| TransferError::InvalidUtf8(e.to_string()))?;
+        let text =
+            std::str::from_utf8(line_buf).map_err(|e| TransferError::InvalidUtf8(e.to_string()))?;
         let line_end = line_start + line_buf.len() as u64;
         let head_style = if line_start < line_end {
             styles.style_at(line_start)
@@ -983,9 +987,7 @@ fn export_markdown_streaming<W: Write>(
     for span in spine.spans_in(0, total_len) {
         let slab = span.slab();
         if cached_id != Some(slab.segment()) {
-            let loaded = source
-                .load(slab.segment())
-                .map_err(TransferError::Line)?;
+            let loaded = source.load(slab.segment()).map_err(TransferError::Line)?;
             *cached_buf = loaded;
             cached_id = Some(slab.segment());
             *segments_read += 1;
@@ -995,7 +997,13 @@ fn export_markdown_streaming<W: Write>(
         while idx < slice.len() {
             if let Some(rel_nl) = slice[idx..].iter().position(|&b| b == b'\n') {
                 line_bytes.extend_from_slice(&slice[idx..idx + rel_nl]);
-                flush_line(line_start, &line_bytes, true, &mut writer, &mut bytes_written)?;
+                flush_line(
+                    line_start,
+                    &line_bytes,
+                    true,
+                    &mut writer,
+                    &mut bytes_written,
+                )?;
                 pos += (rel_nl + 1) as u64;
                 line_start = pos;
                 line_bytes.clear();
@@ -1022,7 +1030,13 @@ fn export_markdown_streaming<W: Write>(
         }
     }
     if !line_bytes.is_empty() {
-        flush_line(line_start, &line_bytes, false, &mut writer, &mut bytes_written)?;
+        flush_line(
+            line_start,
+            &line_bytes,
+            false,
+            &mut writer,
+            &mut bytes_written,
+        )?;
     }
     Ok(bytes_written)
 }
@@ -1107,9 +1121,8 @@ pub fn migrate_v5_reader_with<R: Read + Seek>(
             .start_streaming_tx()
             .map_err(|e| TransferError::Line(e.to_string()))?;
 
-        let mut staging = Zeroizing::new(Vec::<u8>::with_capacity(
-            V5_PAYLOAD_PLAINTEXT_PER_SLOT + 4,
-        ));
+        let mut staging =
+            Zeroizing::new(Vec::<u8>::with_capacity(V5_PAYLOAD_PLAINTEXT_PER_SLOT + 4));
         let mut imported_segments = 0u64;
         let mut imported_bytes = 0u64;
 

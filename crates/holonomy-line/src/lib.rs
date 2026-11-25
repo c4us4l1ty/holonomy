@@ -889,7 +889,10 @@ impl WorldLine {
             Some(manifest) => Some(manifest.clone()),
             None => {
                 if let Some(existing) = &self.manifest {
-                    if existing.slabs.len().saturating_add(tx.new_descriptors.len())
+                    if existing
+                        .slabs
+                        .len()
+                        .saturating_add(tx.new_descriptors.len())
                         > MAX_MANIFEST_SLABS
                     {
                         self.poisoned = true;
@@ -2228,9 +2231,7 @@ impl StreamingTx {
             });
             self.mmr.append(encoded.leaf)?;
             self.last_segment_tag = encoded.tag;
-            self.next_segment_seq = sequence
-                .checked_add(1)
-                .ok_or(LineError::TooManySegments)?;
+            self.next_segment_seq = sequence.checked_add(1).ok_or(LineError::TooManySegments)?;
             Ok(LineSlab {
                 segment: sequence,
                 start: 0,
@@ -2255,7 +2256,9 @@ impl<'a> StreamingAppend<'a> {
     /// will assign.
     #[must_use]
     pub fn next_segment_sequence(&self) -> u64 {
-        self.tx.as_ref().map_or(0, StreamingTx::next_segment_sequence)
+        self.tx
+            .as_ref()
+            .map_or(0, StreamingTx::next_segment_sequence)
     }
 
     /// Seals and writes one non-empty `<= 64 KiB` plaintext segment immediately to the log,
@@ -2659,7 +2662,13 @@ fn encode_bookmark_record(
     plaintext.extend_from_slice(&timestamp_secs.to_le_bytes());
     plaintext.extend_from_slice(&name_len.to_le_bytes());
     plaintext.extend_from_slice(name.as_bytes());
-    let aad = bookmark_aad(header, epoch, sequence, last_witness_tag, previous_bookmark_tag);
+    let aad = bookmark_aad(
+        header,
+        epoch,
+        sequence,
+        last_witness_tag,
+        previous_bookmark_tag,
+    );
     let sealed = seal_object(key, &aad, &plaintext);
     scrub_manifest_buffer(&mut plaintext);
     let tag = sealed.cmt4;
@@ -2685,7 +2694,9 @@ fn decode_bookmark_plain(
     if name_len == 0 || name_len > MAX_BOOKMARK_NAME_BYTES {
         return Err(LineError::InvalidRecord);
     }
-    let end = offset.checked_add(name_len).ok_or(LineError::InvalidRecord)?;
+    let end = offset
+        .checked_add(name_len)
+        .ok_or(LineError::InvalidRecord)?;
     let raw = bytes.get(offset..end).ok_or(LineError::InvalidRecord)?;
     if end != bytes.len() {
         return Err(LineError::InvalidRecord);
@@ -2966,7 +2977,13 @@ fn scan_records<R: Read + Seek>(
                 ciphertext,
                 cmt4: tag,
             };
-            let aad = bookmark_aad(header, epoch, sequence, &last_witness_tag, &last_bookmark_tag);
+            let aad = bookmark_aad(
+                header,
+                epoch,
+                sequence,
+                &last_witness_tag,
+                &last_bookmark_tag,
+            );
             let plaintext =
                 open_object(key, &aad, &sealed).map_err(|_| LineError::AuthenticationRejected)?;
             let bookmark = decode_bookmark_plain(sequence, &plaintext, next_witness_sequence)

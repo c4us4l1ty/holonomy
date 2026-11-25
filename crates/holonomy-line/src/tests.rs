@@ -1849,8 +1849,10 @@ fn witness_history_manifest_time_travel_and_bookmarks_survive_reopen_and_tamper(
     assert!(line.manifest_at_witness(0).unwrap().slabs.is_empty());
 
     // Witness 1: append two implicit segments.
-    line.append_segments(&[&b"first "[..], &b"draft"[..]]).unwrap();
-    line.add_bookmark(1, 1_700_000_001, "Initial Draft").unwrap();
+    line.append_segments(&[&b"first "[..], &b"draft"[..]])
+        .unwrap();
+    line.add_bookmark(1, 1_700_000_001, "Initial Draft")
+        .unwrap();
 
     // Witness 2: cut & style via explicit manifest.
     let m2 = LineManifest {
