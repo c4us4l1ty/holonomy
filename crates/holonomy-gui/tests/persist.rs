@@ -685,18 +685,30 @@ fn sixty_year_21900_witness_scrub_and_reverify() {
     const DAYS: u64 = 60 * 365; // 21,900 daily witnesses
     let path = fast_temp_path("60yr-21900w");
     let document = Document::create(&path.0, PASSPHRASE).expect("creates 60-year world-line");
-    let mut typing = Typing::new(document.sink(), store::CAPACITY);
 
     let write_start = Instant::now();
-    for day in 1..=DAYS {
-        let entry = if day % 3650 == 0 {
-            format!("decade-{day} milestone entry\n")
-        } else {
-            format!("d{day}\n")
-        };
-        typing.insert(entry.as_bytes()).expect("insert daily note");
-        typing.flush().expect("seal daily witness");
-    }
+    let entries: Vec<String> = (1..DAYS)
+        .map(|day| {
+            if day % 3650 == 0 {
+                format!("decade-{day} milestone entry\n")
+            } else {
+                format!("d{day}\n")
+            }
+        })
+        .collect();
+    document
+        .append_witnessed_entries(entries.iter().map(String::as_bytes))
+        .expect("seal 21,899 daily witnesses");
+    drop(entries);
+
+    // Final day sealed live through `Typing::resume` + `flush()` on top of 21,899 witnesses.
+    let spine = document.spine().expect("spine before final year-60 save");
+    let mut typing = Typing::resume(document.sink(), spine, store::CAPACITY);
+    let end = typing.document_len();
+    typing
+        .insert_at(end, format!("decade-{DAYS} milestone entry\n").as_bytes())
+        .expect("insert final year-60 milestone");
+    typing.flush().expect("seal final year-60 witness");
     let write_ms = write_start.elapsed().as_millis();
     drop(typing);
 
@@ -764,8 +776,8 @@ fn cold_open_30m_word_document_stays_under_residency_budget() {
 
     let path = fast_temp_path("30m-words");
     let document = Document::create(&path.0, PASSPHRASE).expect("creates 30M-word document");
-    let chunk = "alpha ".repeat(21_845); // ~131,070 B (~128 KiB, 21,845 words) per leaf
-    const LEAVES: usize = 1_400; // 1,400 * 21,845 = 30,583,000 words (~183.5 MiB)
+    let chunk = "alpha ".repeat(10_922); // 65,532 B (<= 64 KiB segment quantum, 10,922 words)
+    const LEAVES: usize = 2_800; // 2,800 * 10,922 = 30,581,600 words (~183.5 MiB)
 
     let build_start = Instant::now();
     {

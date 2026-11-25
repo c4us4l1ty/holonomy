@@ -473,6 +473,36 @@ impl Document {
             .map_err(|err| StoreError::Line(err.to_string()))
     }
 
+    /// Appends `entries` so each entry seals its own segment and durable witness checkpoint under
+    /// one exclusive write lock (`O(N)` total cost for multi-decade logs).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Line`] if streaming, sealing, or committing fails.
+    pub fn append_witnessed_entries<I>(&self, entries: I) -> Result<(), StoreError>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
+        let mut line = self
+            .line
+            .try_borrow_mut()
+            .map_err(|_| StoreError::Line("the document is busy".to_owned()))?;
+        let mut tx = line
+            .line
+            .start_streaming_tx()
+            .map_err(|err| StoreError::Line(err.to_string()))?;
+        for entry in entries {
+            let step = tx.push_segment(entry.as_ref()).and_then(|_| tx.commit_witness());
+            if let Err(err) = step {
+                let _ = line.line.abort_streaming_tx(tx);
+                return Err(StoreError::Line(err.to_string()));
+            }
+        }
+        line.line.finish_streaming_tx(tx, None).map_err(|err| StoreError::Line(err.to_string()))?;
+        Ok(())
+    }
+
     /// Computes a structural diff between two committed witnesses without decrypting any segment
     /// plaintext (`Block 8`, `Law L-2`).
     ///

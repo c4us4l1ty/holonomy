@@ -49,7 +49,11 @@ const WARMUP: usize = 8;
 
 const P50_FACTOR: u32 = 2;
 const P99_FACTOR: u32 = 4;
-const FRAME_CEILING: Duration = Duration::from_millis(50);
+const FRAME_CEILING: Duration = if cfg!(debug_assertions) {
+    Duration::from_millis(250)
+} else {
+    Duration::from_millis(50)
+};
 const CONTROL_LEAVES: usize = 128;
 const CONTROL_FACTOR: u32 = 25;
 

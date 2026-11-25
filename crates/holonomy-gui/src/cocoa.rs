@@ -589,13 +589,16 @@ fn dpi_from_backing_scale(scale: f64) -> i64 {
 
 impl Drop for CocoaWindow {
     fn drop(&mut self) {
-        // SAFETY: clears queue ivar pointers, closes window, and frees extra `Rc`.
+        // SAFETY: clears queue ivar pointers so callbacks stop touching queue during teardown.
         unsafe {
             object_setInstanceVariable(self.view, c"_holoQueue".as_ptr(), null_mut());
             object_setInstanceVariable(self.delegate, c"_holoQueue".as_ptr(), null_mut());
-            let _: Id = msg!(self.window, sel(b"close\0") => Id);
-            let _: Id = msg!(self.view, sel(b"release\0") => Id);
-            let _: Id = msg!(self.delegate, sel(b"release\0") => Id);
+        }
+        let _: Id = msg!(self.window, sel(b"close\0") => Id);
+        let _: Id = msg!(self.view, sel(b"release\0") => Id);
+        let _: Id = msg!(self.delegate, sel(b"release\0") => Id);
+        // SAFETY: balances `Rc::into_raw` allocated in `CocoaWindow::open`.
+        unsafe {
             drop(Rc::from_raw(self.prop_raw));
         }
     }
