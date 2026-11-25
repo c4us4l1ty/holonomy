@@ -15,6 +15,10 @@
 //! The numbers print as `HOLONOMY_INTENTS intents= …`, and the counts are asserted: a green run
 //! that applied no intents would be a green run that proved nothing.
 
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
 use holonomy_eye::{Fixed, Point, Shaper, Style, View};
 use holonomy_shell::{Editor, Effect, Intent, Move};
 use holonomy_text::{
@@ -87,6 +91,49 @@ fn editor() -> Shell {
         ResidentSet::new(Repeated { leaf_bytes: 64 }, BUDGET, 0).expect("a workable budget");
     Editor::new(
         Typing::new(Recorder::default(), 64),
+        residency,
+        Fake,
+        WIDTH,
+        VIEWPORT,
+    )
+}
+
+/// Shared in-memory world-line store so sealed leaves fault back the exact bytes typed.
+#[derive(Debug, Clone, Default)]
+struct World {
+    segments: Rc<RefCell<BTreeMap<u64, Vec<u8>>>>,
+    next: Rc<Cell<u64>>,
+}
+
+impl SegmentSink for World {
+    fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+        let id = self.next.get();
+        self.next.set(id + 1);
+        self.segments.borrow_mut().insert(id, plaintext.to_vec());
+        Ok(Appended {
+            segment: SegmentId::new(id),
+            witness_sequence: id + 1,
+            segment_root: [0u8; 32],
+            bytes_written: plaintext.len() as u64,
+        })
+    }
+}
+
+impl SegmentSource for World {
+    fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
+        self.segments
+            .borrow()
+            .get(&segment.get())
+            .cloned()
+            .ok_or_else(|| format!("missing {segment}"))
+    }
+}
+
+fn world_editor(slab_bytes: usize) -> Editor<World, World, Fake> {
+    let store = World::default();
+    let residency = ResidentSet::new(store.clone(), BUDGET, 0).expect("a workable budget");
+    Editor::new(
+        Typing::new(store, slab_bytes),
         residency,
         Fake,
         WIDTH,
@@ -445,7 +492,21 @@ fn formatting_links_and_replace_all_intents_agree_with_direct_calls() {
 
 #[test]
 fn word_navigation_multi_click_and_status_metrics_work_across_leaves() {
-    let mut shell = editor();
+    // Verify unsealed open-buffer metrics & cluster helpers before any slab is sealed.
+    let mut unsealed = world_editor(256);
+    unsealed
+        .type_text("alpha beta gamma\nsecond paragraph line")
+        .expect("seeded unsealed");
+    let unsealed_metrics = unsealed.status_metrics();
+    assert!(unsealed_metrics.words_exact);
+    assert_eq!(unsealed_metrics.total_words, 6);
+    unsealed
+        .apply(Intent::DeleteWordBefore)
+        .expect("unsealed del word before");
+    assert_eq!(unsealed.status_metrics().total_words, 5);
+
+    // 12-byte slabs split "alpha beta gamma\nsecond paragraph line" across multiple leaves.
+    let mut shell = world_editor(12);
     shell
         .type_text("alpha beta gamma\nsecond paragraph line")
         .expect("seeded");
