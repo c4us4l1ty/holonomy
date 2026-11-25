@@ -956,9 +956,13 @@ fn every_toolbar_action_round_trips_byte_identical_style_state() {
     app.editor().select_range(l3 + 37, l3 + 41).expect("code");
     apply_toolbar_action(&mut app, ToolbarAction::ToggleCode).expect("Code");
 
-    app.editor().select_range(l3 + 42, lines[3].1).expect("link");
     app.editor()
-        .apply(Intent::SetLink(Some("https://holonomy.invalid/l3".to_owned())))
+        .select_range(l3 + 42, lines[3].1)
+        .expect("link");
+    app.editor()
+        .apply(Intent::SetLink(Some(
+            "https://holonomy.invalid/l3".to_owned(),
+        )))
         .expect("Link");
 
     app.editor()
@@ -1020,7 +1024,11 @@ fn formatting_torture_corpus_across_slab_boundaries_single_undo() {
         typing.flush().expect("seal distinct slab leaf");
     }
     let spine = typing.spine().clone();
-    assert!(spine.slab_count() >= 6, "need >= 6 slabs, got {}", spine.slab_count());
+    assert!(
+        spine.slab_count() >= 6,
+        "need >= 6 slabs, got {}",
+        spine.slab_count()
+    );
     let baseline_styles = spine.styles().clone();
     assert!(baseline_styles.is_empty());
     drop(typing);
@@ -1075,7 +1083,10 @@ fn formatting_torture_corpus_across_slab_boundaries_single_undo() {
 
     // Reopen independently to confirm multi-slab formatting persisted cleanly.
     let reopened_fmt = Document::open(&path.0, PASSPHRASE).expect("reopen formatted");
-    assert_eq!(reopened_fmt.spine().expect("spine").styles(), &formatted_styles);
+    assert_eq!(
+        reopened_fmt.spine().expect("spine").styles(),
+        &formatted_styles
+    );
     drop(reopened_fmt);
 
     // Single Undo must revert EVERY cross-slab style span in O(1) without leaving stale runs.
@@ -1116,7 +1127,10 @@ fn twenty_four_year_fresh_user_lifecycle_drill() {
     doc.add_bookmark(DAYS, 1_764_000_000, "anniversary-24")
         .expect("bookmark year 24");
     drop(typing);
-    assert_eq!(doc.verify().expect("verify original").segments_verified, DAYS);
+    assert_eq!(
+        doc.verify().expect("verify original").segments_verified,
+        DAYS
+    );
 
     // 2. Back up container, wipe original file completely, reopen backup in clean state.
     fs::copy(&original, &backup).expect("backup copy");
@@ -1128,12 +1142,19 @@ fn twenty_four_year_fresh_user_lifecycle_drill() {
     assert_eq!(restored.witness_history().len() as u64, DAYS + 1);
     assert_eq!(restored.bookmarks().len(), 1);
     assert_eq!(
-        restored.verify().expect("verify restored").segments_verified,
+        restored
+            .verify()
+            .expect("verify restored")
+            .segments_verified,
         DAYS
     );
 
     // 3. Continue writing + compact + re-verify.
-    let mut t2 = Typing::resume(restored.sink(), restored.spine().expect("spine"), store::CAPACITY);
+    let mut t2 = Typing::resume(
+        restored.sink(),
+        restored.spine().expect("spine"),
+        store::CAPACITY,
+    );
     let end2 = t2.document_len();
     t2.insert_at(end2, b"year25-day-1 continued cleanly\n")
         .expect("continue typing");
@@ -1151,7 +1172,13 @@ fn twenty_four_year_fresh_user_lifecycle_drill() {
         .compact_to(&compacted, PASSPHRASE)
         .expect("compact after 24yr lifecycle");
     drop(restored);
-    assert_eq!(final_doc.verify().expect("verify compacted").segments_verified, 1);
+    assert_eq!(
+        final_doc
+            .verify()
+            .expect("verify compacted")
+            .segments_verified,
+        1
+    );
     drop(final_doc);
     let _ = fs::remove_dir_all(&root);
     println!("HOLONOMY_24YR_LIFECYCLE witnesses={} status=ok", DAYS + 2);

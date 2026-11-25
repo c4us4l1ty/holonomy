@@ -469,12 +469,9 @@ impl PixelSurface {
         let style = Style::DEFAULT;
         let line_h = self.to_px(self.fonts.line_height(style)).max(18);
         let ascent = self.to_px(self.fonts.ascent(style));
-        let (cx, cy, _, ch) = self.caret_rect.unwrap_or((
-            self.page_origin_x,
-            self.page_origin_y,
-            1,
-            line_h,
-        ));
+        let (cx, cy, _, ch) =
+            self.caret_rect
+                .unwrap_or((self.page_origin_x, self.page_origin_y, 1, line_h));
         let h = ch.max(line_h);
         let mut text_w = 0i32;
         for (_, cl) in Clusters::new(preedit) {
@@ -483,13 +480,16 @@ impl PixelSurface {
         let box_w = (text_w + 8).max(16);
         let max_x = (self.canvas_clip.x + self.canvas_clip.w - box_w).max(self.canvas_clip.x);
         let bx = cx.clamp(self.canvas_clip.x, max_x);
-        let by = cy.clamp(self.canvas_clip.y, self.canvas_clip.y + self.canvas_clip.h - h);
+        let by = cy.clamp(
+            self.canvas_clip.y,
+            self.canvas_clip.y + self.canvas_clip.h - h,
+        );
         let box_rect = Rect::new(bx, by, box_w, h);
         self.fb
             .fill_rect_clipped(box_rect, self.theme.code_bg, self.canvas_clip);
         self.fb.fill_rect_clipped(
             Rect::new(bx, by + h - 2, box_w, 2),
-            self.theme.accent,
+            self.theme.caret,
             self.canvas_clip,
         );
         draw_ui_text(

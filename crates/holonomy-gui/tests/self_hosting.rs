@@ -89,7 +89,9 @@ fn self_hosting_spec_document_round_trips_through_format_bookmark_compact_and_ex
         .expect("select list/link");
     apply_toolbar_action(&mut app, ToolbarAction::ToggleBullet).expect("bullet");
     app.editor()
-        .apply(Intent::SetLink(Some("https://holonomy.invalid/block10".to_owned())))
+        .apply(Intent::SetLink(Some(
+            "https://holonomy.invalid/block10".to_owned(),
+        )))
         .expect("link");
 
     assert!(app.draw().expect("render self-hosted spec"));
@@ -114,8 +116,13 @@ fn self_hosting_spec_document_round_trips_through_format_bookmark_compact_and_ex
     assert_eq!(compact_verify.segments_verified, 1);
     assert_eq!(compacted.spine().expect("spine").styles(), &expected_styles);
 
-    let report = export_to_path(&compacted, &exported_md.0, Some(TransferFormat::Markdown), true)
-        .expect("explicit markdown export");
+    let report = export_to_path(
+        &compacted,
+        &exported_md.0,
+        Some(TransferFormat::Markdown),
+        true,
+    )
+    .expect("explicit markdown export");
     assert_eq!(report.disclosure, PLAINTEXT_EGRESS_DISCLOSURE);
     let md_body = fs::read_to_string(&exported_md.0).expect("read exported md");
     assert!(md_body.contains("# Holonomy v6 Block 10 Specification"));

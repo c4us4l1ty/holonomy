@@ -370,7 +370,10 @@ fn extract_ns_text(obj: Id) -> Option<String> {
         return None;
     }
     // SAFETY: `UTF8String` returns NUL-terminated UTF-8 owned by the `NSString`.
-    unsafe { CStr::from_ptr(utf8) }.to_str().ok().map(str::to_owned)
+    unsafe { CStr::from_ptr(utf8) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 extern "C" fn view_has_marked_text(this: Id, _cmd: Sel) -> Bool {
@@ -380,7 +383,10 @@ extern "C" fn view_has_marked_text(this: Id, _cmd: Sel) -> Bool {
 extern "C" fn view_marked_range(this: Id, _cmd: Sel) -> NsRange {
     let len = get_queue(this).map_or(0, |q| q.borrow().marked_len);
     if len > 0 {
-        NsRange { location: 0, length: len }
+        NsRange {
+            location: 0,
+            length: len,
+        }
     } else {
         NsRange {
             location: NS_NOT_FOUND,
@@ -435,12 +441,7 @@ extern "C" fn view_attributed_substring(
     null_mut()
 }
 
-extern "C" fn view_insert_text(
-    this: Id,
-    _cmd: Sel,
-    string: Id,
-    _replacement_range: NsRange,
-) {
+extern "C" fn view_insert_text(this: Id, _cmd: Sel, string: Id, _replacement_range: NsRange) {
     if let Some(q_ref) = get_queue(this) {
         let text = extract_ns_text(string).unwrap_or_default();
         let mut q = q_ref.borrow_mut();
