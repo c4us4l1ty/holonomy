@@ -2038,7 +2038,14 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             self.viewport,
         );
         let leaf_count = self.typing.spine().slab_count() as usize;
-        if let Some(gap) = window.leaves().find(|&k| !self.measured.is_measured(k)) {
+        let mut first_gap = None;
+        for k in window.leaves().leaves() {
+            if !self.measured.is_measured(k) {
+                first_gap = Some(k);
+                break;
+            }
+        }
+        if let Some(gap) = first_gap {
             let mut carried = if gap == 0 {
                 Carry::default()
             } else {
