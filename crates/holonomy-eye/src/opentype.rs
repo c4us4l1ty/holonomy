@@ -71,8 +71,14 @@ pub(crate) struct GlyphSlot {
 }
 
 /// 4096-bit modulo glyph filter (`gid & 4095`) for O(1) lookup skipping with zero false negatives.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CovMask([u64; 64]);
+
+impl Default for CovMask {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 
 impl CovMask {
     const fn empty() -> Self {
@@ -1723,7 +1729,16 @@ impl ContextTable {
     ) -> Option<usize> {
         let Self::Fmt3 { input, records } = self;
         let mut positions = match_forward_cov(gdef, buf, at, input, flag, mfs, false)?;
-        apply_nested_gsub(table, gdef, buf, &mut positions, records, req_mask, depth, state);
+        apply_nested_gsub(
+            table,
+            gdef,
+            buf,
+            &mut positions,
+            records,
+            req_mask,
+            depth,
+            state,
+        );
         Some(positions.len().max(1))
     }
 }
