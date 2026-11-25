@@ -121,8 +121,10 @@ fn font_set_preserves_single_geometry_hit_test_across_styles_and_zooms() {
                 let dev = view
                     .paint_point(&layout, offset)
                     .expect("char index sits on cluster boundary");
+                let half_h = dev.height.sixtyfourths() / 2;
+                let mid_y = Fixed::from_sixtyfourths(dev.top.sixtyfourths() + half_h);
                 let caret = view
-                    .hit_test(&layout, Point::new(dev.x, dev.top + dev.height / 2))
+                    .hit_test(&layout, Point::new(dev.x, mid_y))
                     .expect("hit_test finds device point");
                 assert_eq!(
                     caret.byte, offset,

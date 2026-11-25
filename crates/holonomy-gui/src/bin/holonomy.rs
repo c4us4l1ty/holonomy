@@ -1237,7 +1237,7 @@ fn run_migrate_v5(cfg: &MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
                     cursor: c,
                     zone_b_lba_start: cfg.lba_start,
                 },
-                ParamsClass::Production,
+                ParamsClass::Legacy,
             )?;
             cursor = *hits.first().ok_or_else(|| {
                 std::io::Error::other("no matching v5 pad cursor found on device")
@@ -1255,7 +1255,7 @@ fn run_migrate_v5(cfg: &MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
             &v5_pass,
             &kappa_usb,
             &mut |c| V5PadSource::Derived { cursor: c },
-            ParamsClass::Production,
+            ParamsClass::Legacy,
         )?;
         let cursor = *hits
             .first()

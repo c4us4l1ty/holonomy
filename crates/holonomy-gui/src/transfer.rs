@@ -19,11 +19,10 @@ use holonomy_seal::v5::{
 use holonomy_seal::{KdfParamsRecord, ParamsClass, PassphraseInput};
 use holonomy_text::{
     DocStyle, DocStyleSpan, FontFamily, Heading, ListKind, SegmentId, SegmentSource, StyleMap,
-    CAPACITY,
 };
 use zeroize::Zeroizing;
 
-use crate::store::{to_line_manifest, Document, DocumentSource, StoreError};
+use crate::store::{to_line_manifest, Document, DocumentSource, StoreError, CAPACITY};
 
 /// Disclosure notice attached to every [`ExportReport`].
 pub const PLAINTEXT_EGRESS_DISCLOSURE: &str =
@@ -712,7 +711,7 @@ fn stream_import_markdown<R: BufRead>(
                 style.list = ListKind::Bullet { depth: 1 };
                 rest = item;
             } else if let Some((start, consume)) = parse_ordered_list_prefix(rest) {
-                style.list = ListKind::Numbered { depth: 1, start };
+                style.list = ListKind::Ordered { depth: 1, start };
                 rest = &rest[consume..];
             }
 
@@ -887,7 +886,7 @@ fn export_markdown_streaming<W: Write>(
         match head_style.list {
             ListKind::None => {}
             ListKind::Bullet { .. } => prefix.push_str("- "),
-            ListKind::Numbered { start, .. } => {
+            ListKind::Ordered { start, .. } => {
                 prefix.push_str(&format!("{start}. "));
             }
         }
@@ -1065,7 +1064,7 @@ pub fn migrate_v5_container(
         kappa_usb,
         pad,
         expected_cursor,
-        ParamsClass::from_costs(calibration.params.costs()),
+        ParamsClass::Legacy,
         calibration.params,
     )
 }

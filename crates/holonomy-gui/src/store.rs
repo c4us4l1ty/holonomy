@@ -422,13 +422,13 @@ impl Document {
     /// Lists every committed witness checkpoint in chronological order (`Block 8`).
     #[must_use]
     pub fn witness_history(&self) -> Vec<WitnessSummary> {
-        self.line.borrow().line.witness_history()
+        self.line.borrow().line.witness_history().to_vec()
     }
 
     /// Lists every authenticated named bookmark recorded on this document (`Block 8`).
     #[must_use]
     pub fn bookmarks(&self) -> Vec<Bookmark> {
-        self.line.borrow().line.bookmarks()
+        self.line.borrow().line.bookmarks().to_vec()
     }
 
     /// Reconstructs the immutable [`Spine`] active at committed `witness_sequence` without

@@ -451,6 +451,7 @@ pub struct WorldLine {
     observed_len: u64,
     recovery: RecoveryInfo,
     poisoned: bool,
+    streaming_active: bool,
 }
 
 impl WorldLine {
@@ -569,6 +570,7 @@ impl WorldLine {
                 last_committed_offset: committed_end,
             },
             poisoned: false,
+            streaming_active: false,
         })
     }
 
@@ -604,6 +606,7 @@ impl WorldLine {
             observed_len: scan.observed_len,
             recovery: scan.recovery,
             poisoned: false,
+            streaming_active: false,
         })
     }
 
@@ -751,7 +754,7 @@ impl WorldLine {
     /// Reconstructs the exact [`LineManifest`] active at historical `witness_sequence` (`0..witness_count()`)
     /// without decrypting any segment bodies (Block 8).
     pub fn manifest_at_witness(&self, witness_sequence: u64) -> Result<LineManifest, LineError> {
-        if self.poisoned {
+        if self.poisoned || self.streaming_active {
             return Err(LineError::ReopenRequired);
         }
         let idx = usize::try_from(witness_sequence).map_err(|_| LineError::NoSuchWitness)?;
@@ -792,7 +795,7 @@ impl WorldLine {
         if !durability_supported() {
             return Err(LineError::UnsupportedDurability);
         }
-        if self.poisoned {
+        if self.poisoned || self.streaming_active {
             return Err(LineError::ReopenRequired);
         }
         if witness_sequence >= self.next_witness_sequence {
@@ -833,14 +836,14 @@ impl WorldLine {
         if !durability_supported() {
             return Err(LineError::UnsupportedDurability);
         }
-        if self.poisoned {
+        if self.poisoned || self.streaming_active {
             return Err(LineError::ReopenRequired);
         }
         if self.next_witness_sequence == u64::MAX {
             return Err(LineError::TooManySegments);
         }
         let (file, append_lock) = self.prepare_append_file()?;
-        self.poisoned = true;
+        self.streaming_active = true;
         Ok(StreamingTx {
             header: self.header.clone(),
             epoch: self.epoch,
@@ -864,12 +867,12 @@ impl WorldLine {
         mut tx: StreamingTx,
         explicit_manifest: Option<&LineManifest>,
     ) -> Result<AppendReceipt, LineError> {
-        if tx.failed {
+        self.streaming_active = false;
+        if self.poisoned || tx.failed {
             self.poisoned = true;
             return Err(LineError::ReopenRequired);
         }
         if tx.new_descriptors.is_empty() && explicit_manifest.is_none() {
-            self.poisoned = false;
             return Ok(self.current_receipt());
         }
         let pending_lengths: Vec<u32> = tx
@@ -1034,6 +1037,7 @@ impl WorldLine {
     /// Aborts an uncommitted [`StreamingTx`], truncating any unwritten tail back to the last
     /// committed witness so the world-line handle remains usable if cleanup succeeds.
     pub fn abort_streaming_tx(&mut self, tx: StreamingTx) -> Result<(), LineError> {
+        self.streaming_active = false;
         let res = (|| -> Result<(), LineError> {
             truncate_append_tail(&tx.file, tx.committed_end)?;
             sync_append_file(&tx.file)?;
@@ -1042,7 +1046,6 @@ impl WorldLine {
                 trailing_bytes: 0,
                 last_committed_offset: tx.committed_end,
             };
-            self.poisoned = false;
             Ok(())
         })();
         if res.is_err() {
@@ -1148,7 +1151,7 @@ impl WorldLine {
         if !durability_supported() {
             return Err(LineError::UnsupportedDurability);
         }
-        if self.poisoned {
+        if self.poisoned || self.streaming_active {
             return Err(LineError::ReopenRequired);
         }
         if self.next_witness_sequence == u64::MAX {
@@ -1166,7 +1169,7 @@ impl WorldLine {
         if !durability_supported() {
             return Err(LineError::UnsupportedDurability);
         }
-        if self.poisoned {
+        if self.poisoned || self.streaming_active {
             return Err(LineError::ReopenRequired);
         }
         for segment in plaintext_segments {
@@ -1206,7 +1209,7 @@ impl WorldLine {
     /// explicit full-file integrity pass used by `verify`; ordinary open never reads segment
     /// ciphertext or historical manifests.
     pub fn verify(&self) -> Result<VerifyReport, LineError> {
-        if self.poisoned {
+        if self.poisoned || self.streaming_active {
             return Err(LineError::ReopenRequired);
         }
         let current = Self::open(&self.path, self.key.duplicate())?;
@@ -1252,7 +1255,7 @@ impl WorldLine {
         new_key: &DEMKey,
         approval: CompactionApproval,
     ) -> Result<WorldLine, LineError> {
-        if self.poisoned {
+        if self.poisoned || self.streaming_active {
             return Err(LineError::ReopenRequired);
         }
         let destination = destination.as_ref().to_path_buf();
@@ -1308,7 +1311,7 @@ impl WorldLine {
         new_key: &DEMKey,
         approval: CompactionApproval,
     ) -> Result<WorldLine, LineError> {
-        if self.poisoned {
+        if self.poisoned || self.streaming_active {
             return Err(LineError::ReopenRequired);
         }
         let destination = destination.as_ref().to_path_buf();

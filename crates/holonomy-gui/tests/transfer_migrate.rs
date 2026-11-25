@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use holonomy_gui::store::{test_params, Document};
+use holonomy_gui::store::{test_params, Document, CAPACITY};
 use holonomy_gui::transfer::{
     export_to_path, export_to_writer, import_from_reader, migrate_v5_container_with, TransferError,
     TransferFormat, PLAINTEXT_EGRESS_DISCLOSURE,
@@ -15,7 +15,7 @@ use holonomy_seal::v5::{
     write_v5_test_container, V5PadSource, V5Passphrase, V5_PAYLOAD_PLAINTEXT_PER_SLOT,
 };
 use holonomy_seal::{ParamsClass, PassphraseInput};
-use holonomy_text::{Heading, ListKind, CAPACITY};
+use holonomy_text::{Heading, ListKind};
 
 fn temp_file(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -111,7 +111,7 @@ Plain paragraph tail.
         .styles()
         .runs()
         .iter()
-        .any(|r| matches!(r.style.list, ListKind::Numbered { start: 2, .. }));
+        .any(|r| matches!(r.style.list, ListKind::Ordered { start: 2, .. }));
     assert!(has_bullet);
     assert!(has_num);
 

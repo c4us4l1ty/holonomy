@@ -138,6 +138,8 @@ pub enum Key {
     PageUp,
     /// Page down.
     PageDown,
+    /// Tab: advances UI focus.
+    Tab,
     /// Escape: dismisses, never edits.
     Escape,
 }
@@ -226,7 +228,7 @@ impl Keymap {
             }),
             Key::PageUp => Some(Intent::ScrollBy(Fixed::ZERO - self.page)),
             Key::PageDown => Some(Intent::ScrollBy(self.page)),
-            Key::Character(_) | Key::Escape => None,
+            Key::Character(_) | Key::Tab | Key::Escape => None,
         }
     }
 }

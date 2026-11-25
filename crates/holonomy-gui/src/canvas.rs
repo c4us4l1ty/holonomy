@@ -369,7 +369,8 @@ impl PixelSurface {
 
     #[inline]
     fn to_px(&self, logical: Fixed) -> i32 {
-        (self.view.to_device(logical).sixtyfourths() + 32) >> 6
+        let px = (self.view.to_device(logical).sixtyfourths() + 32) >> 6;
+        i32::try_from(px.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
     }
 
     fn draw_empty_placeholder(&mut self) {
@@ -734,7 +735,7 @@ fn render_toolbar(
         _ => ButtonHighlight::Off,
     };
     let num_hl = match tb.list {
-        TriState::Uniform(ListKind::Numbered { .. }) => ButtonHighlight::Active,
+        TriState::Uniform(ListKind::Ordered { .. }) => ButtonHighlight::Active,
         TriState::Mixed => ButtonHighlight::Mixed,
         _ => ButtonHighlight::Off,
     };
@@ -1303,11 +1304,11 @@ where
         ToolbarAction::ToggleNumbered => {
             let next = if matches!(
                 app.editor().toolbar_state().list,
-                TriState::Uniform(ListKind::Numbered { .. })
+                TriState::Uniform(ListKind::Ordered { .. })
             ) {
                 ListKind::None
             } else {
-                ListKind::Numbered { depth: 1, start: 1 }
+                ListKind::Ordered { depth: 1, start: 1 }
             };
             let _ = app.editor().apply(Intent::Format(StylePatch {
                 list: Some(next),
@@ -2049,15 +2050,15 @@ pub fn run_x11_desktop(
                         continue;
                     }
 
-                    if let Some(ref mut find) = find_bar {
-                        handle_find_key(
-                            &mut app,
-                            find,
-                            key,
-                            modifiers,
-                            &mut find_bar,
-                            &mut status_msg,
-                        );
+                    let close_find = if let Some(ref mut find) = find_bar {
+                        handle_find_key(&mut app, find, key, modifiers, &mut status_msg)
+                    } else {
+                        false
+                    };
+                    if close_find {
+                        find_bar = None;
+                    }
+                    if close_find || find_bar.is_some() {
                         pending_paint = true;
                         continue;
                     }
@@ -2252,9 +2253,8 @@ fn handle_find_key(
     state: &mut FindState,
     key: Key,
     modifiers: Modifiers,
-    find_bar: &mut Option<FindState>,
     status_msg: &mut String,
-) {
+) -> bool {
     let mut close = false;
     let mut switch_to_replace = false;
     let mut trigger_enter = false;
@@ -2294,7 +2294,7 @@ fn handle_find_key(
                 replacement: String::new(),
             };
         }
-        return;
+        return false;
     }
 
     if trigger_enter {
@@ -2340,9 +2340,7 @@ fn handle_find_key(
         }
     }
 
-    if close {
-        *find_bar = None;
-    }
+    close
 }
 
 #[cfg(test)]
