@@ -1818,7 +1818,7 @@ pub fn run_x11_desktop(
             pending_paint = false;
         }
 
-        let poll_ms = deadman_timeout.map_or(100, |d| {
+        let poll_ms = deadman.map_or(100, |d| {
             i32::try_from(d.as_millis() / 2)
                 .unwrap_or(100)
                 .clamp(10, 100)

@@ -665,4 +665,3 @@ fn witness_excerpt_trims_split_multibyte_utf8_boundaries() {
     let mid = document.read_witness_excerpt(1, 319, 326).unwrap();
     assert_eq!(mid, "tail");
 }
-

@@ -388,7 +388,10 @@ fn streaming_markdown_line_boundary_preserves_multibyte_utf8_and_heading_toggle(
     assert!(!head_style.bold);
     assert_eq!(head_style.size_milli, 1_000);
     assert!(head_style.effective_bold());
-    assert_eq!(head_style.effective_size_milli(), Heading::H1.default_size_milli());
+    assert_eq!(
+        head_style.effective_size_milli(),
+        Heading::H1.default_size_milli()
+    );
 
     let mut exported = Vec::new();
     export_to_writer(&doc, &mut exported, "<mem>", TransferFormat::Markdown).unwrap();
@@ -396,4 +399,3 @@ fn streaming_markdown_line_boundary_preserves_multibyte_utf8_and_heading_toggle(
 
     let _ = fs::remove_file(&dest);
 }
-
