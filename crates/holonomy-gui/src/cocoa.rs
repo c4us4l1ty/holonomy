@@ -125,7 +125,7 @@ macro_rules! msg {
             f($obj, $sel)
         }
     }};
-    ($obj:expr, $sel:expr, $($arg:expr : $ty:ty),+ => $ret:ty) => {{
+    ($obj:expr, $sel:expr, $($arg:expr => $ty:ty),+ => $ret:ty) => {{
         // SAFETY: `objc_msgSend` is the Objective-C ABI dispatch entrypoint; caller specifies the
         // exact receiver, selector, arguments, and return signature.
         unsafe {
@@ -303,8 +303,8 @@ fn view_local_xy(view: Id, ev: Id) -> (i16, i16) {
     let local: NsPoint = msg!(
         view,
         sel(b"convertPoint:fromView:\0"),
-        win_pt: NsPoint,
-        null_mut(): Id
+        win_pt => NsPoint,
+        null_mut() => Id
         => NsPoint
     );
     let bounds: NsRect = msg!(view, sel(b"bounds\0") => NsRect);
@@ -478,9 +478,9 @@ fn make_nsstring(text: &str) -> Id {
     msg!(
         alloc,
         sel(b"initWithBytes:length:encoding:\0"),
-        bytes.as_ptr().cast(): *const c_void,
-        bytes.len(): usize,
-        4usize: usize
+        bytes.as_ptr().cast() => *const c_void,
+        bytes.len() => usize,
+        4usize => usize
         => Id
     )
 }
@@ -513,7 +513,7 @@ impl CocoaWindow {
                 "NSApplication sharedApplication returned null".to_owned(),
             ));
         }
-        let _: Bool = msg!(app, sel(b"setActivationPolicy:\0"), 0isize: isize => Bool);
+        let _: Bool = msg!(app, sel(b"setActivationPolicy:\0"), 0isize => isize => Bool);
 
         let rect = NsRect {
             origin: NsPoint { x: 100.0, y: 100.0 },
@@ -527,10 +527,10 @@ impl CocoaWindow {
         let window: Id = msg!(
             win_alloc,
             sel(b"initWithContentRect:styleMask:backing:defer:\0"),
-            rect: NsRect,
-            15usize: usize,
-            2usize: usize,
-            0i8: Bool
+            rect => NsRect,
+            15usize => usize,
+            2usize => usize,
+            0i8 => Bool
             => Id
         );
         if window.is_null() {
@@ -538,7 +538,7 @@ impl CocoaWindow {
         }
 
         let ns_title = make_nsstring(title);
-        let _: Id = msg!(window, sel(b"setTitle:\0"), ns_title: Id => Id);
+        let _: Id = msg!(window, sel(b"setTitle:\0"), ns_title => Id => Id);
         let _: Id = msg!(ns_title, sel(b"release\0") => Id);
 
         let queue = Rc::new(RefCell::new(CocoaQueue {
@@ -552,7 +552,7 @@ impl CocoaWindow {
         let prop_raw = Rc::into_raw(Rc::clone(&queue));
 
         let view_alloc: Id = msg!(view_cls, sel(b"alloc\0") => Id);
-        let view: Id = msg!(view_alloc, sel(b"initWithFrame:\0"), rect: NsRect => Id);
+        let view: Id = msg!(view_alloc, sel(b"initWithFrame:\0"), rect => NsRect => Id);
         let del_alloc: Id = msg!(del_cls, sel(b"alloc\0") => Id);
         let delegate: Id = msg!(del_alloc, sel(b"init\0") => Id);
         // SAFETY: associates `prop_raw` with view & delegate until `Drop`.
@@ -561,11 +561,11 @@ impl CocoaWindow {
             object_setInstanceVariable(delegate, c"_holoQueue".as_ptr(), prop_raw as *mut c_void);
         }
 
-        let _: Id = msg!(window, sel(b"setContentView:\0"), view: Id => Id);
-        let _: Id = msg!(window, sel(b"setDelegate:\0"), delegate: Id => Id);
-        let _: Bool = msg!(window, sel(b"makeFirstResponder:\0"), view: Id => Bool);
-        let _: Id = msg!(window, sel(b"makeKeyAndOrderFront:\0"), null_mut(): Id => Id);
-        let _: Id = msg!(app, sel(b"activateIgnoringOtherApps:\0"), 1i8: Bool => Id);
+        let _: Id = msg!(window, sel(b"setContentView:\0"), view => Id => Id);
+        let _: Id = msg!(window, sel(b"setDelegate:\0"), delegate => Id => Id);
+        let _: Bool = msg!(window, sel(b"makeFirstResponder:\0"), view => Id => Bool);
+        let _: Id = msg!(window, sel(b"makeKeyAndOrderFront:\0"), null_mut() => Id => Id);
+        let _: Id = msg!(app, sel(b"activateIgnoringOtherApps:\0"), 1i8 => Bool => Id);
         let _: Id = msg!(app, sel(b"finishLaunching\0") => Id);
 
         let scale: f64 = msg!(window, sel(b"backingScaleFactor\0") => f64);
@@ -624,7 +624,7 @@ impl DesktopWindow for CocoaWindow {
             q.pixels.clear();
             q.pixels.extend_from_slice(pixels);
         }
-        let _: Id = msg!(self.view, sel(b"setNeedsDisplay:\0"), 1i8: Bool => Id);
+        let _: Id = msg!(self.view, sel(b"setNeedsDisplay:\0"), 1i8 => Bool => Id);
         let _: Id = msg!(self.view, sel(b"displayIfNeeded\0") => Id);
         Ok(())
     }
@@ -632,7 +632,7 @@ impl DesktopWindow for CocoaWindow {
     fn poll_events(&mut self, timeout_ms: i32) -> Result<Vec<DesktopEvent>, Box<dyn Error>> {
         let secs = f64::from(timeout_ms.max(0)) / 1000.0;
         let date: Id = if timeout_ms > 0 {
-            msg!(cls(b"NSDate\0"), sel(b"dateWithTimeIntervalSinceNow:\0"), secs: f64 => Id)
+            msg!(cls(b"NSDate\0"), sel(b"dateWithTimeIntervalSinceNow:\0"), secs => f64 => Id)
         } else {
             msg!(cls(b"NSDate\0"), sel(b"distantPast\0") => Id)
         };
@@ -649,16 +649,16 @@ impl DesktopWindow for CocoaWindow {
             let ev: Id = msg!(
                 self.app,
                 sel(b"nextEventMatchingMask:untilDate:inMode:dequeue:\0"),
-                usize::MAX: usize,
-                until: Id,
-                mode: Id,
-                1i8: Bool
+                usize::MAX => usize,
+                until => Id,
+                mode => Id,
+                1i8 => Bool
                 => Id
             );
             if ev.is_null() {
                 break;
             }
-            let _: Id = msg!(self.app, sel(b"sendEvent:\0"), ev: Id => Id);
+            let _: Id = msg!(self.app, sel(b"sendEvent:\0"), ev => Id => Id);
         }
 
         let bounds: NsRect = msg!(self.view, sel(b"bounds\0") => NsRect);
@@ -690,7 +690,7 @@ impl DesktopWindow for CocoaWindow {
         let ns_str = make_nsstring(s);
         // SAFETY: `NSPasteboardTypeString` is an AppKit framework global string constant.
         let ptype = unsafe { NSPasteboardTypeString };
-        let _: Bool = msg!(pb, sel(b"setString:forType:\0"), ns_str: Id, ptype: Id => Bool);
+        let _: Bool = msg!(pb, sel(b"setString:forType:\0"), ns_str => Id, ptype => Id => Bool);
         let _: Id = msg!(ns_str, sel(b"release\0") => Id);
         Ok(())
     }
@@ -702,7 +702,7 @@ impl DesktopWindow for CocoaWindow {
         }
         // SAFETY: `NSPasteboardTypeString` is an AppKit framework global string constant.
         let ptype = unsafe { NSPasteboardTypeString };
-        let ns_str: Id = msg!(pb, sel(b"stringForType:\0"), ptype: Id => Id);
+        let ns_str: Id = msg!(pb, sel(b"stringForType:\0"), ptype => Id => Id);
         if ns_str.is_null() {
             return Ok(());
         }

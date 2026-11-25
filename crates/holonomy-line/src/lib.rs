@@ -56,28 +56,28 @@ const MAX_MANIFEST_CIPHERTEXT_BYTES: u32 = MAX_MANIFEST_BYTES + AEAD_TAG_BYTES;
 // Test-only hooks exercise short writes and failed durability barriers through the same
 // append path used in production. The thread-local scope keeps unrelated parallel tests from
 // sharing failpoints or counters.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppendIoWrite {
     offset: u64,
     bytes: usize,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppendIoSync {
     bytes_written: u64,
     succeeded: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppendIoTruncate {
     length: u64,
     succeeded: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AppendIoSnapshot {
     writes: Vec<AppendIoWrite>,
@@ -86,7 +86,7 @@ struct AppendIoSnapshot {
     bytes_written: u64,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct AppendIoState {
     fail_after_write_bytes: Option<u64>,
     fail_on_sync: Option<usize>,
@@ -94,16 +94,16 @@ struct AppendIoState {
     snapshot: AppendIoSnapshot,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static APPEND_IO_STATE: std::cell::RefCell<Option<AppendIoState>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct AppendIoProbeGuard;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl AppendIoProbeGuard {
     fn install(
         fail_after_write_bytes: Option<u64>,
@@ -134,7 +134,7 @@ impl AppendIoProbeGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for AppendIoProbeGuard {
     fn drop(&mut self) {
         APPEND_IO_STATE.with(|slot| *slot.borrow_mut() = None);
@@ -1691,13 +1691,13 @@ impl WorldLine {
 }
 
 fn write_append_bytes(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let mut offset = file.stream_position()?;
 
     while !bytes.is_empty() {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let allowed = append_test_write_limit(bytes.len())?;
-        #[cfg(not(test))]
+        #[cfg(not(all(test, unix)))]
         let allowed = bytes.len();
 
         match file.write(&bytes[..allowed]) {
@@ -1708,7 +1708,7 @@ fn write_append_bytes(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
                 ));
             }
             Ok(written) => {
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 {
                     record_append_test_write(offset, written);
                     offset = offset.saturating_add(written as u64);
@@ -1723,7 +1723,7 @@ fn write_append_bytes(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
 }
 
 fn sync_append_file(file: &File) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let (event_index, injected_failure) = APPEND_IO_STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(state) = slot.as_mut() else {
@@ -1737,7 +1737,7 @@ fn sync_append_file(file: &File) -> io::Result<()> {
         });
         (Some(index), fail)
     });
-    #[cfg(not(test))]
+    #[cfg(not(all(test, unix)))]
     let injected_failure = false;
 
     let result = if injected_failure {
@@ -1746,7 +1746,7 @@ fn sync_append_file(file: &File) -> io::Result<()> {
         file.sync_all()
     };
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(index) = event_index {
         APPEND_IO_STATE.with(|slot| {
             slot.borrow_mut()
@@ -1761,7 +1761,7 @@ fn sync_append_file(file: &File) -> io::Result<()> {
 }
 
 fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let (event_index, injected_failure) = APPEND_IO_STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(state) = slot.as_mut() else {
@@ -1775,7 +1775,7 @@ fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
         });
         (Some(index), fail)
     });
-    #[cfg(not(test))]
+    #[cfg(not(all(test, unix)))]
     let injected_failure = false;
 
     let result = if injected_failure {
@@ -1784,7 +1784,7 @@ fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
         file.set_len(length)
     };
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(index) = event_index {
         APPEND_IO_STATE.with(|slot| {
             slot.borrow_mut()
@@ -1798,7 +1798,7 @@ fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn append_test_write_limit(requested: usize) -> io::Result<usize> {
     APPEND_IO_STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -1813,7 +1813,7 @@ fn append_test_write_limit(requested: usize) -> io::Result<usize> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn record_append_test_write(offset: u64, bytes: usize) {
     APPEND_IO_STATE.with(|slot| {
         if let Some(state) = slot.borrow_mut().as_mut() {

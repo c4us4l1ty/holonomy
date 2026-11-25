@@ -387,14 +387,13 @@ unsafe extern "system" fn wnd_proc(
                         }
                     };
                     if n > 0 {
-                        for ch_res in std::char::decode_utf16(buf[..(n as usize)].iter().copied()) {
-                            if let Ok(ch) = ch_res {
-                                if !ch.is_control() {
-                                    q.events.push_back(DesktopEvent::Key {
-                                        key: Key::Character(ch),
-                                        modifiers: mods,
-                                    });
-                                }
+                        let units = &buf[..(n as usize)];
+                        for ch in std::char::decode_utf16(units.iter().copied()).flatten() {
+                            if !ch.is_control() {
+                                q.events.push_back(DesktopEvent::Key {
+                                    key: Key::Character(ch),
+                                    modifiers: mods,
+                                });
                             }
                         }
                     }

@@ -2531,19 +2531,19 @@ mod tests {
         gsub.extend_from_slice(&0x0008u16.to_be_bytes());
         gsub.extend_from_slice(&1u16.to_be_bytes());
         gsub.extend_from_slice(&8u16.to_be_bytes());
-        // LigatureSubst @38: fmt=1, cov=6 (abs 44), setCount=1, set0=12 (abs 50)
+        // LigatureSubst @38: fmt=1, cov=8 (abs 46), setCount=1, set0=14 (abs 52)
         gsub.extend_from_slice(&1u16.to_be_bytes());
-        gsub.extend_from_slice(&6u16.to_be_bytes());
+        gsub.extend_from_slice(&8u16.to_be_bytes());
         gsub.extend_from_slice(&1u16.to_be_bytes());
-        gsub.extend_from_slice(&12u16.to_be_bytes());
-        // Cov @44: fmt=1, cnt=1, gid=[10]
+        gsub.extend_from_slice(&14u16.to_be_bytes());
+        // Cov @46: fmt=1, cnt=1, gid=[10]
         gsub.extend_from_slice(&1u16.to_be_bytes());
         gsub.extend_from_slice(&1u16.to_be_bytes());
         gsub.extend_from_slice(&10u16.to_be_bytes());
-        // LigatureSet @50: count=1, lig0=4 (abs 54)
+        // LigatureSet @52: count=1, lig0=4 (abs 56)
         gsub.extend_from_slice(&1u16.to_be_bytes());
         gsub.extend_from_slice(&4u16.to_be_bytes());
-        // Ligature @54: ligGlyph=50, compCount=2, comp1=11
+        // Ligature @56: ligGlyph=50, compCount=2, comp1=11
         gsub.extend_from_slice(&50u16.to_be_bytes());
         gsub.extend_from_slice(&2u16.to_be_bytes());
         gsub.extend_from_slice(&11u16.to_be_bytes());
@@ -2569,13 +2569,13 @@ mod tests {
         gpos.extend_from_slice(&0u16.to_be_bytes());
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&8u16.to_be_bytes());
-        // MarkBasePos @38 (len=12 header): fmt=1, mcov=12(50), bcov=18(56), classCnt=1, marr=24(62), barr=34(72)
+        // MarkBasePos @38 (len=12 header): fmt=1, mcov=12(50), bcov=18(56), classCnt=1, marr=24(62), barr=36(74)
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&12u16.to_be_bytes());
         gpos.extend_from_slice(&18u16.to_be_bytes());
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&24u16.to_be_bytes());
-        gpos.extend_from_slice(&34u16.to_be_bytes());
+        gpos.extend_from_slice(&36u16.to_be_bytes());
         // MarkCov @50: [20]
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&1u16.to_be_bytes());
@@ -2584,14 +2584,14 @@ mod tests {
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&10u16.to_be_bytes());
-        // MarkArray @62: cnt=1, class=0, anc_rel=6(abs 68) -> Anchor(100, 50)
+        // MarkArray @62: cnt=1, class=0, anc_rel=6(abs 68) -> Anchor(100, 50) (ends @74)
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&0u16.to_be_bytes());
         gpos.extend_from_slice(&6u16.to_be_bytes());
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&100i16.to_be_bytes());
         gpos.extend_from_slice(&50i16.to_be_bytes());
-        // BaseArray @72: cnt=1, anc_rel=4(abs 76) -> Anchor(350, 700)
+        // BaseArray @74: cnt=1, anc_rel=4(abs 78) -> Anchor(350, 700)
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&4u16.to_be_bytes());
         gpos.extend_from_slice(&1u16.to_be_bytes());

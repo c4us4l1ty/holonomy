@@ -684,8 +684,7 @@ fn sixty_year_21900_witness_scrub_and_reverify() {
 
     const DAYS: u64 = 60 * 365; // 21,900 daily witnesses
     let path = fast_temp_path("60yr-21900w");
-    let document = Document::create_with(&path.0, PASSPHRASE, store::test_params())
-        .expect("creates 60-year world-line");
+    let document = Document::create(&path.0, PASSPHRASE).expect("creates 60-year world-line");
     let mut typing = Typing::new(document.sink(), store::CAPACITY);
 
     let write_start = Instant::now();
@@ -764,8 +763,7 @@ fn cold_open_30m_word_document_stays_under_residency_budget() {
     use std::time::Instant;
 
     let path = fast_temp_path("30m-words");
-    let document = Document::create_with(&path.0, PASSPHRASE, store::test_params())
-        .expect("creates 30M-word document");
+    let document = Document::create(&path.0, PASSPHRASE).expect("creates 30M-word document");
     let chunk = "alpha ".repeat(21_845); // ~131,070 B (~128 KiB, 21,845 words) per leaf
     const LEAVES: usize = 1_400; // 1,400 * 21,845 = 30,583,000 words (~183.5 MiB)
 
@@ -815,8 +813,9 @@ fn cold_open_30m_word_document_stays_under_residency_budget() {
     let resident = editor.residency().resident_bytes();
     let segments = editor.residency().resident_segments();
     assert!(
-        resident <= store::BUDGET && resident <= 2 * 1024 * 1024,
-        "cold open must fault only viewport leaves, not the 183 MiB document (got {resident} B)"
+        resident <= 2 * 1024 * 1024,
+        "cold open must fault only viewport leaves (<= 2 MiB and {} B budget), not 183 MiB (got {resident} B)",
+        store::BUDGET
     );
     assert!(
         open_ms < 10_000,
