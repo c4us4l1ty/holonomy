@@ -67,7 +67,8 @@ mod tree;
 pub mod typing;
 
 pub use commit::{
-    commit_slab, Appended, CommitError, Committed, ReplacementBuilder, SegmentSink, Witness,
+    commit_slab, Appended, CommitError, Committed, ReplacementBuilder, SegmentSink,
+    StreamSegmentWriter, Witness,
 };
 pub use draft::{Draft, DraftError, LiveHit, LiveSpan};
 pub use formatting::{
@@ -76,13 +77,14 @@ pub use formatting::{
 };
 pub use residency::{ResidencyError, ResidentSet, SegmentSource, WipeRegistry};
 pub use search::{
-    find_streaming, visit_streaming, SearchError, SearchMatch, SearchSummary,
-    MAX_COLLECTED_MATCHES, MAX_SEARCH_NEEDLE_BYTES,
+    find_streaming, stream_replace_chunks, visit_streaming, SearchError, SearchMatch,
+    SearchSummary, StreamReplaceError, StreamReplaceResult, MAX_COLLECTED_MATCHES,
+    MAX_SEARCH_NEEDLE_BYTES,
 };
 pub use select::{copy, CopyError, Selection};
 pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
 pub use source::{is_provisional, Location, OpenSources, SealError};
-pub use spine::{History, Spine, SpineError};
+pub use spine::{History, Spine, SpineDiffHunk, SpineDiffKind, SpineError};
 pub use text::{EditOutcome, SlabText, TextError};
 pub use typing::{StepSummary, Typing, TypingError};
 

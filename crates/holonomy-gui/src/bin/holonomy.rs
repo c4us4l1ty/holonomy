@@ -28,13 +28,16 @@
 //! nothing older (D-64).
 
 use holonomy_eye::Fixed;
+use holonomy_gui::canvas::{run_x11_desktop, DesktopEnd, GuiWipeUnconfirmed};
 use holonomy_gui::panel::{self, Facts};
 use holonomy_gui::store::{self, Document};
 use holonomy_gui::term::{self, CellShaper, Decoder, Input};
+use holonomy_gui::transfer::{self, TransferFormat};
 use holonomy_gui::{App, CellSurface, Key, Keymap, Modifiers, SealWipeBridge};
+use holonomy_seal::v5::{V5PadSource, V5Passphrase, V5_ZONE_B_LBA_START};
 use holonomy_seal::{
-    probe_capability, CanarySet, LockCapability, PassphraseInput, ReaperGuard, ReaperOutcome,
-    SchedClass, SecretArenas, TripReason, Tripwire, MAX_PASSPHRASE_INPUT_BYTES,
+    probe_capability, CanarySet, LockCapability, ParamsClass, PassphraseInput, ReaperGuard,
+    ReaperOutcome, SchedClass, SecretArenas, TripReason, Tripwire, MAX_PASSPHRASE_INPUT_BYTES,
 };
 use holonomy_shell::{Editor, Effect, Intent};
 use holonomy_text::{ResidentSet, Typing};
@@ -913,8 +916,12 @@ fn usage_text() -> &'static str {
     concat!(
         "usage:\n",
         "  holonomy [--deadman <ms>] <document.wavefunction>\n",
+        "  holonomy [--gui | gui] [--deadman <ms>] [document.wavefunction]\n",
         "  holonomy verify <document.wavefunction>\n",
         "  holonomy compact <source.wavefunction> <destination.wavefunction>\n",
+        "  holonomy import [--format plain|md] <source.txt|.md> <destination.wavefunction>\n",
+        "  holonomy export [--force] [--format plain|md] <source.wavefunction> <destination.txt|.md>\n",
+        "  holonomy migrate-v5 [--unpadded | --derived-cursor <n> | --device <path> [--cursor <n>] [--lba <n>] | --scan-cursor] [--usb-key <path>] <source.holo> <destination.wavefunction>\n",
         "  the file is created if it does not exist, opened if it does"
     )
 }
@@ -927,6 +934,396 @@ fn parse_editor_args(args: &[String]) -> Option<(PathBuf, Option<Duration>)> {
             Some((PathBuf::from(target), Some(Duration::from_millis(millis))))
         }
         _ => None,
+    }
+}
+
+fn parse_gui_subargs(args: &[String]) -> Option<(Option<PathBuf>, Option<Duration>)> {
+    let mut deadman = None;
+    let mut doc = None;
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--deadman" => {
+                let raw = args.get(idx + 1)?;
+                let millis = raw.parse::<u64>().ok().filter(|&v| v > 0)?;
+                deadman = Some(Duration::from_millis(millis));
+                idx += 2;
+            }
+            flag if flag.starts_with('-') => return None,
+            path => {
+                if doc.is_some() {
+                    return None;
+                }
+                doc = Some(PathBuf::from(path));
+                idx += 1;
+            }
+        }
+    }
+    Some((doc, deadman))
+}
+
+fn parse_format_flag(s: &str) -> Option<TransferFormat> {
+    match s {
+        "plain" | "txt" | "text" => Some(TransferFormat::PlainText),
+        "md" | "markdown" => Some(TransferFormat::Markdown),
+        _ => None,
+    }
+}
+
+fn parse_import_args(args: &[String]) -> Option<(PathBuf, PathBuf, Option<TransferFormat>)> {
+    let mut format = None;
+    let mut pos = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--format" => {
+                let f = parse_format_flag(args.get(idx + 1)?)?;
+                format = Some(f);
+                idx += 2;
+            }
+            flag if flag.starts_with('-') => return None,
+            p => {
+                pos.push(PathBuf::from(p));
+                idx += 1;
+            }
+        }
+    }
+    match pos.as_slice() {
+        [src, dst] => Some((src.clone(), dst.clone(), format)),
+        _ => None,
+    }
+}
+
+fn parse_export_args(args: &[String]) -> Option<(PathBuf, PathBuf, Option<TransferFormat>, bool)> {
+    let mut format = None;
+    let mut force = false;
+    let mut pos = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--force" => {
+                force = true;
+                idx += 1;
+            }
+            "--format" => {
+                let f = parse_format_flag(args.get(idx + 1)?)?;
+                format = Some(f);
+                idx += 2;
+            }
+            flag if flag.starts_with('-') => return None,
+            p => {
+                pos.push(PathBuf::from(p));
+                idx += 1;
+            }
+        }
+    }
+    match pos.as_slice() {
+        [src, dst] => Some((src.clone(), dst.clone(), format, force)),
+        _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MigrateArgs {
+    source: PathBuf,
+    destination: PathBuf,
+    unpadded: bool,
+    derived_cursor: u64,
+    device: Option<PathBuf>,
+    device_cursor: u64,
+    lba_start: u64,
+    scan_cursor: bool,
+    usb_key: Option<PathBuf>,
+}
+
+fn parse_migrate_args(args: &[String]) -> Option<MigrateArgs> {
+    let mut unpadded = false;
+    let mut derived_cursor = 0u64;
+    let mut device = None;
+    let mut device_cursor = 0u64;
+    let mut lba_start = V5_ZONE_B_LBA_START;
+    let mut scan_cursor = false;
+    let mut usb_key = None;
+    let mut pos = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--unpadded" => {
+                unpadded = true;
+                idx += 1;
+            }
+            "--scan-cursor" => {
+                scan_cursor = true;
+                idx += 1;
+            }
+            "--derived-cursor" => {
+                derived_cursor = args.get(idx + 1)?.parse::<u64>().ok()?;
+                idx += 2;
+            }
+            "--device" => {
+                device = Some(PathBuf::from(args.get(idx + 1)?));
+                idx += 2;
+            }
+            "--cursor" => {
+                device_cursor = args.get(idx + 1)?.parse::<u64>().ok()?;
+                derived_cursor = device_cursor;
+                idx += 2;
+            }
+            "--lba" => {
+                lba_start = args.get(idx + 1)?.parse::<u64>().ok()?;
+                idx += 2;
+            }
+            "--usb-key" => {
+                usb_key = Some(PathBuf::from(args.get(idx + 1)?));
+                idx += 2;
+            }
+            flag if flag.starts_with('-') => return None,
+            p => {
+                pos.push(PathBuf::from(p));
+                idx += 1;
+            }
+        }
+    }
+    match pos.as_slice() {
+        [src, dst] => Some(MigrateArgs {
+            source: src.clone(),
+            destination: dst.clone(),
+            unpadded,
+            derived_cursor,
+            device,
+            device_cursor,
+            lba_start,
+            scan_cursor,
+            usb_key,
+        }),
+        _ => None,
+    }
+}
+
+fn prompt_raw_line(verb: &str, path: &Path) -> std::io::Result<Zeroizing<String>> {
+    let mut stdout = std::io::stdout();
+    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
+    if is_tty {
+        write!(stdout, "{} {} (passphrase): ", verb, path.display())?;
+        stdout.flush()?;
+    }
+    let mut stdin = std::io::stdin();
+    let mut phrase = Zeroizing::new(Vec::with_capacity(MAX_PASSPHRASE_INPUT_BYTES));
+    let mut byte = [0u8; 1];
+    loop {
+        if stdin.read(&mut byte)? == 0 {
+            if is_tty {
+                writeln!(stdout)?;
+            }
+            return Err(std::io::Error::other(
+                "the passphrase was not completed (end of input)",
+            ));
+        }
+        match byte[0] {
+            b'\r' | b'\n' => break,
+            0x7f | 0x08 => pop_utf8_scalar(&mut phrase),
+            0x03 => {
+                if is_tty {
+                    writeln!(stdout)?;
+                }
+                return Err(std::io::Error::other("cancelled at the passphrase"));
+            }
+            next => {
+                if phrase.len() >= MAX_PASSPHRASE_INPUT_BYTES {
+                    return Err(std::io::Error::other(
+                        "the passphrase exceeds the input byte limit",
+                    ));
+                }
+                phrase.push(next);
+            }
+        }
+    }
+    if is_tty {
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
+    let s = std::str::from_utf8(&phrase)
+        .map_err(|_| std::io::Error::other("the passphrase is not valid UTF-8"))?;
+    Ok(Zeroizing::new(s.to_owned()))
+}
+
+fn run_import(
+    source: &Path,
+    destination: &Path,
+    format: Option<TransferFormat>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _echo = EchoGuard::acquire()?;
+    let passphrase = prompt("encrypt imported document", destination)?;
+    let (doc, report) = transfer::import_from_path(source, destination, &passphrase, format)?;
+    drop(passphrase);
+    let verified = doc.verify()?;
+    println!(
+        "{}: imported {} as {} ({} bytes, {} segments, {} style runs; verified {} segments)",
+        destination.display(),
+        source.display(),
+        report.format.label(),
+        report.plaintext_bytes,
+        report.segments_written,
+        report.style_runs,
+        verified.segments_verified,
+    );
+    Ok(())
+}
+
+fn run_export(
+    source: &Path,
+    destination: &Path,
+    format: Option<TransferFormat>,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _echo = EchoGuard::acquire()?;
+    let passphrase = prompt("open for plaintext export", source)?;
+    let document = Document::open_input(source, &passphrase)?;
+    drop(passphrase);
+    let report = transfer::export_to_path(&document, destination, format, force)?;
+    println!(
+        "{}: exported {} as {} ({} bytes, {} segments read)\n{}",
+        report.destination,
+        source.display(),
+        report.format.label(),
+        report.bytes_written,
+        report.segments_read,
+        report.disclosure,
+    );
+    Ok(())
+}
+
+fn read_usb_key_32(path: &Path) -> Result<Zeroizing<[u8; 32]>, Box<dyn std::error::Error>> {
+    let raw = Zeroizing::new(std::fs::read(path)?);
+    if raw.len() != 32 {
+        return Err(format!(
+            "usb key file {} must be exactly 32 bytes (got {})",
+            path.display(),
+            raw.len()
+        )
+        .into());
+    }
+    let mut out = Zeroizing::new([0u8; 32]);
+    out.copy_from_slice(&raw);
+    Ok(out)
+}
+
+fn run_migrate_v5(cfg: &MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let _echo = EchoGuard::acquire()?;
+    let raw_v5 = prompt_raw_line("unlock v5 container", &cfg.source)?;
+    let v5_pass = V5Passphrase::new(&raw_v5)
+        .ok_or_else(|| std::io::Error::other("v5 passphrase is empty or exceeds 255 UTF-8 bytes"))?;
+    drop(raw_v5);
+    let v6_pass = prompt("create v6 destination", &cfg.destination)?;
+    let kappa_usb = match &cfg.usb_key {
+        Some(p) => read_usb_key_32(p)?,
+        None => Zeroizing::new([0u8; 32]),
+    };
+
+    let pad = if cfg.unpadded {
+        V5PadSource::None
+    } else if let Some(dev) = &cfg.device {
+        let mut cursor = cfg.device_cursor;
+        if cfg.scan_cursor {
+            let _ = std::fs::File::open(dev)?;
+            let mut cfile = std::fs::File::open(&cfg.source)?;
+            let hits = holonomy_seal::v5::scan_v5_cursors(
+                &mut cfile,
+                &v5_pass,
+                &kappa_usb,
+                &mut |c| V5PadSource::DeviceFile {
+                    path: dev.clone(),
+                    cursor: c,
+                    zone_b_lba_start: cfg.lba_start,
+                },
+                ParamsClass::Production,
+            )?;
+            cursor = *hits
+                .first()
+                .ok_or_else(|| std::io::Error::other("no matching v5 pad cursor found on device"))?;
+        }
+        V5PadSource::DeviceFile {
+            path: dev.clone(),
+            cursor,
+            zone_b_lba_start: cfg.lba_start,
+        }
+    } else if cfg.scan_cursor {
+        let mut cfile = std::fs::File::open(&cfg.source)?;
+        let hits = holonomy_seal::v5::scan_v5_cursors(
+            &mut cfile,
+            &v5_pass,
+            &kappa_usb,
+            &mut |c| V5PadSource::Derived { cursor: c },
+            ParamsClass::Production,
+        )?;
+        let cursor = *hits
+            .first()
+            .ok_or_else(|| std::io::Error::other("no matching derived v5 pad cursor found"))?;
+        V5PadSource::Derived { cursor }
+    } else {
+        V5PadSource::Derived {
+            cursor: cfg.derived_cursor,
+        }
+    };
+
+    let report = transfer::migrate_v5_container(
+        &cfg.source,
+        &cfg.destination,
+        &v5_pass,
+        &v6_pass,
+        &kappa_usb,
+        &pad,
+        None,
+    )?;
+    println!(
+        "{}: migrated from v5.1.0 {} (stratum {}, cursor {}, {} v5 slots -> {} v6 segments, {} plaintext bytes, {} verified)",
+        cfg.destination.display(),
+        cfg.source.display(),
+        report.source_stratum,
+        report.source_cursor,
+        report.source_slots,
+        report.imported_segments,
+        report.imported_bytes,
+        report.verified_segments,
+    );
+    Ok(())
+}
+
+fn run_gui_command(doc: Option<&Path>, deadman: Option<Duration>) -> Result<(), Box<dyn std::error::Error>> {
+    match run_x11_desktop(doc, deadman)? {
+        DesktopEnd::Saved | DesktopEnd::NothingToWrite | DesktopEnd::Cancelled => Ok(()),
+        DesktopEnd::SaveFailed => {
+            eprintln!("holonomy gui: final save refused — bytes after last witness are unpersisted");
+            std::process::exit(1);
+        }
+        DesktopEnd::Wiped(receipt) => {
+            println!(
+                "emergency wipe confirmed — {} bytes in {} arenas, {} in-place bytes, {} canaries clean, {} us",
+                receipt.bytes_wiped,
+                receipt.arenas_wiped,
+                receipt.in_place_bytes,
+                receipt.canaries,
+                receipt.trip_to_verified_us,
+            );
+            Ok(())
+        }
+        DesktopEnd::WipeUnconfirmed(reason, in_place) => {
+            match reason {
+                GuiWipeUnconfirmed::NoOutcome => eprintln!(
+                    "emergency wipe NOT confirmed (reaper produced no outcome; scrubbed {in_place} bytes in place)"
+                ),
+                GuiWipeUnconfirmed::NothingArmed => eprintln!(
+                    "emergency wipe NOT confirmed (no arenas armed; scrubbed {in_place} bytes in place)"
+                ),
+                GuiWipeUnconfirmed::Ghosts {
+                    ghost_canaries,
+                    ghost_bytes,
+                } => eprintln!(
+                    "emergency wipe FAILED: {ghost_canaries} ghost canaries ({ghost_bytes} bytes) survived; scrubbed {in_place} bytes in place"
+                ),
+            }
+            std::process::exit(1);
+        }
     }
 }
 
@@ -977,6 +1374,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [flag] if flag == "--help" || flag == "-h" => {
             println!("{}", usage_text());
             Ok(())
+        }
+        [subcommand, rest @ ..] if subcommand == "gui" || subcommand == "--gui" => {
+            let Some((doc, deadman)) = parse_gui_subargs(rest) else {
+                eprintln!("{}", usage_text());
+                std::process::exit(2);
+            };
+            run_gui_command(doc.as_deref(), deadman)
+        }
+        [subcommand, rest @ ..] if subcommand == "import" => {
+            let Some((src, dst, fmt)) = parse_import_args(rest) else {
+                eprintln!("{}", usage_text());
+                std::process::exit(2);
+            };
+            run_import(&src, &dst, fmt)
+        }
+        [subcommand, rest @ ..] if subcommand == "export" => {
+            let Some((src, dst, fmt, force)) = parse_export_args(rest) else {
+                eprintln!("{}", usage_text());
+                std::process::exit(2);
+            };
+            run_export(&src, &dst, fmt, force)
+        }
+        [subcommand, rest @ ..] if subcommand == "migrate-v5" => {
+            let Some(cfg) = parse_migrate_args(rest) else {
+                eprintln!("{}", usage_text());
+                std::process::exit(2);
+            };
+            run_migrate_v5(&cfg)
         }
         [subcommand, target] if subcommand == "verify" => {
             let path = Path::new(target);
@@ -1309,6 +1734,76 @@ mod tests {
         assert!(
             matches!(unconfirmed, Ended::WipeUnconfirmed(..)),
             "an unconfirmed wipe must take the non-zero exit path"
+        );
+    }
+
+    #[test]
+    fn parses_gui_import_export_and_migrate_subcommand_arguments() {
+        let s = |xs: &[&str]| xs.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+
+        assert_eq!(parse_gui_subargs(&[]), Some((None, None)));
+        assert_eq!(
+            parse_gui_subargs(&s(&["--deadman", "2500", "notes.wavefunction"])),
+            Some((
+                Some(PathBuf::from("notes.wavefunction")),
+                Some(Duration::from_millis(2500))
+            ))
+        );
+        assert_eq!(parse_gui_subargs(&s(&["--unknown"])), None);
+
+        assert_eq!(
+            parse_import_args(&s(&["--format", "md", "notes.md", "out.wavefunction"])),
+            Some((
+                PathBuf::from("notes.md"),
+                PathBuf::from("out.wavefunction"),
+                Some(TransferFormat::Markdown)
+            ))
+        );
+        assert_eq!(parse_import_args(&s(&["only_one.txt"])), None);
+
+        assert_eq!(
+            parse_export_args(&s(&["--force", "--format", "plain", "doc.wavefunction", "out.txt"])),
+            Some((
+                PathBuf::from("doc.wavefunction"),
+                PathBuf::from("out.txt"),
+                Some(TransferFormat::PlainText),
+                true
+            ))
+        );
+        assert_eq!(
+            parse_export_args(&s(&["doc.wavefunction", "out.md"])),
+            Some((
+                PathBuf::from("doc.wavefunction"),
+                PathBuf::from("out.md"),
+                None,
+                false
+            ))
+        );
+
+        assert_eq!(
+            parse_migrate_args(&s(&[
+                "--device",
+                "/dev/sdb",
+                "--cursor",
+                "3",
+                "--lba",
+                "65536",
+                "--usb-key",
+                "key.bin",
+                "v5.holo",
+                "v6.wavefunction"
+            ])),
+            Some(MigrateArgs {
+                source: PathBuf::from("v5.holo"),
+                destination: PathBuf::from("v6.wavefunction"),
+                unpadded: false,
+                derived_cursor: 3,
+                device: Some(PathBuf::from("/dev/sdb")),
+                device_cursor: 3,
+                lba_start: 65536,
+                scan_cursor: false,
+                usb_key: Some(PathBuf::from("key.bin")),
+            })
         );
     }
 }

@@ -172,13 +172,22 @@ pub fn derive_root_secret(
     salt: &[u8; DERIVE_SALT_BYTES],
     class: ParamsClass,
 ) -> Result<RootSecret, KdfError> {
+    let out = derive_root_secret_raw(passphrase, salt, class)?;
+    Ok(RootSecret(*out))
+}
+
+pub(crate) fn derive_root_secret_raw(
+    passphrase: &[u8],
+    salt: &[u8; DERIVE_SALT_BYTES],
+    class: ParamsClass,
+) -> Result<Zeroizing<[u8; ROOT_SECRET_BYTES]>, KdfError> {
     refuse_test_class_in_release(class)?;
     let (m_kib, t, p) = class.costs();
     let params =
         Params::new(m_kib, t, p, Some(ROOT_SECRET_BYTES)).map_err(|_| KdfError::InvalidParams)?;
     let mut out = Zeroizing::new([0u8; ROOT_SECRET_BYTES]);
     run_argon2(passphrase, salt, &params, &mut out[..])?;
-    Ok(RootSecret(*out))
+    Ok(out)
 }
 
 /// Stage 1, replayed: derive under an *explicit* recorded parameter set.

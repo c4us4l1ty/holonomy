@@ -399,6 +399,69 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Ok(count)
     }
 
+    /// Merges any adjacent contiguous same-segment leaves in the active spine (`OQ-9`), returning
+    /// whether the tree shape changed.
+    pub fn coalesce(&mut self) -> bool {
+        let before = self.typing.spine().clone();
+        let merged = self.typing.coalesce();
+        if merged {
+            self.invalidate_after_cut_or_restore(&before);
+        }
+        merged
+    }
+
+    /// Restores the live document geometry to `next_spine` (for example from a historical witness)
+    /// as one undoable and durably committed transition (`Block 8`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `next_spine` cannot be validated or committed to the sink.
+    pub fn restore_spine(&mut self, next_spine: holonomy_text::Spine) -> Result<(), ShellError> {
+        let before = self.typing.spine().clone();
+        self.typing.restore_spine(next_spine)?;
+        self.invalidate_after_cut_or_restore(&before);
+        self.selection = Selection::caret(self.typing.caret());
+        Ok(())
+    }
+
+    /// Reads the active selection (bounded to `max_bytes` UTF-8 bytes on a character boundary)
+    /// through the resident set for clipboard export, returning `Ok(None)` when the selection is
+    /// empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShellError::Read`] if reading resident segments fails or the selected slice is not
+    /// valid UTF-8.
+    pub fn copy_selection(&mut self, max_bytes: usize) -> Result<Option<String>, ShellError> {
+        if self.selection.is_empty() || max_bytes == 0 {
+            return Ok(None);
+        }
+        let (lo, hi) = self.selection.clamped(self.document_len()).normalised();
+        let target_end = hi.min(lo.saturating_add(max_bytes as u64));
+        if target_end <= lo {
+            return Ok(None);
+        }
+        let raw = holonomy_text::copy(
+            &mut self.residency,
+            self.typing.spine(),
+            self.typing.draft(),
+            self.typing.sources(),
+            Selection::new(lo, target_end),
+            self.typing.pending(),
+        )
+        .map_err(WindowTextError::from)?;
+        let mut valid_len = raw.len();
+        while valid_len > 0 && std::str::from_utf8(&raw[..valid_len]).is_err() {
+            if raw.len() - valid_len >= 4 {
+                return Err(ShellError::Read(WindowTextError::NotText { at: lo }));
+            }
+            valid_len -= 1;
+        }
+        let text = String::from_utf8(raw[..valid_len].to_vec())
+            .map_err(|_| ShellError::Read(WindowTextError::NotText { at: lo }))?;
+        Ok(Some(text))
+    }
+
     /// The typing session — the document's live geometry and its history.
     #[must_use]
     pub fn typing(&self) -> &Typing<S> {

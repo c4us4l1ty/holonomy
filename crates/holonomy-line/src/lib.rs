@@ -30,8 +30,14 @@ const RECORD_MAGIC: &[u8; 4] = b"W6RC";
 const RECORD_SEGMENT: u8 = 1;
 const RECORD_WITNESS: u8 = 2;
 const RECORD_MANIFEST: u8 = 3;
+const RECORD_BOOKMARK: u8 = 4;
 const AEAD_TAG_BYTES: u32 = 16;
 const MAX_SEGMENT_BYTES: u32 = 64 * 1024;
+const MAX_BOOKMARK_NAME_BYTES: usize = 256;
+const BOOKMARK_MIN_BYTES: usize = 1 + 8 + 8 + 2 + 1;
+const MAX_BOOKMARK_BYTES: usize = 1 + 8 + 8 + 2 + MAX_BOOKMARK_NAME_BYTES;
+const MAX_BOOKMARK_CIPHERTEXT_BYTES: u32 = (MAX_BOOKMARK_BYTES as u32) + AEAD_TAG_BYTES;
+const MAX_BOOKMARKS: usize = 65_536;
 const WITNESS_BASE_BYTES: usize = 1 + 8 + 8 + 32 + 32 + 32 + 32;
 const WITNESS_MANIFEST_REF_BYTES: usize = 8 + 4 + 32;
 const MAX_WITNESS_BYTES: usize = WITNESS_BASE_BYTES + 64 * 32 + WITNESS_MANIFEST_REF_BYTES;
@@ -173,6 +179,8 @@ pub enum LineError {
     UnsupportedDurability,
     /// A segment index is not present in the committed witness.
     NoSuchSegment,
+    /// A witness index is not present in the world-line history.
+    NoSuchWitness,
     /// Memory could not be reserved for bounded segment metadata.
     ResourceExhausted,
     /// The one-shot, passphrase-rederived approval is absent or belongs to another file.
@@ -185,6 +193,8 @@ pub enum LineError {
     InvalidCompactionDestination,
     /// A proposed spine manifest names an empty, overflowing, or out-of-range segment span.
     InvalidManifest(&'static str),
+    /// A bookmark name or anchor witness is invalid.
+    InvalidBookmark(&'static str),
 }
 
 impl core::fmt::Display for LineError {
@@ -217,6 +227,7 @@ impl core::fmt::Display for LineError {
                 f.write_str("durable directory sync is unsupported on this target")
             }
             Self::NoSuchSegment => f.write_str("world-line segment does not exist"),
+            Self::NoSuchWitness => f.write_str("world-line witness does not exist"),
             Self::ResourceExhausted => f.write_str("world-line metadata exceeds available memory"),
             Self::CompactionConfirmationRequired => {
                 f.write_str("passphrase confirmation is required for this history compaction")
@@ -232,6 +243,9 @@ impl core::fmt::Display for LineError {
             }
             Self::InvalidManifest(reason) => {
                 write!(f, "invalid world-line spine manifest: {reason}")
+            }
+            Self::InvalidBookmark(reason) => {
+                write!(f, "invalid world-line bookmark: {reason}")
             }
         }
     }
@@ -354,6 +368,30 @@ pub struct VerifyReport {
     pub recovery: RecoveryInfo,
 }
 
+/// Authenticated summary of one committed witness point in the world-line (Block 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WitnessSummary {
+    /// Zero-based witness sequence number (`0` is genesis).
+    pub sequence: u64,
+    /// Total committed segments present at this witness point.
+    pub segment_count: u64,
+    /// Explicit manifest sequence active at this witness, or `None` if implicit `0..segment_count`.
+    pub manifest_sequence: Option<u64>,
+}
+
+/// Authenticated named bookmark anchored to a committed witness in the world-line (Block 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookmark {
+    /// Zero-based bookmark sequence number.
+    pub sequence: u64,
+    /// Committed witness sequence this bookmark names.
+    pub witness_sequence: u64,
+    /// Unix timestamp in seconds when the bookmark was recorded.
+    pub timestamp_secs: i64,
+    /// Human-readable label (`1..=256` UTF-8 bytes).
+    pub name: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileIdentity {
     #[cfg(unix)]
@@ -401,11 +439,14 @@ pub struct WorldLine {
     file_identity: FileIdentity,
     segments: Vec<SegmentDescriptor>,
     manifests: Vec<ManifestDescriptor>,
+    witnesses: Vec<WitnessSummary>,
+    bookmarks: Vec<Bookmark>,
     manifest: Option<LineManifest>,
     mmr: Mmr,
     next_witness_sequence: u64,
     last_witness_tag: [u8; 32],
     last_segment_tag: [u8; 32],
+    last_bookmark_tag: [u8; 32],
     committed_end: u64,
     observed_len: u64,
     recovery: RecoveryInfo,
@@ -509,11 +550,18 @@ impl WorldLine {
             file_identity,
             segments: Vec::new(),
             manifests: Vec::new(),
+            witnesses: vec![WitnessSummary {
+                sequence: 0,
+                segment_count: 0,
+                manifest_sequence: None,
+            }],
+            bookmarks: Vec::new(),
             manifest: None,
             mmr: empty_mmr,
             next_witness_sequence: 1,
             last_witness_tag: genesis_tag,
             last_segment_tag: zero_tag,
+            last_bookmark_tag: zero_tag,
             committed_end,
             observed_len: committed_end,
             recovery: RecoveryInfo {
@@ -544,11 +592,14 @@ impl WorldLine {
             file_identity,
             segments: scan.segments,
             manifests: scan.manifests,
+            witnesses: scan.witnesses,
+            bookmarks: scan.bookmarks,
             manifest: scan.manifest,
             mmr: scan.mmr,
             next_witness_sequence: scan.next_witness_sequence,
             last_witness_tag: scan.last_witness_tag,
             last_segment_tag: scan.last_segment_tag,
+            last_bookmark_tag: scan.last_bookmark_tag,
             committed_end: scan.committed_end,
             observed_len: scan.observed_len,
             recovery: scan.recovery,
@@ -683,6 +734,318 @@ impl WorldLine {
     /// Number of committed witness records, including genesis.
     pub fn witness_count(&self) -> u64 {
         self.next_witness_sequence
+    }
+
+    /// Authenticated witness points in chronological order (`0` is genesis).
+    #[must_use]
+    pub fn witness_history(&self) -> &[WitnessSummary] {
+        &self.witnesses
+    }
+
+    /// Authenticated named bookmarks stored in this world-line, in append order.
+    #[must_use]
+    pub fn bookmarks(&self) -> &[Bookmark] {
+        &self.bookmarks
+    }
+
+    /// Reconstructs the exact [`LineManifest`] active at historical `witness_sequence` (`0..witness_count()`)
+    /// without decrypting any segment bodies (Block 8).
+    pub fn manifest_at_witness(&self, witness_sequence: u64) -> Result<LineManifest, LineError> {
+        if self.poisoned {
+            return Err(LineError::ReopenRequired);
+        }
+        let idx = usize::try_from(witness_sequence).map_err(|_| LineError::NoSuchWitness)?;
+        let summary = self.witnesses.get(idx).ok_or(LineError::NoSuchWitness)?;
+        if let Some(m_seq) = summary.manifest_sequence {
+            let m_idx = usize::try_from(m_seq).map_err(|_| LineError::InvalidRecord)?;
+            let descriptor = self.manifests.get(m_idx).ok_or(LineError::InvalidRecord)?;
+            return self.read_manifest(descriptor);
+        }
+        let seg_count =
+            usize::try_from(summary.segment_count).map_err(|_| LineError::InvalidRecord)?;
+        let slice = self
+            .segments
+            .get(..seg_count)
+            .ok_or(LineError::InvalidRecord)?;
+        let slabs = slice
+            .iter()
+            .map(|descriptor| LineSlab {
+                segment: descriptor.sequence,
+                start: 0,
+                len: descriptor.plaintext_len,
+            })
+            .collect();
+        Ok(LineManifest {
+            slabs,
+            styles: Vec::new(),
+            links: Vec::new(),
+        })
+    }
+
+    /// Appends an authenticated named bookmark anchored to `witness_sequence` (Block 8).
+    pub fn add_bookmark(
+        &mut self,
+        witness_sequence: u64,
+        timestamp_secs: i64,
+        name: &str,
+    ) -> Result<Bookmark, LineError> {
+        if !durability_supported() {
+            return Err(LineError::UnsupportedDurability);
+        }
+        if self.poisoned {
+            return Err(LineError::ReopenRequired);
+        }
+        if witness_sequence >= self.next_witness_sequence {
+            return Err(LineError::NoSuchWitness);
+        }
+        if name.is_empty() || name.len() > MAX_BOOKMARK_NAME_BYTES {
+            return Err(LineError::InvalidBookmark(
+                "bookmark name must be 1..=256 UTF-8 bytes",
+            ));
+        }
+        if self.bookmarks.len() >= MAX_BOOKMARKS {
+            return Err(LineError::InvalidBookmark("bookmark limit reached"));
+        }
+        let result = self.append_bookmark_internal(witness_sequence, timestamp_secs, name);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Begins a bounded-memory streaming append transaction (`Block 7` dense replacement &
+    /// `Block 10` streaming import), writing encrypted 64 KiB segments directly to the log one at
+    /// a time and sealing them under one final witness commit point.
+    pub fn begin_streaming_append(&mut self) -> Result<StreamingAppend<'_>, LineError> {
+        let tx = self.start_streaming_tx()?;
+        Ok(StreamingAppend {
+            line: self,
+            tx: Some(tx),
+        })
+    }
+
+    /// Starts an owned bounded-memory streaming transaction with no lifetime borrow on `self`,
+    /// suitable for [`std::cell::RefCell`]- or [`std::sync::Mutex`]-wrapped handles.
+    ///
+    /// While the returned [`StreamingTx`] is open, `self` rejects interleaved writes until
+    /// [`Self::finish_streaming_tx`] or [`Self::abort_streaming_tx`] completes.
+    pub fn start_streaming_tx(&mut self) -> Result<StreamingTx, LineError> {
+        if !durability_supported() {
+            return Err(LineError::UnsupportedDurability);
+        }
+        if self.poisoned {
+            return Err(LineError::ReopenRequired);
+        }
+        if self.next_witness_sequence == u64::MAX {
+            return Err(LineError::TooManySegments);
+        }
+        let (file, append_lock) = self.prepare_append_file()?;
+        self.poisoned = true;
+        Ok(StreamingTx {
+            header: self.header.clone(),
+            epoch: self.epoch,
+            key: self.key.duplicate(),
+            file,
+            _append_lock: append_lock,
+            mmr: self.mmr.clone(),
+            last_segment_tag: self.last_segment_tag,
+            next_segment_seq: self.mmr.count(),
+            new_descriptors: Vec::new(),
+            bytes_written: 0,
+            committed_end: self.committed_end,
+            failed: false,
+        })
+    }
+
+    /// Commits all segments streamed into `tx` alongside an optional explicit [`LineManifest`]
+    /// under a single durable witness commit point.
+    pub fn finish_streaming_tx(
+        &mut self,
+        mut tx: StreamingTx,
+        explicit_manifest: Option<&LineManifest>,
+    ) -> Result<AppendReceipt, LineError> {
+        if tx.failed {
+            self.poisoned = true;
+            return Err(LineError::ReopenRequired);
+        }
+        if tx.new_descriptors.is_empty() && explicit_manifest.is_none() {
+            self.poisoned = false;
+            return Ok(self.current_receipt());
+        }
+        let pending_lengths: Vec<u32> = tx
+            .new_descriptors
+            .iter()
+            .map(|descriptor| descriptor.plaintext_len)
+            .collect();
+        if let Some(manifest) = explicit_manifest {
+            if let Err(err) =
+                validate_manifest_against_lengths(&self.segments, &pending_lengths, manifest)
+            {
+                self.poisoned = true;
+                return Err(err);
+            }
+        }
+        let next_manifest = match explicit_manifest {
+            Some(manifest) => Some(manifest.clone()),
+            None => {
+                if let Some(existing) = &self.manifest {
+                    if existing.slabs.len().saturating_add(tx.new_descriptors.len())
+                        > MAX_MANIFEST_SLABS
+                    {
+                        self.poisoned = true;
+                        return Err(LineError::InvalidManifest(
+                            "manifest exceeds maximum slab count",
+                        ));
+                    }
+                    let mut extended =
+                        Vec::with_capacity(existing.slabs.len() + tx.new_descriptors.len());
+                    extended.extend_from_slice(&existing.slabs);
+                    for descriptor in &tx.new_descriptors {
+                        extended.push(LineSlab {
+                            segment: descriptor.sequence,
+                            start: 0,
+                            len: descriptor.plaintext_len,
+                        });
+                    }
+                    Some(LineManifest {
+                        slabs: extended,
+                        styles: existing.styles.clone(),
+                        links: existing.links.clone(),
+                    })
+                } else {
+                    None
+                }
+            }
+        };
+
+        let result = (|| -> Result<AppendReceipt, LineError> {
+            self.segments
+                .try_reserve(tx.new_descriptors.len())
+                .map_err(|_| LineError::ResourceExhausted)?;
+
+            let mut new_manifest_descriptor = None;
+            let manifest_ref = if let Some(slabs) = &next_manifest {
+                self.manifests
+                    .try_reserve(1)
+                    .map_err(|_| LineError::ResourceExhausted)?;
+                let manifest_sequence =
+                    u64::try_from(self.manifests.len()).map_err(|_| LineError::TooManySegments)?;
+                let encoded = encode_manifest_record(
+                    &self.header,
+                    &self.epoch,
+                    &self.key,
+                    manifest_sequence,
+                    &self.last_witness_tag,
+                    slabs,
+                )?;
+                let record_offset = tx.file.stream_position()?;
+                write_append_bytes(&mut tx.file, &encoded.frame)?;
+                tx.bytes_written = tx
+                    .bytes_written
+                    .checked_add(encoded.frame.len() as u64)
+                    .ok_or(LineError::ResourceExhausted)?;
+                let ciphertext_offset = record_offset
+                    .checked_add(RECORD_HEADER_BYTES as u64 + RECORD_FIXED_BYTES as u64)
+                    .ok_or(LineError::ResourceExhausted)?;
+                let segment_limit = self.segments.len() + tx.new_descriptors.len();
+                new_manifest_descriptor = Some(ManifestDescriptor {
+                    sequence: manifest_sequence,
+                    segment_limit,
+                    ciphertext_offset,
+                    ciphertext_len: encoded.ciphertext_len,
+                    nonce: encoded.nonce,
+                    tag: encoded.tag,
+                    previous_witness_tag: self.last_witness_tag,
+                });
+                Some(ManifestRef {
+                    sequence: manifest_sequence,
+                    ciphertext_len: encoded.ciphertext_len,
+                    tag: encoded.tag,
+                })
+            } else {
+                None
+            };
+
+            sync_append_file(&tx.file)?;
+            let witness_sequence = self.next_witness_sequence;
+            let (witness_frame, witness_tag) = encode_witness_record(
+                &self.header,
+                &self.epoch,
+                &self.key,
+                witness_sequence,
+                &self.last_witness_tag,
+                &tx.last_segment_tag,
+                &tx.mmr,
+                manifest_ref,
+            )?;
+            write_append_bytes(&mut tx.file, &witness_frame)?;
+            tx.bytes_written = tx
+                .bytes_written
+                .checked_add(witness_frame.len() as u64)
+                .ok_or(LineError::ResourceExhausted)?;
+            if sync_append_file(&tx.file).is_err() {
+                return Err(LineError::DurabilityUncertain);
+            }
+            let committed_end = tx.file.stream_position()?;
+
+            self.segments.append(&mut tx.new_descriptors);
+            let manifest_sequence = new_manifest_descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.sequence);
+            if let Some(descriptor) = new_manifest_descriptor {
+                self.manifests.push(descriptor);
+            }
+            self.witnesses.push(WitnessSummary {
+                sequence: witness_sequence,
+                segment_count: tx.mmr.count(),
+                manifest_sequence,
+            });
+            self.manifest = next_manifest;
+            self.mmr = tx.mmr;
+            self.last_segment_tag = tx.last_segment_tag;
+            self.last_witness_tag = witness_tag;
+            self.next_witness_sequence = witness_sequence
+                .checked_add(1)
+                .ok_or(LineError::TooManySegments)?;
+            self.committed_end = committed_end;
+            self.observed_len = committed_end;
+            self.recovery = RecoveryInfo {
+                trailing_bytes: 0,
+                last_committed_offset: committed_end,
+            };
+            self.poisoned = false;
+            Ok(AppendReceipt {
+                witness_sequence,
+                segment_count: self.mmr.count(),
+                bytes_appended: tx.bytes_written,
+                segment_root: self.mmr.root(),
+            })
+        })();
+
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Aborts an uncommitted [`StreamingTx`], truncating any unwritten tail back to the last
+    /// committed witness so the world-line handle remains usable if cleanup succeeds.
+    pub fn abort_streaming_tx(&mut self, tx: StreamingTx) -> Result<(), LineError> {
+        let res = (|| -> Result<(), LineError> {
+            truncate_append_tail(&tx.file, tx.committed_end)?;
+            sync_append_file(&tx.file)?;
+            self.observed_len = tx.committed_end;
+            self.recovery = RecoveryInfo {
+                trailing_bytes: 0,
+                last_committed_offset: tx.committed_end,
+            };
+            self.poisoned = false;
+            Ok(())
+        })();
+        if res.is_err() {
+            self.poisoned = true;
+        }
+        res
     }
 
     /// Recovery information observed when this handle was opened or last committed.
@@ -1000,17 +1363,13 @@ impl WorldLine {
         }
     }
 
-    fn commit_internal(
-        &mut self,
-        plaintext_segments: &[&[u8]],
-        explicit_manifest: Option<&LineManifest>,
-    ) -> Result<AppendReceipt, LineError> {
+    fn prepare_append_file(&mut self) -> Result<(File, FileAppendLock), LineError> {
         let mut file = open_worldline_file(&self.path, true, true)?;
         validate_regular_file(&file)?;
         if file_identity(&file)? != self.file_identity {
             return Err(LineError::ConcurrentModification);
         }
-        let _append_lock = FileAppendLock::acquire(&file)?;
+        let append_lock = FileAppendLock::acquire(&file)?;
         let actual_len = file.metadata()?.len();
         if actual_len < self.committed_end {
             return Err(LineError::ConcurrentModification);
@@ -1029,10 +1388,13 @@ impl WorldLine {
             || disk_state.committed_end != self.committed_end
             || disk_state.last_witness_tag != self.last_witness_tag
             || disk_state.last_segment_tag != self.last_segment_tag
+            || disk_state.last_bookmark_tag != self.last_bookmark_tag
             || disk_state.next_witness_sequence != self.next_witness_sequence
             || disk_state.mmr != self.mmr
             || disk_state.segments != self.segments
             || disk_state.manifests != self.manifests
+            || disk_state.witnesses != self.witnesses
+            || disk_state.bookmarks != self.bookmarks
             || disk_state.manifest != self.manifest
         {
             return Err(LineError::ConcurrentModification);
@@ -1049,6 +1411,58 @@ impl WorldLine {
                 last_committed_offset: self.committed_end,
             };
         }
+        file.seek(SeekFrom::End(0))?;
+        Ok((file, append_lock))
+    }
+
+    fn append_bookmark_internal(
+        &mut self,
+        witness_sequence: u64,
+        timestamp_secs: i64,
+        name: &str,
+    ) -> Result<Bookmark, LineError> {
+        let (mut file, _append_lock) = self.prepare_append_file()?;
+        let sequence =
+            u64::try_from(self.bookmarks.len()).map_err(|_| LineError::TooManySegments)?;
+        let encoded = encode_bookmark_record(
+            &self.header,
+            &self.epoch,
+            &self.key,
+            sequence,
+            &self.last_witness_tag,
+            &self.last_bookmark_tag,
+            witness_sequence,
+            timestamp_secs,
+            name,
+        )?;
+        write_append_bytes(&mut file, &encoded.frame)?;
+        if sync_append_file(&file).is_err() {
+            return Err(LineError::DurabilityUncertain);
+        }
+        let committed_end = file.stream_position()?;
+        let bookmark = Bookmark {
+            sequence,
+            witness_sequence,
+            timestamp_secs,
+            name: name.to_owned(),
+        };
+        self.bookmarks.push(bookmark.clone());
+        self.last_bookmark_tag = encoded.tag;
+        self.committed_end = committed_end;
+        self.observed_len = committed_end;
+        self.recovery = RecoveryInfo {
+            trailing_bytes: 0,
+            last_committed_offset: committed_end,
+        };
+        Ok(bookmark)
+    }
+
+    fn commit_internal(
+        &mut self,
+        plaintext_segments: &[&[u8]],
+        explicit_manifest: Option<&LineManifest>,
+    ) -> Result<AppendReceipt, LineError> {
+        let (mut file, _append_lock) = self.prepare_append_file()?;
 
         let next_manifest = match explicit_manifest {
             Some(manifest) => Some(manifest.clone()),
@@ -1080,7 +1494,6 @@ impl WorldLine {
             }
         };
 
-        file.seek(SeekFrom::End(0))?;
         let mut mmr = self.mmr.clone();
         let mut last_segment_tag = self.last_segment_tag;
         let mut new_descriptors = Vec::new();
@@ -1188,9 +1601,17 @@ impl WorldLine {
         let committed_end = file.stream_position()?;
 
         self.segments.extend(new_descriptors);
+        let manifest_sequence = new_manifest_descriptor
+            .as_ref()
+            .map(|descriptor| descriptor.sequence);
         if let Some(descriptor) = new_manifest_descriptor {
             self.manifests.push(descriptor);
         }
+        self.witnesses.push(WitnessSummary {
+            sequence: witness_sequence,
+            segment_count: mmr.count(),
+            manifest_sequence,
+        });
         self.manifest = next_manifest;
         self.mmr = mmr;
         self.last_segment_tag = last_segment_tag;
@@ -1728,9 +2149,159 @@ fn decode_manifest_plain(bytes: &[u8]) -> Result<LineManifest, LineError> {
     })
 }
 
+/// Owned streaming bounded-memory append transaction started via
+/// [`WorldLine::start_streaming_tx`] (Block 7 dense replacement & Block 10 streaming import).
+///
+/// Writes encrypted `<= 64 KiB` segments directly to the log one at a time and commits all
+/// segments plus an optional manifest under one witness via [`WorldLine::finish_streaming_tx`].
+pub struct StreamingTx {
+    header: LineHeader,
+    epoch: [u8; 32],
+    key: DEMKey,
+    file: File,
+    _append_lock: FileAppendLock,
+    mmr: Mmr,
+    last_segment_tag: [u8; 32],
+    next_segment_seq: u64,
+    new_descriptors: Vec<SegmentDescriptor>,
+    bytes_written: u64,
+    committed_end: u64,
+    failed: bool,
+}
+
+impl StreamingTx {
+    /// Returns the zero-based segment sequence number that the next [`Self::push_segment`] call
+    /// will assign.
+    #[must_use]
+    pub fn next_segment_sequence(&self) -> u64 {
+        self.next_segment_seq
+    }
+
+    /// Seals and writes one non-empty `<= 64 KiB` plaintext segment immediately to the log,
+    /// returning its full-length [`LineSlab`] handle without retaining the plaintext in memory.
+    pub fn push_segment(&mut self, plaintext: &[u8]) -> Result<LineSlab, LineError> {
+        if self.failed {
+            return Err(LineError::ReopenRequired);
+        }
+        if plaintext.is_empty() {
+            return Err(LineError::EmptySegment);
+        }
+        if plaintext.len() > MAX_SEGMENT_BYTES as usize {
+            return Err(LineError::SegmentTooLarge);
+        }
+        let _next_total = self
+            .mmr
+            .count()
+            .checked_add(1)
+            .ok_or(LineError::TooManySegments)?;
+
+        let res = (|| -> Result<LineSlab, LineError> {
+            let sequence = self.next_segment_seq;
+            let encoded = encode_segment_record(
+                &self.header,
+                &self.epoch,
+                &self.key,
+                sequence,
+                &self.last_segment_tag,
+                plaintext,
+            )?;
+            let record_offset = self.file.stream_position()?;
+            write_append_bytes(&mut self.file, &encoded.frame)?;
+            self.bytes_written = self
+                .bytes_written
+                .checked_add(encoded.frame.len() as u64)
+                .ok_or(LineError::ResourceExhausted)?;
+            let ciphertext_offset = record_offset
+                .checked_add(RECORD_HEADER_BYTES as u64 + RECORD_FIXED_BYTES as u64)
+                .ok_or(LineError::ResourceExhausted)?;
+            self.new_descriptors
+                .try_reserve(1)
+                .map_err(|_| LineError::ResourceExhausted)?;
+            self.new_descriptors.push(SegmentDescriptor {
+                sequence,
+                ciphertext_offset,
+                ciphertext_len: encoded.ciphertext_len,
+                plaintext_len: encoded.plaintext_len,
+                nonce: encoded.nonce,
+                tag: encoded.tag,
+                previous_tag: self.last_segment_tag,
+            });
+            self.mmr.append(encoded.leaf)?;
+            self.last_segment_tag = encoded.tag;
+            self.next_segment_seq = sequence
+                .checked_add(1)
+                .ok_or(LineError::TooManySegments)?;
+            Ok(LineSlab {
+                segment: sequence,
+                start: 0,
+                len: encoded.plaintext_len,
+            })
+        })();
+        if res.is_err() {
+            self.failed = true;
+        }
+        res
+    }
+}
+
+/// Borrowed streaming bounded-memory append transaction over `&mut WorldLine`.
+pub struct StreamingAppend<'a> {
+    line: &'a mut WorldLine,
+    tx: Option<StreamingTx>,
+}
+
+impl<'a> StreamingAppend<'a> {
+    /// Returns the zero-based segment sequence number that the next [`Self::push_segment`] call
+    /// will assign.
+    #[must_use]
+    pub fn next_segment_sequence(&self) -> u64 {
+        self.tx.as_ref().map_or(0, StreamingTx::next_segment_sequence)
+    }
+
+    /// Seals and writes one non-empty `<= 64 KiB` plaintext segment immediately to the log,
+    /// returning its full-length [`LineSlab`] handle without retaining the plaintext in memory.
+    pub fn push_segment(&mut self, plaintext: &[u8]) -> Result<LineSlab, LineError> {
+        self.tx
+            .as_mut()
+            .ok_or(LineError::ReopenRequired)?
+            .push_segment(plaintext)
+    }
+
+    /// Commits all streamed segments and an optional explicit [`LineManifest`] under a single
+    /// durable witness commit point.
+    pub fn finish(
+        mut self,
+        explicit_manifest: Option<&LineManifest>,
+    ) -> Result<AppendReceipt, LineError> {
+        let tx = self.tx.take().ok_or(LineError::ReopenRequired)?;
+        self.line.finish_streaming_tx(tx, explicit_manifest)
+    }
+}
+
+impl Drop for StreamingAppend<'_> {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = self.line.abort_streaming_tx(tx);
+        }
+    }
+}
+
 fn validate_manifest_against_pending(
     committed: &[SegmentDescriptor],
     pending: &[&[u8]],
+    manifest: &LineManifest,
+) -> Result<(), LineError> {
+    let mut pending_lengths = Vec::with_capacity(pending.len());
+    for slice in pending {
+        let len = u32::try_from(slice.len()).map_err(|_| LineError::SegmentTooLarge)?;
+        pending_lengths.push(len);
+    }
+    validate_manifest_against_lengths(committed, &pending_lengths, manifest)
+}
+
+fn validate_manifest_against_lengths(
+    committed: &[SegmentDescriptor],
+    pending_lengths: &[u32],
     manifest: &LineManifest,
 ) -> Result<(), LineError> {
     if manifest.slabs.len() > MAX_MANIFEST_SLABS {
@@ -1757,7 +2328,7 @@ fn validate_manifest_against_pending(
     }
     let total_segments = committed
         .len()
-        .checked_add(pending.len())
+        .checked_add(pending_lengths.len())
         .ok_or(LineError::TooManySegments)?;
     let mut total_doc_bytes = 0u64;
     for slab in &manifest.slabs {
@@ -1780,8 +2351,7 @@ fn validate_manifest_against_pending(
         let seg_len = if index < committed.len() {
             committed[index].plaintext_len
         } else {
-            u32::try_from(pending[index - committed.len()].len())
-                .map_err(|_| LineError::SegmentTooLarge)?
+            pending_lengths[index - committed.len()]
         };
         if end > seg_len {
             return Err(LineError::InvalidManifest(
@@ -2042,6 +2612,95 @@ fn witness_aad(
     aad
 }
 
+fn bookmark_aad(
+    header: &LineHeader,
+    epoch: &[u8; 32],
+    sequence: u64,
+    last_witness_tag: &[u8; 32],
+    previous_bookmark_tag: &[u8; 32],
+) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(21 + 16 + 32 + 8 + 32 + 32);
+    aad.extend_from_slice(b"HOLONOMY_V6_BOOKMARK\0");
+    aad.extend_from_slice(header.file_id());
+    aad.extend_from_slice(epoch);
+    aad.extend_from_slice(&sequence.to_le_bytes());
+    aad.extend_from_slice(last_witness_tag);
+    aad.extend_from_slice(previous_bookmark_tag);
+    aad
+}
+
+struct EncodedBookmark {
+    frame: Vec<u8>,
+    tag: [u8; 32],
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_bookmark_record(
+    header: &LineHeader,
+    epoch: &[u8; 32],
+    key: &DEMKey,
+    sequence: u64,
+    last_witness_tag: &[u8; 32],
+    previous_bookmark_tag: &[u8; 32],
+    witness_sequence: u64,
+    timestamp_secs: i64,
+    name: &str,
+) -> Result<EncodedBookmark, LineError> {
+    let name_len = u16::try_from(name.len())
+        .map_err(|_| LineError::InvalidBookmark("bookmark name exceeds u16"))?;
+    if name.is_empty() || name.len() > MAX_BOOKMARK_NAME_BYTES {
+        return Err(LineError::InvalidBookmark(
+            "bookmark name must be 1..=256 UTF-8 bytes",
+        ));
+    }
+    let mut plaintext = Vec::with_capacity(1 + 8 + 8 + 2 + name.len());
+    plaintext.push(1);
+    plaintext.extend_from_slice(&witness_sequence.to_le_bytes());
+    plaintext.extend_from_slice(&timestamp_secs.to_le_bytes());
+    plaintext.extend_from_slice(&name_len.to_le_bytes());
+    plaintext.extend_from_slice(name.as_bytes());
+    let aad = bookmark_aad(header, epoch, sequence, last_witness_tag, previous_bookmark_tag);
+    let sealed = seal_object(key, &aad, &plaintext);
+    scrub_manifest_buffer(&mut plaintext);
+    let tag = sealed.cmt4;
+    let frame = encode_record(RECORD_BOOKMARK, sequence, sealed)?;
+    Ok(EncodedBookmark { frame, tag })
+}
+
+fn decode_bookmark_plain(
+    sequence: u64,
+    bytes: &[u8],
+    next_witness_sequence: u64,
+) -> Result<Bookmark, LineError> {
+    if bytes.len() < BOOKMARK_MIN_BYTES || bytes.len() > MAX_BOOKMARK_BYTES || bytes[0] != 1 {
+        return Err(LineError::InvalidRecord);
+    }
+    let mut offset = 1;
+    let witness_sequence = take_u64(bytes, &mut offset)?;
+    if witness_sequence >= next_witness_sequence {
+        return Err(LineError::InvalidRecord);
+    }
+    let timestamp_secs = i64::from_le_bytes(take_array::<8>(bytes, &mut offset)?);
+    let name_len = u16::from_le_bytes(take_array::<2>(bytes, &mut offset)?) as usize;
+    if name_len == 0 || name_len > MAX_BOOKMARK_NAME_BYTES {
+        return Err(LineError::InvalidRecord);
+    }
+    let end = offset.checked_add(name_len).ok_or(LineError::InvalidRecord)?;
+    let raw = bytes.get(offset..end).ok_or(LineError::InvalidRecord)?;
+    if end != bytes.len() {
+        return Err(LineError::InvalidRecord);
+    }
+    let name = core::str::from_utf8(raw)
+        .map_err(|_| LineError::InvalidRecord)?
+        .to_owned();
+    Ok(Bookmark {
+        sequence,
+        witness_sequence,
+        timestamp_secs,
+        name,
+    })
+}
+
 fn encode_record(kind: u8, sequence: u64, sealed: SealedObject) -> Result<Vec<u8>, LineError> {
     let ciphertext_len =
         u32::try_from(sealed.ciphertext.len()).map_err(|_| LineError::InvalidRecord)?;
@@ -2067,11 +2726,14 @@ fn encode_record(kind: u8, sequence: u64, sealed: SealedObject) -> Result<Vec<u8
 struct ScanResult {
     segments: Vec<SegmentDescriptor>,
     manifests: Vec<ManifestDescriptor>,
+    witnesses: Vec<WitnessSummary>,
+    bookmarks: Vec<Bookmark>,
     manifest: Option<LineManifest>,
     mmr: Mmr,
     next_witness_sequence: u64,
     last_witness_tag: [u8; 32],
     last_segment_tag: [u8; 32],
+    last_bookmark_tag: [u8; 32],
     committed_end: u64,
     observed_len: u64,
     recovery: RecoveryInfo,
@@ -2081,11 +2743,14 @@ struct ScanResult {
 struct Checkpoint {
     committed_segment_count: usize,
     committed_manifest_count: usize,
+    committed_witness_count: usize,
+    committed_bookmark_count: usize,
     active_manifest: Option<usize>,
     mmr: MmrCheckpoint,
     next_witness_sequence: u64,
     last_witness_tag: [u8; 32],
     last_segment_tag: [u8; 32],
+    last_bookmark_tag: [u8; 32],
     committed_end: u64,
 }
 
@@ -2148,10 +2813,13 @@ fn scan_records<R: Read + Seek>(
 
     let mut segments = Vec::new();
     let mut manifests = Vec::new();
+    let mut witnesses = Vec::new();
+    let mut bookmarks = Vec::new();
     let mut mmr = Mmr::new();
     let mut scanned_last_segment_tag = [0u8; 32];
     let mut next_witness_sequence = 0u64;
     let mut last_witness_tag = [0u8; 32];
+    let mut last_bookmark_tag = [0u8; 32];
     let mut checkpoint: Option<Checkpoint> = None;
 
     loop {
@@ -2174,7 +2842,11 @@ fn scan_records<R: Read + Seek>(
             return Err(LineError::InvalidRecord);
         }
         let kind = frame_header[4];
-        if kind != RECORD_SEGMENT && kind != RECORD_WITNESS && kind != RECORD_MANIFEST {
+        if kind != RECORD_SEGMENT
+            && kind != RECORD_WITNESS
+            && kind != RECORD_MANIFEST
+            && kind != RECORD_BOOKMARK
+        {
             return Err(LineError::InvalidRecord);
         }
         let body_len = u32::from_le_bytes(frame_header[8..12].try_into().unwrap());
@@ -2185,6 +2857,7 @@ fn scan_records<R: Read + Seek>(
             RECORD_SEGMENT => RECORD_FIXED_BYTES as u32 + MAX_SEGMENT_BYTES + AEAD_TAG_BYTES,
             RECORD_WITNESS => RECORD_FIXED_BYTES as u32 + MAX_WITNESS_CIPHERTEXT_BYTES,
             RECORD_MANIFEST => RECORD_FIXED_BYTES as u32 + MAX_MANIFEST_CIPHERTEXT_BYTES,
+            RECORD_BOOKMARK => RECORD_FIXED_BYTES as u32 + MAX_BOOKMARK_CIPHERTEXT_BYTES,
             _ => unreachable!(),
         };
         if body_len > maximum {
@@ -2273,6 +2946,49 @@ fn scan_records<R: Read + Seek>(
             // Seek past historical manifests during the scan; only the active manifest named by
             // the final witness is opened below.
             reader.seek(SeekFrom::Current(i64::from(ciphertext_len)))?;
+        } else if kind == RECORD_BOOKMARK {
+            let Some(prev) = checkpoint else {
+                return Err(LineError::InvalidRecord);
+            };
+            if segments.len() != prev.committed_segment_count
+                || manifests.len() != prev.committed_manifest_count
+                || bookmarks.len() >= MAX_BOOKMARKS
+                || sequence != bookmarks.len() as u64
+                || ciphertext_len < AEAD_TAG_BYTES + BOOKMARK_MIN_BYTES as u32
+                || ciphertext_len > MAX_BOOKMARK_CIPHERTEXT_BYTES
+            {
+                return Err(LineError::InvalidRecord);
+            }
+            let mut ciphertext = vec![0u8; ciphertext_len as usize];
+            reader.read_exact(&mut ciphertext)?;
+            let sealed = SealedObject {
+                nonce,
+                ciphertext,
+                cmt4: tag,
+            };
+            let aad = bookmark_aad(header, epoch, sequence, &last_witness_tag, &last_bookmark_tag);
+            let plaintext =
+                open_object(key, &aad, &sealed).map_err(|_| LineError::AuthenticationRejected)?;
+            let bookmark = decode_bookmark_plain(sequence, &plaintext, next_witness_sequence)
+                .map_err(|_| LineError::AuthenticationRejected)?;
+            bookmarks
+                .try_reserve(1)
+                .map_err(|_| LineError::ResourceExhausted)?;
+            bookmarks.push(bookmark);
+            last_bookmark_tag = tag;
+            checkpoint = Some(Checkpoint {
+                committed_segment_count: prev.committed_segment_count,
+                committed_manifest_count: prev.committed_manifest_count,
+                committed_witness_count: prev.committed_witness_count,
+                committed_bookmark_count: bookmarks.len(),
+                active_manifest: prev.active_manifest,
+                mmr: prev.mmr,
+                next_witness_sequence: prev.next_witness_sequence,
+                last_witness_tag: prev.last_witness_tag,
+                last_segment_tag: prev.last_segment_tag,
+                last_bookmark_tag,
+                committed_end: record_end,
+            });
         } else {
             if ciphertext_len < AEAD_TAG_BYTES + WITNESS_BASE_BYTES as u32
                 || ciphertext_len > MAX_WITNESS_CIPHERTEXT_BYTES
@@ -2336,16 +3052,27 @@ fn scan_records<R: Read + Seek>(
                     Some(index)
                 }
             };
+            witnesses
+                .try_reserve(1)
+                .map_err(|_| LineError::ResourceExhausted)?;
+            witnesses.push(WitnessSummary {
+                sequence,
+                segment_count: witness.segment_count,
+                manifest_sequence: witness.manifest_ref.map(|mref| mref.sequence),
+            });
             last_witness_tag = tag;
             next_witness_sequence = sequence.checked_add(1).ok_or(LineError::TooManySegments)?;
             checkpoint = Some(Checkpoint {
                 committed_segment_count: segments.len(),
                 committed_manifest_count: manifests.len(),
+                committed_witness_count: witnesses.len(),
+                committed_bookmark_count: bookmarks.len(),
                 active_manifest,
                 mmr: MmrCheckpoint::from_mmr(&mmr),
                 next_witness_sequence,
                 last_witness_tag,
                 last_segment_tag: scanned_last_segment_tag,
+                last_bookmark_tag,
                 committed_end: record_end,
             });
         }
@@ -2358,6 +3085,8 @@ fn scan_records<R: Read + Seek>(
     let checkpoint = checkpoint.ok_or(LineError::NoCommittedWitness)?;
     segments.truncate(checkpoint.committed_segment_count);
     manifests.truncate(checkpoint.committed_manifest_count);
+    witnesses.truncate(checkpoint.committed_witness_count);
+    bookmarks.truncate(checkpoint.committed_bookmark_count);
     let manifest = if let Some(index) = checkpoint.active_manifest {
         let descriptor = manifests.get(index).ok_or(LineError::InvalidRecord)?;
         let allowed = segments
@@ -2374,11 +3103,14 @@ fn scan_records<R: Read + Seek>(
     Ok(ScanResult {
         segments,
         manifests,
+        witnesses,
+        bookmarks,
         manifest,
         mmr,
         next_witness_sequence: checkpoint.next_witness_sequence,
         last_witness_tag: checkpoint.last_witness_tag,
         last_segment_tag: checkpoint.last_segment_tag,
+        last_bookmark_tag: checkpoint.last_bookmark_tag,
         committed_end: checkpoint.committed_end,
         observed_len,
         recovery: RecoveryInfo {

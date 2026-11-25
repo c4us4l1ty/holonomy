@@ -9,6 +9,7 @@
 use zeroize::Zeroizing;
 
 use crate::draft::{Draft, LiveSpan};
+use crate::formatting::{DocStyleSpan, StyleMap};
 use crate::residency::SegmentSource;
 use crate::slab::SegmentId;
 use crate::source::{Location, OpenSources};
@@ -331,6 +332,389 @@ pub fn visit_streaming<R: SegmentSource>(
     }
 
     Ok(())
+}
+
+/// Output summary returned by [`stream_replace_chunks`].
+#[derive(Debug, Clone)]
+pub struct StreamReplaceResult {
+    /// Total non-overlapping matches replaced across the document.
+    pub count: usize,
+    /// Byte offset of the first replaced match in original coordinates, if any.
+    pub first_match_start: Option<u64>,
+    /// Byte offset immediately after the last emitted replacement (for caret placement).
+    pub final_caret: u64,
+    /// Transformed rich-text styles aligned with the streamed replacement output.
+    pub styles: StyleMap,
+}
+
+/// Errors returned by [`stream_replace_chunks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamReplaceError {
+    /// Failed reading or validating source document segments.
+    Search(SearchError),
+    /// Failed publishing a chunk to the streaming sink.
+    Sink(String),
+    /// `needle` or `replacement` was not valid UTF-8, or a boundary split invalid UTF-8.
+    InvalidUtf8,
+    /// Arithmetic overflow while computing replacement offsets.
+    OffsetOverflow,
+}
+
+impl std::fmt::Display for StreamReplaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Search(error) => error.fmt(f),
+            Self::Sink(reason) => write!(f, "stream publish failed: {reason}"),
+            Self::InvalidUtf8 => f.write_str("invalid UTF-8 in streaming replace"),
+            Self::OffsetOverflow => f.write_str("streaming replacement offset overflow"),
+        }
+    }
+}
+
+impl std::error::Error for StreamReplaceError {}
+
+impl From<SearchError> for StreamReplaceError {
+    fn from(error: SearchError) -> Self {
+        Self::Search(error)
+    }
+}
+
+struct StyleCursor<'a> {
+    orig_runs: &'a [DocStyleSpan],
+    links: Vec<String>,
+    run_idx: usize,
+    cur_src: u64,
+    cur_dst: u64,
+    out_runs: Vec<DocStyleSpan>,
+}
+
+impl<'a> StyleCursor<'a> {
+    fn new(styles: &'a StyleMap) -> Self {
+        Self {
+            orig_runs: styles.runs(),
+            links: styles.links().to_vec(),
+            run_idx: 0,
+            cur_src: 0,
+            cur_dst: 0,
+            out_runs: Vec::new(),
+        }
+    }
+
+    fn push_coalesced(&mut self, span: DocStyleSpan) {
+        if span.start >= span.end || span.style.is_default() {
+            return;
+        }
+        if let Some(last) = self.out_runs.last_mut() {
+            if last.end == span.start && last.style == span.style {
+                last.end = span.end;
+                return;
+            }
+        }
+        self.out_runs.push(span);
+    }
+
+    fn emit_kept(&mut self, len: u64) -> Result<(), StreamReplaceError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let src_start = self.cur_src;
+        let src_end = src_start
+            .checked_add(len)
+            .ok_or(StreamReplaceError::OffsetOverflow)?;
+        if !self.orig_runs.is_empty() {
+            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].end <= src_start
+            {
+                self.run_idx += 1;
+            }
+            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].start < src_end
+            {
+                let run = &self.orig_runs[self.run_idx];
+                let ov_start = run.start.max(src_start);
+                let ov_end = run.end.min(src_end);
+                self.push_coalesced(DocStyleSpan {
+                    start: self.cur_dst + (ov_start - src_start),
+                    end: self.cur_dst + (ov_end - src_start),
+                    style: run.style,
+                });
+                if run.end <= src_end {
+                    self.run_idx += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        self.cur_src = src_end;
+        self.cur_dst = self
+            .cur_dst
+            .checked_add(len)
+            .ok_or(StreamReplaceError::OffsetOverflow)?;
+        Ok(())
+    }
+
+    fn emit_match(&mut self, needle_len: u64, rep_len: u64) -> Result<(), StreamReplaceError> {
+        let src_start = self.cur_src;
+        let src_end = src_start
+            .checked_add(needle_len)
+            .ok_or(StreamReplaceError::OffsetOverflow)?;
+        if !self.orig_runs.is_empty() {
+            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].end <= src_start
+            {
+                self.run_idx += 1;
+            }
+            if rep_len > 0 {
+                if let Some(run) = self.orig_runs.get(self.run_idx) {
+                    if run.start <= src_start && run.end >= src_end {
+                        let dst_end = self
+                            .cur_dst
+                            .checked_add(rep_len)
+                            .ok_or(StreamReplaceError::OffsetOverflow)?;
+                        self.push_coalesced(DocStyleSpan {
+                            start: self.cur_dst,
+                            end: dst_end,
+                            style: run.style,
+                        });
+                    }
+                }
+            }
+            while self.run_idx < self.orig_runs.len() && self.orig_runs[self.run_idx].end <= src_end {
+                self.run_idx += 1;
+            }
+        }
+        self.cur_src = src_end;
+        self.cur_dst = self
+            .cur_dst
+            .checked_add(rep_len)
+            .ok_or(StreamReplaceError::OffsetOverflow)?;
+        Ok(())
+    }
+
+    fn finish(self) -> StyleMap {
+        if self.out_runs.is_empty() {
+            StyleMap::empty()
+        } else {
+            StyleMap::normalize_runs(self.out_runs, self.links)
+        }
+    }
+}
+
+fn drain_output_chunks(
+    out_buf: &mut Zeroizing<Vec<u8>>,
+    max_chunk_bytes: usize,
+    flush_all: bool,
+    emit_chunk: &mut impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), StreamReplaceError> {
+    loop {
+        if out_buf.is_empty() {
+            break;
+        }
+        if !flush_all && out_buf.len() < max_chunk_bytes {
+            break;
+        }
+        let mut take = out_buf.len().min(max_chunk_bytes);
+        if take == 0 {
+            break;
+        }
+        let tail_start = take.saturating_sub(4);
+        let check_from = if let Some(rel) = (0..=tail_start)
+            .rev()
+            .take(4)
+            .find(|&pos| (out_buf[pos] & 0xC0) != 0x80)
+        {
+            rel
+        } else {
+            tail_start
+        };
+        if let Err(err) = core::str::from_utf8(&out_buf[check_from..take]) {
+            let valid = check_from + err.valid_up_to();
+            if valid == 0 {
+                if flush_all {
+                    return Err(StreamReplaceError::InvalidUtf8);
+                }
+                break;
+            }
+            if !flush_all && err.error_len().is_some() {
+                return Err(StreamReplaceError::InvalidUtf8);
+            }
+            if flush_all {
+                return Err(StreamReplaceError::InvalidUtf8);
+            }
+            take = valid;
+        }
+        emit_chunk(&out_buf[..take]).map_err(StreamReplaceError::Sink)?;
+        out_buf.drain(..take);
+    }
+    Ok(())
+}
+
+/// Streams a flushed [`Spine`], replaces every non-overlapping occurrence of `needle` with
+/// `replacement` in bounded memory (independent of match count), and invokes `emit_chunk` for each
+/// `<= max_chunk_bytes` valid UTF-8 output chunk (`Block 7`, `OQ-32`).
+pub fn stream_replace_chunks<R: SegmentSource>(
+    spine: &Spine,
+    sources: &OpenSources,
+    needle: &[u8],
+    replacement: &[u8],
+    max_chunk_bytes: usize,
+    source: &mut R,
+    mut emit_chunk: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<StreamReplaceResult, StreamReplaceError> {
+    if core::str::from_utf8(needle).is_err() || core::str::from_utf8(replacement).is_err() {
+        return Err(StreamReplaceError::InvalidUtf8);
+    }
+    if needle.len() > MAX_SEARCH_NEEDLE_BYTES {
+        return Err(SearchError::NeedleTooLong {
+            limit: MAX_SEARCH_NEEDLE_BYTES,
+        }
+        .into());
+    }
+    if needle.is_empty() || max_chunk_bytes < 4 {
+        return Ok(StreamReplaceResult {
+            count: 0,
+            first_match_start: None,
+            final_caret: 0,
+            styles: spine.styles().clone(),
+        });
+    }
+
+    let total_len = spine.len();
+    let m = needle.len();
+    let keep = m - 1;
+    let rep_len = replacement.len() as u64;
+    let needle_len = m as u64;
+    let first_byte = needle[0];
+    let last_byte = needle[m - 1];
+
+    let mut cached: Option<(SegmentId, Zeroizing<Vec<u8>>)> = None;
+    let mut holdback: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(keep + SCAN_WINDOW_BYTES as usize));
+    let mut out_buf: Zeroizing<Vec<u8>> =
+        Zeroizing::new(Vec::with_capacity(max_chunk_bytes.saturating_add(4096)));
+    let mut style_cursor = StyleCursor::new(spine.styles());
+
+    let mut count = 0usize;
+    let mut first_match_start: Option<u64> = None;
+    let mut final_caret = 0u64;
+    let mut doc_pos = 0u64;
+    let mut window_start = 0u64;
+
+    while window_start < total_len {
+        let window_end = window_start
+            .saturating_add(SCAN_WINDOW_BYTES)
+            .min(total_len);
+        let spans = spine.spans_in(window_start, window_end);
+        if spans.is_empty() {
+            break;
+        }
+        for span in spans {
+            let span_offset = span.offset();
+            let slab = span.slab();
+            let span_end = span_offset.saturating_add(u64::from(slab.len()));
+            if span_end <= doc_pos {
+                continue;
+            }
+            let skip = usize::try_from(doc_pos.saturating_sub(span_offset)).unwrap_or(0);
+            let segment = match sources.locate(slab.segment()) {
+                Location::Sealed { segment } => segment,
+                Location::Open { .. } | Location::Unknown => {
+                    return Err(SearchError::UnknownSource {
+                        source: slab.segment(),
+                    }
+                    .into());
+                }
+            };
+            let reuse = cached.as_ref().is_some_and(|(id, _)| *id == segment);
+            if !reuse {
+                drop(cached.take());
+                let bytes = source
+                    .load(segment)
+                    .map_err(|message| SearchError::Source { segment, message })?;
+                cached = Some((segment, Zeroizing::new(bytes)));
+            }
+            let seg_bytes = &cached.as_ref().expect("just populated").1;
+            let start = (slab.start() as usize).saturating_add(skip);
+            let end = slab.end() as usize;
+            if end > seg_bytes.len() || start > end {
+                return Err(SearchError::SpanOutOfBounds {
+                    segment,
+                    start: slab.start(),
+                    end: slab.end(),
+                    actual_len: seg_bytes.len(),
+                }
+                .into());
+            }
+
+            let mut slice = &seg_bytes[start..end];
+            doc_pos = doc_pos.saturating_add(slice.len() as u64);
+
+            // Feed in bounded sub-slices so `holdback` and `out_buf` stay O(max_chunk_bytes).
+            while !slice.is_empty() {
+                let take_in = slice.len().min(SCAN_WINDOW_BYTES as usize);
+                holdback.extend_from_slice(&slice[..take_in]);
+                slice = &slice[take_in..];
+
+                let mut scan = 0usize;
+                let mut emitted_up_to = 0usize;
+                while scan + m <= holdback.len() {
+                    if holdback[scan] == first_byte
+                        && holdback[scan + m - 1] == last_byte
+                        && &holdback[scan..scan + m] == needle
+                    {
+                        let kept_len = scan - emitted_up_to;
+                        if kept_len > 0 {
+                            out_buf.extend_from_slice(&holdback[emitted_up_to..scan]);
+                            style_cursor.emit_kept(kept_len as u64)?;
+                            drain_output_chunks(
+                                &mut out_buf,
+                                max_chunk_bytes,
+                                false,
+                                &mut emit_chunk,
+                            )?;
+                        }
+                        if first_match_start.is_none() {
+                            first_match_start = Some(style_cursor.cur_src);
+                        }
+                        count = count
+                            .checked_add(1)
+                            .ok_or(SearchError::MatchCountOverflow)?;
+                        out_buf.extend_from_slice(replacement);
+                        style_cursor.emit_match(needle_len, rep_len)?;
+                        final_caret = style_cursor.cur_dst;
+                        drain_output_chunks(&mut out_buf, max_chunk_bytes, false, &mut emit_chunk)?;
+                        scan += m;
+                        emitted_up_to = scan;
+                    } else {
+                        scan += 1;
+                    }
+                }
+
+                let keep_from = if emitted_up_to == holdback.len() || keep == 0 {
+                    holdback.len()
+                } else {
+                    emitted_up_to.max(holdback.len().saturating_sub(keep))
+                };
+                if keep_from > emitted_up_to {
+                    out_buf.extend_from_slice(&holdback[emitted_up_to..keep_from]);
+                    style_cursor.emit_kept((keep_from - emitted_up_to) as u64)?;
+                    drain_output_chunks(&mut out_buf, max_chunk_bytes, false, &mut emit_chunk)?;
+                }
+                holdback.drain(..keep_from);
+            }
+        }
+        window_start = doc_pos.max(window_end);
+    }
+
+    if !holdback.is_empty() {
+        out_buf.extend_from_slice(&holdback);
+        style_cursor.emit_kept(holdback.len() as u64)?;
+        holdback.clear();
+    }
+    drain_output_chunks(&mut out_buf, max_chunk_bytes, true, &mut emit_chunk)?;
+
+    Ok(StreamReplaceResult {
+        count,
+        first_match_start,
+        final_caret,
+        styles: style_cursor.finish(),
+    })
 }
 
 #[cfg(test)]

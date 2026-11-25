@@ -129,6 +129,18 @@ impl Face {
         })
     }
 
+    /// The font's design ascender in font units.
+    #[must_use]
+    pub fn ascender(&self) -> i16 {
+        self.ascender
+    }
+
+    /// The font's design descender in font units.
+    #[must_use]
+    pub fn descender(&self) -> i16 {
+        self.descender
+    }
+
     /// The font's design units per em — the denominator every advance is scaled from.
     #[must_use]
     pub fn units_per_em(&self) -> u16 {
@@ -164,14 +176,14 @@ impl Face {
     }
 
     /// Scales `units` font units to logical units at `style`.
-    fn scaled(&self, units: i64, style: Style) -> Fixed {
+    pub(crate) fn scaled(&self, units: i64, style: Style) -> Fixed {
         let numerator = units * style.size_milli() * 64;
         let denominator = i64::from(self.units_per_em) * 1_000;
         Fixed::from_64ths(numerator / denominator)
     }
 
     /// A hard break has no width: it ends a line rather than occupying one.
-    fn is_break(cluster: &str) -> bool {
+    pub(crate) fn is_break(cluster: &str) -> bool {
         matches!(cluster, "\n" | "\r" | "\r\n")
     }
 }
@@ -201,10 +213,10 @@ impl Shaper for Face {
 }
 
 /// The sfnt table directory: tag → (offset, length), validated against the file's own length.
-struct TableDirectory(BTreeMap<[u8; 4], (usize, usize)>);
+pub(crate) struct TableDirectory(BTreeMap<[u8; 4], (usize, usize)>);
 
 impl TableDirectory {
-    fn parse(bytes: &[u8]) -> Result<Self, FaceError> {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, FaceError> {
         let version = u32::at(bytes, 0).ok_or(FaceError::Truncated)?;
         // TrueType (`0x00010000`), CFF (`OTTO`), and Apple's `true`/`ttcf` are all sfnt containers.
         let sfnt =
@@ -232,12 +244,14 @@ impl TableDirectory {
         Ok(Self(tables))
     }
 
-    fn get<'a>(&self, bytes: &'a [u8], tag: &[u8; 4]) -> Result<&'a [u8], FaceError> {
+    pub(crate) fn get<'a>(&self, bytes: &'a [u8], tag: &[u8; 4]) -> Result<&'a [u8], FaceError> {
         let missing = match tag {
             b"head" => "head",
             b"hhea" => "hhea",
             b"hmtx" => "hmtx",
             b"maxp" => "maxp",
+            b"loca" => "loca",
+            b"glyf" => "glyf",
             _ => "cmap",
         };
         let (offset, length) = *self.0.get(tag).ok_or(FaceError::MissingTable(missing))?;
@@ -338,7 +352,7 @@ fn read_cmap_format_12(cmap: &[u8], offset: usize) -> Result<BTreeMap<u32, u16>,
 }
 
 /// A big-endian read that returns `None` rather than panicking on a short table.
-trait ReadAt {
+pub(crate) trait ReadAt {
     fn at(bytes: &[u8], offset: usize) -> Option<Self>
     where
         Self: Sized;

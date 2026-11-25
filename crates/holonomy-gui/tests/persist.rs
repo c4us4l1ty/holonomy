@@ -553,3 +553,74 @@ fn replace_all_commits_one_witness_and_undo_persists() {
     let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens undo");
     assert_eq!(text(&mut open_window(&reopened)), "one fish, one bird");
 }
+
+#[test]
+fn document_witness_history_bookmarks_diff_search_and_restore_persist() {
+    let path = temp_path("history-restore-persist");
+    let document = create(&path.0);
+    let mut typing = Typing::new(document.sink(), store::CAPACITY);
+    typing.insert(b"chapter one alpha\n").unwrap();
+    typing.flush().unwrap();
+    document.add_bookmark(1, 1_700_000_010, "Chapter One").unwrap();
+
+    typing.insert(b"chapter two beta\n").unwrap();
+    typing.flush().unwrap();
+    typing.delete(8, 17).unwrap(); // delete "alpha\ncha" across boundary
+    typing.flush().unwrap();
+
+    assert_eq!(document.witness_history().len(), 4);
+    assert_eq!(document.bookmarks().len(), 1);
+    assert_eq!(document.bookmarks()[0].name, "Chapter One");
+
+    let diff = document.diff_witnesses(1, 3).unwrap();
+    assert!(!diff.is_empty());
+
+    let hist_hits = document.search_history("alpha").unwrap();
+    assert_eq!(hist_hits.len(), 2); // witness 1 and witness 2 had "alpha"
+    assert_eq!(hist_hits[0].witness_sequence, 1);
+    assert_eq!(hist_hits[1].witness_sequence, 2);
+
+    // Restore back to witness 1 via Typing::restore_spine and verify reopen matches witness 1.
+    let w1 = document.spine_at_witness(1).unwrap();
+    typing.restore_spine(w1).unwrap();
+    drop(typing);
+    drop(document);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens restored");
+    assert_eq!(text(&mut open_window(&reopened)), "chapter one alpha\n");
+    assert_eq!(reopened.bookmarks().len(), 1);
+    assert_eq!(reopened.witness_history().len(), 5);
+    reopened.verify().unwrap();
+}
+
+#[test]
+fn dense_streaming_replace_all_over_real_document_persists_and_undoes() {
+    let path = temp_path("dense-streaming-persist");
+    let document = create(&path.0);
+    let mut typing = Typing::new(document.sink(), store::CAPACITY);
+    let payload = "ab ".repeat(17_000);
+    typing.insert(payload.as_bytes()).unwrap();
+    typing.flush().unwrap();
+    let original = typing.spine().clone();
+    let before_witnesses = document.witness_count();
+
+    let mut source = document.source();
+    let count = typing.replace_all(b"ab", b"XYZ", &mut source).unwrap();
+    assert_eq!(count, 17_000);
+    assert_eq!(document.witness_count(), before_witnesses + 1);
+    drop(source);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens dense");
+    assert_eq!(text(&mut open_window(&reopened)), "XYZ ".repeat(17_000));
+    reopened.verify().unwrap();
+    drop(reopened);
+
+    assert!(typing.undo().unwrap());
+    assert!(typing.spine().ptr_eq(&original));
+    typing.flush().unwrap();
+    drop(typing);
+    drop(document);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopens dense undo");
+    assert_eq!(text(&mut open_window(&reopened)), payload);
+}

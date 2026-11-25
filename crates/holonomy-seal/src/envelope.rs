@@ -56,8 +56,8 @@ pub const WRAPPED_SK_BYTES: usize = WRAPPED_SK_PLAINTEXT_BYTES + POLY1305_TAG_BY
 /// key is a second thing to leak. `Debug` prints the word "redacted", never bytes.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct HybridDecapsulationKey {
-    ml_kem: [u8; ML_KEM_1024_SEED_BYTES],
-    x25519: [u8; X25519_SK_BYTES],
+    pub(crate) ml_kem: [u8; ML_KEM_1024_SEED_BYTES],
+    pub(crate) x25519: [u8; X25519_SK_BYTES],
 }
 
 impl core::fmt::Debug for HybridDecapsulationKey {
@@ -88,9 +88,9 @@ pub struct HybridCiphertext {
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SharedSecrets {
     /// ML-KEM shared secret.
-    pq: [u8; 32],
+    pub(crate) pq: [u8; 32],
     /// X25519 shared secret.
-    ecc: [u8; 32],
+    pub(crate) ecc: [u8; 32],
 }
 
 /// Envelope-operation failure. Coarse on purpose: a decryption oracle needs vocabulary, and

@@ -46,6 +46,26 @@ pub struct Appended {
 pub type ReplacementBuilder<'a> =
     dyn FnMut(&[SegmentId]) -> Result<(Vec<Slab>, StyleMap), String> + 'a;
 
+/// Streams sequential non-empty UTF-8 plaintext chunks directly to a backing sink and commits all
+/// produced segments alongside the final manifest under one witness.
+pub trait StreamSegmentWriter {
+    /// Seals one non-empty plaintext chunk (`<= 65_536` bytes) directly to the log and returns the
+    /// assigned [`SegmentId`].
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message if the chunk fails encoding, validation, or durable writing.
+    fn write_chunk(&mut self, plaintext: &[u8]) -> Result<SegmentId, String>;
+
+    /// Commits every chunk written so far together with `slabs` and `styles` under a single
+    /// witness.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message if the final manifest or witness cannot be durably written.
+    fn finish(self: Box<Self>, slabs: &[Slab], styles: &StyleMap) -> Result<(), String>;
+}
+
 /// The world-line, as the commit boundary needs it: append one sealed segment and commit it.
 ///
 /// A trait rather than a concrete type for the same reason [`crate::SegmentSource`] is one: the
@@ -139,6 +159,25 @@ pub trait SegmentSink {
         _build: &mut ReplacementBuilder<'_>,
     ) -> Result<(), String> {
         Err("atomic replacement is not supported by this sink".to_owned())
+    }
+
+    /// Whether [`Self::begin_stream_publish`] is supported by this sink.
+    fn supports_stream_publish(&self) -> bool {
+        false
+    }
+
+    /// Begins a bounded-memory streaming multi-segment publish transaction (Block 7 / Block 10).
+    ///
+    /// Callers stream sequential `<= 64 KiB` plaintext chunks through the returned
+    /// [`StreamSegmentWriter`] and publish the resulting slabs + [`StyleMap`] under one witness via
+    /// [`StreamSegmentWriter::finish`]. Dropping the writer without calling `finish` leaves no
+    /// witness committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if streaming publish is unsupported by this sink or cannot be initialized.
+    fn begin_stream_publish(&mut self) -> Result<Box<dyn StreamSegmentWriter + '_>, String> {
+        Err("streaming publish is not supported by this sink".to_owned())
     }
 }
 
