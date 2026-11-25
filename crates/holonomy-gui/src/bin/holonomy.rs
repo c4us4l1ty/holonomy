@@ -814,6 +814,44 @@ fn classify_trip(outcome: Option<ReaperOutcome>, wiped_in_place: usize) -> Ended
     }
 }
 
+#[cfg(unix)]
+static TUI_SUSPEND_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(unix)]
+static TUI_SUSPEND_INIT: std::sync::Once = std::sync::Once::new();
+
+#[cfg(unix)]
+extern "C" fn on_tui_suspend_signal(_sig: libc::c_int) {
+    TUI_SUSPEND_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_tui_suspend_signals() {
+    TUI_SUSPEND_INIT.call_once(|| {
+        // SAFETY: async-signal-safe atomic store registered on POSIX suspend/power signals.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_tui_suspend_signal as *const () as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = 0;
+            let _ = libc::sigaction(libc::SIGUSR2, &sa, std::ptr::null_mut());
+            #[cfg(target_os = "linux")]
+            let _ = libc::sigaction(libc::SIGPWR, &sa, std::ptr::null_mut());
+        }
+    });
+}
+
+fn take_tui_suspend_signal() -> bool {
+    #[cfg(unix)]
+    {
+        TUI_SUSPEND_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn run(
     path: &Path,
     document: &Document,
@@ -844,11 +882,16 @@ fn run(
     let mut search: Option<SearchPrompt> = None;
     let mut history: Option<TuiHistory> = None;
     let mut panel: Option<(LockCapability, Option<u64>, Option<Instant>)> = None;
+    #[cfg(unix)]
+    install_tui_suspend_signals();
     print!("\x1b[?25l\x1b[2J");
     // What the screen currently shows, so an unchanged view is not written again (D-68).
     // `None` means "nothing has been written yet", which is what makes the first pass paint.
     let mut shown: Option<Shown> = None;
     loop {
+        if take_tui_suspend_signal() {
+            tripwire.fire(TripReason::Suspend);
+        }
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
             return Ok(wipe_quiescent(&mut app, document, &arenas, reaper));
         }
@@ -2118,5 +2161,14 @@ mod tests {
                 usb_key: Some(PathBuf::from("key.bin")),
             })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_suspend_signal_latches_and_clears() {
+        assert!(!take_tui_suspend_signal());
+        on_tui_suspend_signal(libc::SIGUSR2);
+        assert!(take_tui_suspend_signal());
+        assert!(!take_tui_suspend_signal());
     }
 }

@@ -734,9 +734,39 @@ fn sixty_year_21900_witness_scrub_and_reverify() {
 
     let scrub_start = Instant::now();
     let w_y1 = reopened.spine_at_witness(365).expect("y1 spine");
+    let w_y10 = reopened.spine_at_witness(3_650).expect("y10 spine");
     let w_y30 = reopened.spine_at_witness(10_950).expect("y30 spine");
     let w_y60 = reopened.spine_at_witness(DAYS).expect("y60 spine");
-    assert!(w_y1.len() < w_y30.len() && w_y30.len() < w_y60.len());
+    assert!(w_y1.len() < w_y10.len() && w_y10.len() < w_y30.len() && w_y30.len() < w_y60.len());
+
+    // Scrub through years 1, 10, 30, 60 inside a live `Editor` + `ResidentSet`, verifying strict
+    // memory-budget enforcement at every history point (`ROADMAP.md` Block 8 Gate 2).
+    {
+        use holonomy_eye::{Fixed, FontSet, View};
+        let fonts = FontSet::embedded(14).expect("fonts");
+        let residency =
+            ResidentSet::new(reopened.source(), store::BUDGET, store::SLACK).expect("residency");
+        let mut editor = Editor::new(
+            Typing::resume(reopened.sink(), w_y60.clone(), store::CAPACITY),
+            residency,
+            fonts,
+            Fixed::units(680),
+            Fixed::units(800),
+        );
+        editor.set_view(View::IDENTITY);
+        for sp in [w_y1.clone(), w_y10, w_y30.clone(), w_y60.clone()] {
+            editor.restore_spine(sp).expect("scrub spine");
+            let frame = editor.frame().expect("frame after scrub");
+            assert!(!frame.text().is_empty());
+            assert!(
+                editor.residency().resident_bytes() <= store::BUDGET,
+                "60-year witness scrub exceeded ResidentSet budget ({} > {})",
+                editor.residency().resident_bytes(),
+                store::BUDGET
+            );
+        }
+    }
+
     let diff = reopened
         .diff_witnesses(10_950, DAYS)
         .expect("diff y30->y60");
@@ -770,8 +800,7 @@ fn sixty_year_21900_witness_scrub_and_reverify() {
 #[ignore = "30M-word cold-open and bounded residency benchmark; run in release CI `persist` job"]
 fn cold_open_30m_word_document_stays_under_residency_budget() {
     use holonomy_eye::{Fixed, FontSet, View};
-    use holonomy_shell::Editor;
-    use holonomy_text::{ResidentSet, SegmentSink, StyleMap};
+    use holonomy_text::{SegmentSink, StyleMap};
     use std::time::Instant;
 
     let path = fast_temp_path("30m-words");
@@ -841,4 +870,289 @@ fn cold_open_30m_word_document_stays_under_residency_budget() {
         resident,
         segments
     );
+}
+
+#[test]
+fn every_toolbar_action_round_trips_byte_identical_style_state() {
+    use holonomy_eye::{FontSet, View};
+    use holonomy_gui::canvas::{apply_toolbar_action, PixelSurface, ToolbarAction};
+    use holonomy_shell::{Intent, QUIET_MD_THEME};
+
+    let path = temp_path("toolbar-roundtrip");
+    let doc = create(&path.0);
+    let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+    let surface = PixelSurface::new(fonts.clone(), View::IDENTITY, 1_120, 760);
+    let (lw, lh) = surface.logical_editor_extent();
+    let residency = ResidentSet::new(doc.source(), store::BUDGET, store::SLACK).expect("residency");
+    let mut editor = Editor::new(
+        Typing::resume(doc.sink(), doc.spine().expect("spine"), store::CAPACITY),
+        residency,
+        fonts,
+        lw,
+        lh,
+    );
+    editor.set_view(View::IDENTITY);
+    let mut app = App::new(editor, Keymap::new(lh), surface);
+
+    let prose = concat!(
+        "Title Line\n",
+        "Heading Two\n",
+        "Heading Three\n",
+        "Serif Sized Bold Italic Under Strike Code Linked Span\n",
+        "Bullet Item Centered\n",
+        "Ordered Item Quoted\n",
+        "---",
+    );
+    app.editor()
+        .apply(Intent::Type(prose.to_owned()))
+        .expect("type prose");
+
+    let lines: Vec<(u64, u64)> = {
+        let mut out = Vec::new();
+        let mut start = 0u64;
+        for part in prose.split('\n') {
+            let end = start + part.len() as u64;
+            out.push((start, end));
+            start = end + 1;
+        }
+        out
+    };
+
+    // Exercise every formatting ToolbarAction + hyperlink across distinct ranges.
+    app.editor()
+        .select_range(lines[0].0, lines[0].1)
+        .expect("line 0");
+    apply_toolbar_action(&mut app, ToolbarAction::Heading1).expect("H1");
+
+    app.editor()
+        .select_range(lines[1].0, lines[1].1)
+        .expect("line 1");
+    apply_toolbar_action(&mut app, ToolbarAction::Heading2).expect("H2");
+
+    app.editor()
+        .select_range(lines[2].0, lines[2].1)
+        .expect("line 2");
+    apply_toolbar_action(&mut app, ToolbarAction::Heading3).expect("H3");
+
+    let l3 = lines[3].0;
+    app.editor().select_range(l3, l3 + 5).expect("serif");
+    apply_toolbar_action(&mut app, ToolbarAction::CycleFamily).expect("Serif");
+
+    app.editor().select_range(l3 + 6, l3 + 11).expect("size");
+    apply_toolbar_action(&mut app, ToolbarAction::CycleSize).expect("17px");
+
+    app.editor().select_range(l3 + 12, l3 + 16).expect("bold");
+    apply_toolbar_action(&mut app, ToolbarAction::ToggleBold).expect("Bold");
+
+    app.editor().select_range(l3 + 17, l3 + 23).expect("italic");
+    apply_toolbar_action(&mut app, ToolbarAction::ToggleItalic).expect("Italic");
+
+    app.editor().select_range(l3 + 24, l3 + 29).expect("under");
+    apply_toolbar_action(&mut app, ToolbarAction::ToggleUnderline).expect("Underline");
+
+    app.editor().select_range(l3 + 30, l3 + 36).expect("strike");
+    apply_toolbar_action(&mut app, ToolbarAction::ToggleStrike).expect("Strike");
+
+    app.editor().select_range(l3 + 37, l3 + 41).expect("code");
+    apply_toolbar_action(&mut app, ToolbarAction::ToggleCode).expect("Code");
+
+    app.editor().select_range(l3 + 42, lines[3].1).expect("link");
+    app.editor()
+        .apply(Intent::SetLink(Some("https://holonomy.invalid/l3".to_owned())))
+        .expect("Link");
+
+    app.editor()
+        .select_range(lines[4].0, lines[4].1)
+        .expect("bullet + align");
+    apply_toolbar_action(&mut app, ToolbarAction::ToggleBullet).expect("Bullet");
+    apply_toolbar_action(&mut app, ToolbarAction::CycleAlign).expect("Align Center");
+
+    app.editor()
+        .select_range(lines[5].0, lines[5].1)
+        .expect("ordered + quote");
+    apply_toolbar_action(&mut app, ToolbarAction::ToggleNumbered).expect("Numbered");
+    apply_toolbar_action(&mut app, ToolbarAction::CycleQuote).expect("Quote");
+
+    app.editor()
+        .select_range(lines[6].0, lines[6].1)
+        .expect("hr");
+    apply_toolbar_action(&mut app, ToolbarAction::ToggleHr).expect("HR");
+
+    assert!(app.draw().expect("paint styled document"));
+    app.editor().flush().expect("seal styled manifest");
+    let expected_styles = app.editor().typing().spine().styles().clone();
+    assert!(!expected_styles.is_empty());
+    assert_eq!(
+        expected_styles.links(),
+        &["https://holonomy.invalid/l3".to_owned()]
+    );
+    drop(app);
+    drop(doc);
+
+    let reopened = Document::open(&path.0, PASSPHRASE).expect("reopen styled doc");
+    assert!(reopened.verify().is_ok());
+    let reopened_spine = reopened.spine().expect("reopened spine");
+    assert_eq!(reopened_spine.styles(), &expected_styles);
+    assert_eq!(all_bytes(&reopened), prose.as_bytes());
+}
+
+#[test]
+fn formatting_torture_corpus_across_slab_boundaries_single_undo() {
+    use holonomy_eye::{FontSet, View};
+    use holonomy_shell::{Intent, QUIET_MD_THEME};
+    use holonomy_text::{Alignment, FontFamily, Heading, StylePatch};
+
+    let path = temp_path("format-torture");
+    let doc = create(&path.0);
+
+    // Build 6 explicit sealed slabs (`>= 6` Slab nodes) with mixed ASCII, CJK, RTL Arabic, and emoji
+    // so formatting spans cross real encrypted slab boundaries.
+    let mut typing = Typing::new(doc.sink(), store::CAPACITY);
+    let mut chunk = String::new();
+    for i in 0..6 {
+        chunk.clear();
+        chunk.push_str(&format!("Slab-{i}: Alpha βeta العربية 日本語 🦀 "));
+        while chunk.len() < store::CAPACITY / 2 {
+            chunk.push_str("prose-boundary-segment ");
+        }
+        chunk.push('\n');
+        typing.insert(chunk.as_bytes()).expect("insert slab chunk");
+        typing.flush().expect("seal distinct slab leaf");
+    }
+    let spine = typing.spine().clone();
+    assert!(spine.slab_count() >= 6, "need >= 6 slabs, got {}", spine.slab_count());
+    let baseline_styles = spine.styles().clone();
+    assert!(baseline_styles.is_empty());
+    drop(typing);
+
+    let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+    let residency = ResidentSet::new(doc.source(), store::BUDGET, store::SLACK).expect("residency");
+    let mut editor = Editor::new(
+        Typing::resume(doc.sink(), spine, store::CAPACITY),
+        residency,
+        fonts,
+        Fixed::units(680),
+        Fixed::units(800),
+    );
+    editor.set_view(View::IDENTITY);
+
+    let total_len = editor.document_len();
+    let s1 = editor.typing().spine().slab_span(1).expect("slab 1");
+    let s3 = editor.typing().spine().slab_span(3).expect("slab 3");
+    let s4 = editor.typing().spine().slab_span(4).expect("slab 4");
+    let cross_lo = s1.offset() + (s1.len() / 2);
+    let cross_hi = (s4.offset() + (s4.len() / 2)).min(total_len);
+
+    // Apply multiple overlapping cross-slab formats as ONE single-undo root transaction.
+    let changed = editor
+        .apply_styles_batch(&[
+            (
+                cross_lo,
+                cross_hi,
+                StylePatch::new()
+                    .with_bold(true)
+                    .with_family(FontFamily::Serif),
+            ),
+            (
+                s1.offset(),
+                s3.offset() + 64,
+                StylePatch::new()
+                    .with_italic(true)
+                    .with_heading(Heading::H2)
+                    .with_alignment(Alignment::Center),
+            ),
+            (
+                s3.offset().saturating_sub(32),
+                cross_hi,
+                StylePatch::new().with_underline(true),
+            ),
+        ])
+        .expect("cross-slab batch format");
+    assert!(changed);
+    let formatted_styles = editor.typing().spine().styles().clone();
+    assert!(formatted_styles.runs().len() >= 3);
+    editor.flush().expect("persist cross-slab formatted spine");
+
+    // Reopen independently to confirm multi-slab formatting persisted cleanly.
+    let reopened_fmt = Document::open(&path.0, PASSPHRASE).expect("reopen formatted");
+    assert_eq!(reopened_fmt.spine().expect("spine").styles(), &formatted_styles);
+    drop(reopened_fmt);
+
+    // Single Undo must revert EVERY cross-slab style span in O(1) without leaving stale runs.
+    assert!(editor.apply(Intent::Undo).is_ok());
+    assert_eq!(editor.typing().spine().styles(), &baseline_styles);
+
+    // Single Redo restores the exact same cross-slab StyleMap.
+    assert!(editor.apply(Intent::Redo).is_ok());
+    assert_eq!(editor.typing().spine().styles(), &formatted_styles);
+}
+
+#[test]
+#[ignore = "24-year (8,760 witness) fresh-user lifecycle drill; run in CI and qualify script"]
+fn twenty_four_year_fresh_user_lifecycle_drill() {
+    const DAYS: u64 = 24 * 365; // 8,760 daily witnesses
+    let dir = fast_temp_path("24yr-dir");
+    let _ = fs::remove_file(&dir.0);
+    let root = dir.0.with_extension("drill");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create temp drill root");
+
+    let original = root.join("alice.wavefunction");
+    let backup = root.join("backup.wavefunction");
+    let compacted = root.join("alice-compacted.wavefunction");
+
+    // 1. Fresh creation + 24 years (8,760 daily witnesses).
+    let doc = Document::create(&original, PASSPHRASE).expect("create 24-year doc");
+    let entries: Vec<String> = (1..DAYS).map(|d| format!("year24-day-{d}\n")).collect();
+    doc.append_witnessed_entries(entries.iter().map(String::as_bytes))
+        .expect("append 8,759 witnesses");
+    let spine = doc.spine().expect("spine");
+    let mut typing = Typing::resume(doc.sink(), spine, store::CAPACITY);
+    let len = typing.document_len();
+    typing
+        .insert_at(len, format!("year24-day-{DAYS}\n").as_bytes())
+        .expect("final day");
+    typing.flush().expect("seal final day");
+    doc.add_bookmark(DAYS, 1_764_000_000, "anniversary-24")
+        .expect("bookmark year 24");
+    drop(typing);
+    assert_eq!(doc.verify().expect("verify original").segments_verified, DAYS);
+
+    // 2. Back up container, wipe original file completely, reopen backup in clean state.
+    fs::copy(&original, &backup).expect("backup copy");
+    drop(doc);
+    fs::remove_file(&original).expect("wipe original");
+
+    let restored =
+        Document::open(&backup, PASSPHRASE).expect("reopen backup with passphrase alone");
+    assert_eq!(restored.witness_history().len() as u64, DAYS + 1);
+    assert_eq!(restored.bookmarks().len(), 1);
+    assert_eq!(
+        restored.verify().expect("verify restored").segments_verified,
+        DAYS
+    );
+
+    // 3. Continue writing + compact + re-verify.
+    let mut t2 = Typing::resume(restored.sink(), restored.spine().expect("spine"), store::CAPACITY);
+    let end2 = t2.document_len();
+    t2.insert_at(end2, b"year25-day-1 continued cleanly\n")
+        .expect("continue typing");
+    t2.flush().expect("seal year 25");
+    drop(t2);
+    assert_eq!(
+        restored
+            .verify()
+            .expect("verify continued")
+            .segments_verified,
+        DAYS + 1
+    );
+
+    let final_doc = restored
+        .compact_to(&compacted, PASSPHRASE)
+        .expect("compact after 24yr lifecycle");
+    drop(restored);
+    assert_eq!(final_doc.verify().expect("verify compacted").segments_verified, 1);
+    drop(final_doc);
+    let _ = fs::remove_dir_all(&root);
+    println!("HOLONOMY_24YR_LIFECYCLE witnesses={} status=ok", DAYS + 2);
 }

@@ -12,6 +12,8 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
@@ -743,9 +745,9 @@ impl KeyboardMap {
         }
     }
 
-    /// Resolves `(keycode, state)` to `(Key, Modifiers)` applying Shift (`col 1`) and CapsLock.
+    /// Resolves `(keycode, state)` to the raw `(keysym, state)` pair applying Shift and CapsLock.
     #[must_use]
-    pub fn translate(&self, keycode: u8, state: u16) -> Option<(Key, Modifiers)> {
+    pub fn translate_keysym(&self, keycode: u8, state: u16) -> Option<(u32, u16)> {
         if keycode < self.min_keycode || self.keysyms_per_keycode == 0 {
             return None;
         }
@@ -764,8 +766,320 @@ impl KeyboardMap {
         let is_ascii_letter = (0x61..=0x7a).contains(&sym0) || (0x41..=0x5a).contains(&sym0);
         let upper = if is_ascii_letter { shift ^ lock } else { shift };
         let sym = if upper && sym1 != 0 { sym1 } else { sym0 };
-        keysym_to_key(sym, state)
+        Some((sym, state))
     }
+
+    /// Resolves `(keycode, state)` to `(Key, Modifiers)` applying Shift (`col 1`) and CapsLock.
+    #[must_use]
+    pub fn translate(&self, keycode: u8, state: u16) -> Option<(Key, Modifiers)> {
+        let (sym, st) = self.translate_keysym(keycode, state)?;
+        keysym_to_key(sym, st)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeadAccent {
+    Grave,
+    Acute,
+    Circumflex,
+    Tilde,
+    Macron,
+    Breve,
+    AboveDot,
+    Diaeresis,
+    Ring,
+    DoubleAcute,
+    Caron,
+    Cedilla,
+    Ogonek,
+}
+
+impl DeadAccent {
+    const fn from_keysym(keysym: u32) -> Option<Self> {
+        match keysym {
+            0xfe50 => Some(Self::Grave),
+            0xfe51 => Some(Self::Acute),
+            0xfe52 => Some(Self::Circumflex),
+            0xfe53 => Some(Self::Tilde),
+            0xfe54 => Some(Self::Macron),
+            0xfe55 => Some(Self::Breve),
+            0xfe56 => Some(Self::AboveDot),
+            0xfe57 => Some(Self::Diaeresis),
+            0xfe58 => Some(Self::Ring),
+            0xfe59 => Some(Self::DoubleAcute),
+            0xfe5a => Some(Self::Caron),
+            0xfe5b => Some(Self::Cedilla),
+            0xfe5c => Some(Self::Ogonek),
+            _ => None,
+        }
+    }
+
+    const fn from_ascii(ch: char) -> Option<Self> {
+        match ch {
+            '`' => Some(Self::Grave),
+            '\'' => Some(Self::Acute),
+            '^' => Some(Self::Circumflex),
+            '~' => Some(Self::Tilde),
+            '"' => Some(Self::Diaeresis),
+            ',' => Some(Self::Cedilla),
+            _ => None,
+        }
+    }
+
+    const fn spacing_char(self) -> char {
+        match self {
+            Self::Grave => '`',
+            Self::Acute => '´',
+            Self::Circumflex => '^',
+            Self::Tilde => '~',
+            Self::Macron => '¯',
+            Self::Breve => '˘',
+            Self::AboveDot => '˙',
+            Self::Diaeresis => '¨',
+            Self::Ring => '˚',
+            Self::DoubleAcute => '˝',
+            Self::Caron => 'ˇ',
+            Self::Cedilla => '¸',
+            Self::Ogonek => '˛',
+        }
+    }
+
+    const fn compose(self, base: char) -> Option<char> {
+        match (self, base) {
+            (Self::Grave, 'a') => Some('à'),
+            (Self::Grave, 'A') => Some('À'),
+            (Self::Grave, 'e') => Some('è'),
+            (Self::Grave, 'E') => Some('È'),
+            (Self::Grave, 'i') => Some('ì'),
+            (Self::Grave, 'I') => Some('Ì'),
+            (Self::Grave, 'o') => Some('ò'),
+            (Self::Grave, 'O') => Some('Ò'),
+            (Self::Grave, 'u') => Some('ù'),
+            (Self::Grave, 'U') => Some('Ù'),
+            (Self::Acute, 'a') => Some('á'),
+            (Self::Acute, 'A') => Some('Á'),
+            (Self::Acute, 'c') => Some('ć'),
+            (Self::Acute, 'C') => Some('Ć'),
+            (Self::Acute, 'e') => Some('é'),
+            (Self::Acute, 'E') => Some('É'),
+            (Self::Acute, 'i') => Some('í'),
+            (Self::Acute, 'I') => Some('Í'),
+            (Self::Acute, 'n') => Some('ń'),
+            (Self::Acute, 'N') => Some('Ń'),
+            (Self::Acute, 'o') => Some('ó'),
+            (Self::Acute, 'O') => Some('Ó'),
+            (Self::Acute, 's') => Some('ś'),
+            (Self::Acute, 'S') => Some('Ś'),
+            (Self::Acute, 'u') => Some('ú'),
+            (Self::Acute, 'U') => Some('Ú'),
+            (Self::Acute, 'y') => Some('ý'),
+            (Self::Acute, 'Y') => Some('Ý'),
+            (Self::Acute, 'z') => Some('ź'),
+            (Self::Acute, 'Z') => Some('Ź'),
+            (Self::Circumflex, 'a') => Some('â'),
+            (Self::Circumflex, 'A') => Some('Â'),
+            (Self::Circumflex, 'e') => Some('ê'),
+            (Self::Circumflex, 'E') => Some('Ê'),
+            (Self::Circumflex, 'i') => Some('î'),
+            (Self::Circumflex, 'I') => Some('Î'),
+            (Self::Circumflex, 'o') => Some('ô'),
+            (Self::Circumflex, 'O') => Some('Ô'),
+            (Self::Circumflex, 'u') => Some('û'),
+            (Self::Circumflex, 'U') => Some('Û'),
+            (Self::Tilde, 'a') => Some('ã'),
+            (Self::Tilde, 'A') => Some('Ã'),
+            (Self::Tilde, 'n') => Some('ñ'),
+            (Self::Tilde, 'N') => Some('Ñ'),
+            (Self::Tilde, 'o') => Some('õ'),
+            (Self::Tilde, 'O') => Some('Õ'),
+            (Self::Macron, 'a') => Some('ā'),
+            (Self::Macron, 'A') => Some('Ā'),
+            (Self::Macron, 'e') => Some('ē'),
+            (Self::Macron, 'E') => Some('Ē'),
+            (Self::Macron, 'i') => Some('ī'),
+            (Self::Macron, 'I') => Some('Ī'),
+            (Self::Macron, 'o') => Some('ō'),
+            (Self::Macron, 'O') => Some('Ō'),
+            (Self::Macron, 'u') => Some('ū'),
+            (Self::Macron, 'U') => Some('Ū'),
+            (Self::Breve, 'a') => Some('ă'),
+            (Self::Breve, 'A') => Some('Ă'),
+            (Self::Breve, 'g') => Some('ğ'),
+            (Self::Breve, 'G') => Some('Ğ'),
+            (Self::AboveDot, 'z') => Some('ż'),
+            (Self::AboveDot, 'Z') => Some('Ż'),
+            (Self::Diaeresis, 'a') => Some('ä'),
+            (Self::Diaeresis, 'A') => Some('Ä'),
+            (Self::Diaeresis, 'e') => Some('ë'),
+            (Self::Diaeresis, 'E') => Some('Ë'),
+            (Self::Diaeresis, 'i') => Some('ï'),
+            (Self::Diaeresis, 'I') => Some('Ï'),
+            (Self::Diaeresis, 'o') => Some('ö'),
+            (Self::Diaeresis, 'O') => Some('Ö'),
+            (Self::Diaeresis, 'u') => Some('ü'),
+            (Self::Diaeresis, 'U') => Some('Ü'),
+            (Self::Diaeresis, 'y') => Some('ÿ'),
+            (Self::Diaeresis, 'Y') => Some('Ÿ'),
+            (Self::Ring, 'a') => Some('å'),
+            (Self::Ring, 'A') => Some('Å'),
+            (Self::DoubleAcute, 'o') => Some('ő'),
+            (Self::DoubleAcute, 'O') => Some('Ő'),
+            (Self::DoubleAcute, 'u') => Some('ű'),
+            (Self::DoubleAcute, 'U') => Some('Ű'),
+            (Self::Caron, 'c') => Some('č'),
+            (Self::Caron, 'C') => Some('Č'),
+            (Self::Caron, 's') => Some('š'),
+            (Self::Caron, 'S') => Some('Š'),
+            (Self::Caron, 'z') => Some('ž'),
+            (Self::Caron, 'Z') => Some('Ž'),
+            (Self::Cedilla, 'c') => Some('ç'),
+            (Self::Cedilla, 'C') => Some('Ç'),
+            (Self::Cedilla, 's') => Some('ş'),
+            (Self::Cedilla, 'S') => Some('Ş'),
+            (Self::Ogonek, 'a') => Some('ą'),
+            (Self::Ogonek, 'A') => Some('Ą'),
+            (Self::Ogonek, 'e') => Some('ę'),
+            (Self::Ogonek, 'E') => Some('Ę'),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum DeadComposePhase {
+    #[default]
+    Idle,
+    MultiKey,
+    Accent(DeadAccent),
+}
+
+/// Deterministic X11 dead-key and `Multi_key` (Compose) sequence accumulator.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DeadComposeState {
+    phase: DeadComposePhase,
+}
+
+impl DeadComposeState {
+    /// Resets any partial sequence, returning `true` if a preedit indicator had been shown.
+    pub fn cancel(&mut self) -> bool {
+        let was_active = self.phase != DeadComposePhase::Idle;
+        self.phase = DeadComposePhase::Idle;
+        was_active
+    }
+
+    /// Processes a translated raw `(keysym, state)` event into zero or more [`DesktopEvent`]s.
+    pub fn feed(&mut self, keysym: u32, state: u16, out: &mut Vec<DesktopEvent>) {
+        // Ignore pure modifier keysyms so Shift/ISO_Level3_Shift don't cancel compose.
+        if matches!(keysym, 0xffe1..=0xffee | 0xfe03) {
+            return;
+        }
+        let control = (state & 0x04) != 0;
+        let alt = (state & 0x08) != 0;
+        if control || alt {
+            if self.cancel() {
+                out.push(DesktopEvent::Preedit(String::new()));
+            }
+            if let Some((key, modifiers)) = keysym_to_key(keysym, state) {
+                out.push(DesktopEvent::Key { key, modifiers });
+            }
+            return;
+        }
+
+        match self.phase {
+            DeadComposePhase::Idle => {
+                if keysym == 0xff20 {
+                    // XK_Multi_key
+                    self.phase = DeadComposePhase::MultiKey;
+                    out.push(DesktopEvent::Preedit("⎄".to_owned()));
+                } else if let Some(acc) = DeadAccent::from_keysym(keysym) {
+                    self.phase = DeadComposePhase::Accent(acc);
+                    out.push(DesktopEvent::Preedit(acc.spacing_char().to_string()));
+                } else if let Some((key, modifiers)) = keysym_to_key(keysym, state) {
+                    out.push(DesktopEvent::Key { key, modifiers });
+                }
+            }
+            DeadComposePhase::MultiKey => {
+                if keysym == 0xff1b {
+                    self.phase = DeadComposePhase::Idle;
+                    out.push(DesktopEvent::Preedit(String::new()));
+                    return;
+                }
+                if let Some(acc) = DeadAccent::from_keysym(keysym) {
+                    self.phase = DeadComposePhase::Accent(acc);
+                    out.push(DesktopEvent::Preedit(acc.spacing_char().to_string()));
+                    return;
+                }
+                if let Some((Key::Character(ch), _)) = keysym_to_key(keysym, state) {
+                    if let Some(acc) = DeadAccent::from_ascii(ch) {
+                        self.phase = DeadComposePhase::Accent(acc);
+                        out.push(DesktopEvent::Preedit(acc.spacing_char().to_string()));
+                        return;
+                    }
+                }
+                self.phase = DeadComposePhase::Idle;
+                out.push(DesktopEvent::Preedit(String::new()));
+                if let Some((key, modifiers)) = keysym_to_key(keysym, state) {
+                    out.push(DesktopEvent::Key { key, modifiers });
+                }
+            }
+            DeadComposePhase::Accent(acc) => {
+                self.phase = DeadComposePhase::Idle;
+                out.push(DesktopEvent::Preedit(String::new()));
+                if keysym == 0xff1b {
+                    return;
+                }
+                if DeadAccent::from_keysym(keysym) == Some(acc) {
+                    out.push(DesktopEvent::CommitText(acc.spacing_char().to_string()));
+                    return;
+                }
+                if let Some((Key::Character(ch), _)) = keysym_to_key(keysym, state) {
+                    if ch == ' ' {
+                        out.push(DesktopEvent::CommitText(acc.spacing_char().to_string()));
+                        return;
+                    }
+                    if let Some(composed) = acc.compose(ch) {
+                        out.push(DesktopEvent::CommitText(composed.to_string()));
+                        return;
+                    }
+                    let mut both = String::new();
+                    both.push(acc.spacing_char());
+                    both.push(ch);
+                    out.push(DesktopEvent::CommitText(both));
+                    return;
+                }
+                if let Some((key, modifiers)) = keysym_to_key(keysym, state) {
+                    out.push(DesktopEvent::Key { key, modifiers });
+                }
+            }
+        }
+    }
+}
+
+static SUSPEND_PENDING: AtomicBool = AtomicBool::new(false);
+static SUSPEND_SIGNAL_INIT: Once = Once::new();
+
+extern "C" fn on_suspend_signal(_sig: libc::c_int) {
+    SUSPEND_PENDING.store(true, Ordering::SeqCst);
+}
+
+fn install_suspend_signals() {
+    SUSPEND_SIGNAL_INIT.call_once(|| {
+        // SAFETY: async-signal-safe atomic store handler installed without `SA_RESTART`.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_suspend_signal as *const () as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = 0;
+            let _ = libc::sigaction(libc::SIGUSR2, &sa, std::ptr::null_mut());
+            let _ = libc::sigaction(libc::SIGTSTP, &sa, std::ptr::null_mut());
+            #[cfg(target_os = "linux")]
+            let _ = libc::sigaction(libc::SIGPWR, &sa, std::ptr::null_mut());
+        }
+    });
+}
+
+fn take_suspend_signal() -> bool {
+    SUSPEND_PENDING.swap(false, Ordering::AcqRel)
 }
 
 /// Errors returned while connecting to X11 or communicating over the display socket.
@@ -870,6 +1184,7 @@ pub struct X11Window {
     targets_atom: u32,
     sel_prop_atom: u32,
     keymap: KeyboardMap,
+    compose: DeadComposeState,
     rbuf: Vec<u8>,
     rstart: usize,
     events: VecDeque<WireEvent>,
@@ -892,6 +1207,7 @@ impl X11Window {
         width: u16,
         height: u16,
     ) -> Result<Self, X11Error> {
+        install_suspend_signals();
         let spec = display
             .map(str::to_owned)
             .or_else(|| std::env::var("DISPLAY").ok())
@@ -998,6 +1314,7 @@ impl X11Window {
             targets_atom: 0,
             sel_prop_atom: 0,
             keymap: KeyboardMap::new(8, 0, Vec::new()),
+            compose: DeadComposeState::default(),
             rbuf: Vec::with_capacity(8_192),
             rstart: 0,
             events: VecDeque::with_capacity(64),
@@ -1200,6 +1517,10 @@ impl X11Window {
     ///
     /// Returns [`X11Error`] if the X server closes or the socket errors.
     pub fn poll_events(&mut self, timeout_ms: i32) -> Result<Vec<DesktopEvent>, X11Error> {
+        if take_suspend_signal() {
+            self.clear_clipboard();
+            return Ok(vec![DesktopEvent::SystemSuspend]);
+        }
         self.parse_buffered_packets()?;
         if self.events.is_empty() {
             let mut pfd = libc::pollfd {
@@ -1223,6 +1544,11 @@ impl X11Window {
         }
 
         let mut out = Vec::new();
+        if take_suspend_signal() {
+            self.clear_clipboard();
+            out.push(DesktopEvent::SystemSuspend);
+            return Ok(out);
+        }
         let mut pending_drag: Option<(i16, i16)> = None;
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut expose_needed = false;
@@ -1230,8 +1556,8 @@ impl X11Window {
         while let Some(ev) = self.events.pop_front() {
             match ev {
                 WireEvent::KeyPress { keycode, state } => {
-                    if let Some((key, modifiers)) = self.keymap.translate(keycode, state) {
-                        out.push(DesktopEvent::Key { key, modifiers });
+                    if let Some((sym, st)) = self.keymap.translate_keysym(keycode, state) {
+                        self.compose.feed(sym, st, &mut out);
                     }
                 }
                 WireEvent::KeyRelease { .. }
@@ -1240,6 +1566,9 @@ impl X11Window {
                 | WireEvent::Other(_) => {}
                 WireEvent::FocusOut => {
                     self.left_button_down = false;
+                    if self.compose.cancel() {
+                        out.push(DesktopEvent::Preedit(String::new()));
+                    }
                     out.push(DesktopEvent::FocusOut);
                 }
                 WireEvent::ButtonPress {
@@ -2298,5 +2627,69 @@ mod tests {
         let (cw, mw, put_bytes, sel_own, conv_sel) = server.join().expect("server thread");
         assert!(cw && mw && sel_own && conv_sel);
         assert_eq!(put_bytes, 640 * 480 * 4);
+    }
+
+    #[test]
+    fn dead_key_and_multi_key_compose_and_suspend_signal() {
+        let mut compose = DeadComposeState::default();
+        let mut evs = Vec::new();
+
+        // Dead acute + 'e' -> 'é'
+        compose.feed(0xfe51, 0, &mut evs);
+        compose.feed(b'e' as u32, 0, &mut evs);
+        assert_eq!(
+            evs,
+            vec![
+                DesktopEvent::Preedit("´".to_owned()),
+                DesktopEvent::Preedit(String::new()),
+                DesktopEvent::CommitText("é".to_owned()),
+            ]
+        );
+
+        // Multi_key + '~' + 'n' -> 'ñ'
+        evs.clear();
+        compose.feed(0xff20, 0, &mut evs);
+        compose.feed(b'~' as u32, 0, &mut evs);
+        compose.feed(b'n' as u32, 0, &mut evs);
+        assert_eq!(
+            evs,
+            vec![
+                DesktopEvent::Preedit("⎄".to_owned()),
+                DesktopEvent::Preedit("~".to_owned()),
+                DesktopEvent::Preedit(String::new()),
+                DesktopEvent::CommitText("ñ".to_owned()),
+            ]
+        );
+
+        // Dead diaeresis + Escape cancels without emitting text
+        evs.clear();
+        compose.feed(0xfe57, 0, &mut evs);
+        compose.feed(0xff1b, 0, &mut evs);
+        assert_eq!(
+            evs,
+            vec![
+                DesktopEvent::Preedit("¨".to_owned()),
+                DesktopEvent::Preedit(String::new()),
+            ]
+        );
+
+        // Dead acute + unmatched 'q' emits standalone accent + char so keystrokes aren't lost
+        evs.clear();
+        compose.feed(0xfe51, 0, &mut evs);
+        compose.feed(b'q' as u32, 0, &mut evs);
+        assert_eq!(
+            evs,
+            vec![
+                DesktopEvent::Preedit("´".to_owned()),
+                DesktopEvent::Preedit(String::new()),
+                DesktopEvent::CommitText("´q".to_owned()),
+            ]
+        );
+
+        // Async-signal handler flips SUSPEND_PENDING atomically and take_suspend_signal clears it
+        assert!(!take_suspend_signal());
+        on_suspend_signal(libc::SIGUSR2);
+        assert!(take_suspend_signal());
+        assert!(!take_suspend_signal());
     }
 }

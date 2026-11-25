@@ -482,6 +482,19 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Ok(changed)
     }
 
+    /// Applies a batch of `(start, end, patch)` style edits as one single-undo Spine transaction
+    /// across arbitrary slab boundaries (Block 7 Gate 3).
+    pub fn apply_styles_batch(
+        &mut self,
+        edits: &[(u64, u64, StylePatch)],
+    ) -> Result<bool, ShellError> {
+        let before = self.typing.spine().clone();
+        self.typing.apply_styles_batch(edits)?;
+        let changed = !self.typing.spine().ptr_eq(&before);
+        self.invalidate_after_cut_or_restore(&before);
+        Ok(changed)
+    }
+
     /// Sets or clears (`url = None`) a hyperlink target across the active selection.
     pub fn set_selection_link(&mut self, url: Option<&str>) -> Result<bool, ShellError> {
         let (lo, hi) = self.selection.normalised();

@@ -461,6 +461,53 @@ impl PixelSurface {
             self.canvas_clip,
         );
     }
+
+    fn render_ime_preedit(&mut self, preedit: &str) {
+        if preedit.is_empty() {
+            return;
+        }
+        let style = Style::DEFAULT;
+        let line_h = self.to_px(self.fonts.line_height(style)).max(18);
+        let ascent = self.to_px(self.fonts.ascent(style));
+        let (cx, cy, _, ch) = self.caret_rect.unwrap_or((
+            self.page_origin_x,
+            self.page_origin_y,
+            1,
+            line_h,
+        ));
+        let h = ch.max(line_h);
+        let mut text_w = 0i32;
+        for (_, cl) in Clusters::new(preedit) {
+            text_w += self.to_px(self.fonts.advance(cl, style)).max(4);
+        }
+        let box_w = (text_w + 8).max(16);
+        let max_x = (self.canvas_clip.x + self.canvas_clip.w - box_w).max(self.canvas_clip.x);
+        let bx = cx.clamp(self.canvas_clip.x, max_x);
+        let by = cy.clamp(self.canvas_clip.y, self.canvas_clip.y + self.canvas_clip.h - h);
+        let box_rect = Rect::new(bx, by, box_w, h);
+        self.fb
+            .fill_rect_clipped(box_rect, self.theme.code_bg, self.canvas_clip);
+        self.fb.fill_rect_clipped(
+            Rect::new(bx, by + h - 2, box_w, 2),
+            self.theme.accent,
+            self.canvas_clip,
+        );
+        draw_ui_text(
+            &mut self.fb,
+            &self.fonts,
+            bx + 4,
+            by + ascent,
+            preedit,
+            style,
+            self.theme.text,
+            box_rect,
+        );
+        self.fb.fill_rect_clipped(
+            Rect::new(bx + box_w - 2, by + 2, 2, (h - 4).max(4)),
+            self.theme.caret,
+            self.canvas_clip,
+        );
+    }
 }
 
 impl Surface for PixelSurface {
@@ -2791,6 +2838,7 @@ fn run_desktop_with_window(
     let mut link_bar: Option<String> = None;
     let mut toolbar_hits: Vec<ToolbarHit> = Vec::new();
     let mut status_msg = String::new();
+    let mut ime_preedit = Zeroizing::new(String::new());
     let mut last_click: Option<(Instant, i16, i16, u8)> = None;
 
     let mut last_activity = Instant::now();
@@ -2824,6 +2872,9 @@ fn run_desktop_with_window(
             let metrics = app.editor().status_metrics();
             if history_drawer.is_none() && (idle_chrome_visible || reduced_motion) {
                 app.surface_mut().render_scrollbar(metrics);
+            }
+            if history_drawer.is_none() && !ime_preedit.is_empty() {
+                app.surface_mut().render_ime_preedit(ime_preedit.as_str());
             }
 
             let dot_state = SecurityDotState::from_cap(lock_cap, reaper.has_tripped());
@@ -3008,8 +3059,69 @@ fn run_desktop_with_window(
                 DesktopEvent::CloseRequested => {
                     quit = true;
                 }
+                DesktopEvent::SystemSuspend => {
+                    ime_preedit.zeroize();
+                    ime_preedit.clear();
+                    tripwire.fire(TripReason::Suspend);
+                    return Ok(finish_gui_wipe(
+                        &mut app,
+                        &document,
+                        &arenas,
+                        reaper,
+                        x11.as_mut(),
+                    ));
+                }
+                DesktopEvent::Preedit(text) => {
+                    ime_preedit.zeroize();
+                    ime_preedit.clear();
+                    ime_preedit.push_str(&text);
+                    pending_paint = true;
+                }
+                DesktopEvent::CommitText(text) => {
+                    idle_chrome_visible = true;
+                    ime_preedit.zeroize();
+                    ime_preedit.clear();
+                    if let Some(ref mut url) = link_bar {
+                        for ch in text.chars().filter(|c| !c.is_control()) {
+                            url.push(ch);
+                        }
+                    } else if let Some(ref mut find) = find_bar {
+                        match find {
+                            FindState::Find { needle, next_idx } => {
+                                for ch in text.chars().filter(|c| !c.is_control()) {
+                                    needle.push(ch);
+                                }
+                                *next_idx = 0;
+                            }
+                            FindState::Replace { replacement, .. } => {
+                                for ch in text.chars().filter(|c| !c.is_control()) {
+                                    replacement.push(ch);
+                                }
+                            }
+                        }
+                    } else if let Some(ref mut h) = history_drawer {
+                        if let Some(ref mut bm) = h.bookmark_input {
+                            for ch in text.chars().filter(|c| !c.is_control()) {
+                                bm.push(ch);
+                            }
+                        } else if let Some(ref mut s) = h.search_input {
+                            for ch in text.chars().filter(|c| !c.is_control()) {
+                                s.push(ch);
+                            }
+                        }
+                    } else {
+                        status_msg.clear();
+                        if app.press_paste_text(&text).is_err() {
+                            status_msg = "last edit refused".to_owned();
+                        }
+                    }
+                    pending_paint = true;
+                }
                 DesktopEvent::FocusOut => {
+                    ime_preedit.zeroize();
+                    ime_preedit.clear();
                     x11.clear_clipboard();
+                    pending_paint = true;
                 }
                 DesktopEvent::Expose => {
                     pending_paint = true;
@@ -4541,9 +4653,14 @@ mod tests {
             Some("https://holonomy.example")
         );
 
-        // Scrollbar & recovery banner render without panics.
+        // Scrollbar, recovery banner & IME preedit pill render without panics.
         let metrics = app.editor().status_metrics();
         app.surface_mut().render_scrollbar(metrics);
+        let before_preedit = app.surface().pixels().to_vec();
+        app.surface_mut().render_ime_preedit("日本´");
+        assert_ne!(app.surface().pixels(), before_preedit.as_slice());
+        app.press_paste_text("é").expect("paste / commit text");
+        assert!(app.frame_text().expect("frame").contains('é'));
         let bar_y = i32::from(QUIET_MD_THEME.toolbar_height_px);
         let dismiss = render_recovery_banner(app.surface_mut(), 42, bar_y);
         assert!(dismiss.is_some());

@@ -43,6 +43,15 @@ struct NsRect {
     size: NsSize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NsRange {
+    location: usize,
+    length: usize,
+}
+
+const NS_NOT_FOUND: usize = usize::MAX;
+
 #[link(name = "objc")]
 extern "C" {
     fn objc_getClass(name: *const c_char) -> Class;
@@ -160,6 +169,8 @@ struct CocoaQueue {
     fb_h: u16,
     width: u16,
     height: u16,
+    marked_len: usize,
+    ime_consumed: bool,
 }
 
 fn get_queue(obj: Id) -> Option<&'static RefCell<CocoaQueue>> {
@@ -336,14 +347,161 @@ fn translate_cocoa_keycode(keycode: u16) -> Option<Key> {
     }
 }
 
-extern "C" fn view_key_down(this: Id, _cmd: Sel, ev: Id) {
-    if let Some(q_ref) = get_queue(this) {
-        if let Some((key, modifiers)) = translate_cocoa_event(ev) {
-            q_ref
-                .borrow_mut()
-                .events
-                .push_back(DesktopEvent::Key { key, modifiers });
+fn extract_ns_text(obj: Id) -> Option<String> {
+    if obj.is_null() {
+        return None;
+    }
+    let has_string: Bool = msg!(
+        obj,
+        sel(b"respondsToSelector:\0"),
+        sel(b"string\0") => Sel
+        => Bool
+    );
+    let ns_str = if has_string != 0 {
+        msg!(obj, sel(b"string\0") => Id)
+    } else {
+        obj
+    };
+    if ns_str.is_null() {
+        return None;
+    }
+    let utf8: *const c_char = msg!(ns_str, sel(b"UTF8String\0") => *const c_char);
+    if utf8.is_null() {
+        return None;
+    }
+    // SAFETY: `UTF8String` returns NUL-terminated UTF-8 owned by the `NSString`.
+    unsafe { CStr::from_ptr(utf8) }.to_str().ok().map(str::to_owned)
+}
+
+extern "C" fn view_has_marked_text(this: Id, _cmd: Sel) -> Bool {
+    get_queue(this).map_or(0, |q| i8::from(q.borrow().marked_len > 0))
+}
+
+extern "C" fn view_marked_range(this: Id, _cmd: Sel) -> NsRange {
+    let len = get_queue(this).map_or(0, |q| q.borrow().marked_len);
+    if len > 0 {
+        NsRange { location: 0, length: len }
+    } else {
+        NsRange {
+            location: NS_NOT_FOUND,
+            length: 0,
         }
+    }
+}
+
+extern "C" fn view_selected_range(_this: Id, _cmd: Sel) -> NsRange {
+    NsRange {
+        location: 0,
+        length: 0,
+    }
+}
+
+extern "C" fn view_set_marked_text(
+    this: Id,
+    _cmd: Sel,
+    string: Id,
+    _selected_range: NsRange,
+    _replacement_range: NsRange,
+) {
+    if let Some(q_ref) = get_queue(this) {
+        let text = extract_ns_text(string).unwrap_or_default();
+        let mut q = q_ref.borrow_mut();
+        q.marked_len = text.encode_utf16().count();
+        q.ime_consumed = true;
+        q.events.push_back(DesktopEvent::Preedit(text));
+    }
+}
+
+extern "C" fn view_unmark_text(this: Id, _cmd: Sel) {
+    if let Some(q_ref) = get_queue(this) {
+        let mut q = q_ref.borrow_mut();
+        if q.marked_len > 0 {
+            q.marked_len = 0;
+            q.events.push_back(DesktopEvent::Preedit(String::new()));
+        }
+    }
+}
+
+extern "C" fn view_valid_attributes_for_marked_text(_this: Id, _cmd: Sel) -> Id {
+    msg!(cls(b"NSArray\0"), sel(b"array\0") => Id)
+}
+
+extern "C" fn view_attributed_substring(
+    _this: Id,
+    _cmd: Sel,
+    _proposed_range: NsRange,
+    _actual_range: *mut NsRange,
+) -> Id {
+    null_mut()
+}
+
+extern "C" fn view_insert_text(
+    this: Id,
+    _cmd: Sel,
+    string: Id,
+    _replacement_range: NsRange,
+) {
+    if let Some(q_ref) = get_queue(this) {
+        let text = extract_ns_text(string).unwrap_or_default();
+        let mut q = q_ref.borrow_mut();
+        if q.marked_len > 0 {
+            q.marked_len = 0;
+            q.events.push_back(DesktopEvent::Preedit(String::new()));
+        }
+        q.ime_consumed = true;
+        if !text.is_empty() && !text.chars().all(char::is_control) {
+            q.events.push_back(DesktopEvent::CommitText(text));
+        }
+    }
+}
+
+extern "C" fn view_do_command_by_selector(this: Id, _cmd: Sel, _selector: Sel) {
+    // Allow `view_key_down` fallback to emit the original `Key` when AppKit routes a key through
+    // `doCommandBySelector:` instead of `insertText:` / `setMarkedText:`.
+    let _ = this;
+}
+
+extern "C" fn view_character_index_for_point(_this: Id, _cmd: Sel, _point: NsPoint) -> usize {
+    NS_NOT_FOUND
+}
+
+extern "C" fn view_first_rect_for_character_range(
+    _this: Id,
+    _cmd: Sel,
+    _range: NsRange,
+    _actual_range: *mut NsRange,
+) -> NsRect {
+    NsRect {
+        origin: NsPoint { x: 140.0, y: 140.0 },
+        size: NsSize {
+            width: 1.0,
+            height: 18.0,
+        },
+    }
+}
+
+extern "C" fn view_key_down(this: Id, _cmd: Sel, ev: Id) {
+    let Some(q_ref) = get_queue(this) else {
+        return;
+    };
+    let flags: usize = msg!(ev, sel(b"modifierFlags\0") => usize);
+    let control = (flags & ((1 << 18) | (1 << 20))) != 0;
+    let keycode: u16 = msg!(ev, sel(b"keyCode\0") => u16);
+    let has_marked = q_ref.borrow().marked_len > 0;
+    let direct_nav = translate_cocoa_keycode(keycode).is_some() && !has_marked;
+    if !control && !direct_nav {
+        q_ref.borrow_mut().ime_consumed = false;
+        let arr: Id = msg!(cls(b"NSArray\0"), sel(b"arrayWithObject:\0"), ev => Id => Id);
+        let _: () = msg!(this, sel(b"interpretKeyEvents:\0"), arr => Id => ());
+        if q_ref.borrow().ime_consumed {
+            return;
+        }
+    }
+    if let Some((key, modifiers)) = translate_cocoa_event(ev) {
+        q_ref
+            .borrow_mut()
+            .events
+            .push_back(DesktopEvent::Key { key, modifiers });
     }
 }
 
@@ -422,7 +580,20 @@ extern "C" fn delegate_window_should_close(this: Id, _cmd: Sel, _sender: Id) -> 
 
 extern "C" fn delegate_window_did_resign_key(this: Id, _cmd: Sel, _notif: Id) {
     if let Some(q_ref) = get_queue(this) {
-        q_ref.borrow_mut().events.push_back(DesktopEvent::FocusOut);
+        let mut q = q_ref.borrow_mut();
+        if q.marked_len > 0 {
+            q.marked_len = 0;
+            q.events.push_back(DesktopEvent::Preedit(String::new()));
+        }
+        q.events.push_back(DesktopEvent::FocusOut);
+    }
+}
+
+extern "C" fn delegate_workspace_will_sleep(this: Id, _cmd: Sel, _notif: Id) {
+    if let Some(q_ref) = get_queue(this) {
+        let mut q = q_ref.borrow_mut();
+        q.marked_len = 0;
+        q.events.push_back(DesktopEvent::SystemSuspend);
     }
 }
 
@@ -489,6 +660,72 @@ fn ensure_objc_classes() -> (Class, Class) {
                 view_scroll_wheel as *const c_void,
                 c"v@:@".as_ptr(),
             );
+            class_addMethod(
+                view_cls,
+                sel(b"hasMarkedText\0"),
+                view_has_marked_text as *const c_void,
+                c"c@:".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"markedRange\0"),
+                view_marked_range as *const c_void,
+                c"{_NSRange=QQ}@:".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"selectedRange\0"),
+                view_selected_range as *const c_void,
+                c"{_NSRange=QQ}@:".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"setMarkedText:selectedRange:replacementRange:\0"),
+                view_set_marked_text as *const c_void,
+                c"v@:@{_NSRange=QQ}{_NSRange=QQ}".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"unmarkText\0"),
+                view_unmark_text as *const c_void,
+                c"v@:".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"validAttributesForMarkedText\0"),
+                view_valid_attributes_for_marked_text as *const c_void,
+                c"@@:".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"attributedSubstringForProposedRange:actualRange:\0"),
+                view_attributed_substring as *const c_void,
+                c"@@:{_NSRange=QQ}^{_NSRange=QQ}".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"insertText:replacementRange:\0"),
+                view_insert_text as *const c_void,
+                c"v@:@{_NSRange=QQ}".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"doCommandBySelector:\0"),
+                view_do_command_by_selector as *const c_void,
+                c"v@::".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"characterIndexForPoint:\0"),
+                view_character_index_for_point as *const c_void,
+                c"Q@:{CGPoint=dd}".as_ptr(),
+            );
+            class_addMethod(
+                view_cls,
+                sel(b"firstRectForCharacterRange:actualRange:\0"),
+                view_first_rect_for_character_range as *const c_void,
+                c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}".as_ptr(),
+            );
             objc_registerClassPair(view_cls);
         }
 
@@ -512,6 +749,12 @@ fn ensure_objc_classes() -> (Class, Class) {
                 del_cls,
                 sel(b"windowDidResignKey:\0"),
                 delegate_window_did_resign_key as *const c_void,
+                c"v@:@".as_ptr(),
+            );
+            class_addMethod(
+                del_cls,
+                sel(b"workspaceWillSleep:\0"),
+                delegate_workspace_will_sleep as *const c_void,
                 c"v@:@".as_ptr(),
             );
             objc_registerClassPair(del_cls);
@@ -540,6 +783,7 @@ pub struct CocoaWindow {
     window: Id,
     view: Id,
     delegate: Id,
+    workspace_nc: Id,
     queue: Rc<RefCell<CocoaQueue>>,
     dpi: i64,
     prop_raw: *const RefCell<CocoaQueue>,
@@ -677,6 +921,8 @@ impl CocoaWindow {
             fb_h: h,
             width: w,
             height: h,
+            marked_len: 0,
+            ime_consumed: false,
         }));
         let prop_raw = Rc::into_raw(Rc::clone(&queue));
 
@@ -688,6 +934,26 @@ impl CocoaWindow {
         unsafe {
             object_setInstanceVariable(view, c"_holoQueue".as_ptr(), prop_raw as *mut c_void);
             object_setInstanceVariable(delegate, c"_holoQueue".as_ptr(), prop_raw as *mut c_void);
+        }
+
+        let ws: Id = msg!(cls(b"NSWorkspace\0"), sel(b"sharedWorkspace\0") => Id);
+        let workspace_nc = if ws.is_null() {
+            null_mut()
+        } else {
+            msg!(ws, sel(b"notificationCenter\0") => Id)
+        };
+        if !workspace_nc.is_null() {
+            let notif_name = make_nsstring("NSWorkspaceWillSleepNotification");
+            let _: () = msg!(
+                workspace_nc,
+                sel(b"addObserver:selector:name:object:\0"),
+                delegate => Id,
+                sel(b"workspaceWillSleep:\0") => Sel,
+                notif_name => Id,
+                null_mut() => Id
+                => ()
+            );
+            let _: () = msg!(notif_name, sel(b"release\0") => ());
         }
 
         let _: () = msg!(window, sel(b"setContentView:\0"), view => Id => ());
@@ -705,6 +971,7 @@ impl CocoaWindow {
             window,
             view,
             delegate,
+            workspace_nc,
             queue,
             dpi,
             prop_raw,
@@ -722,6 +989,10 @@ fn dpi_from_backing_scale(scale: f64) -> i64 {
 impl Drop for CocoaWindow {
     fn drop(&mut self) {
         self.clear_clipboard();
+        if !self.workspace_nc.is_null() {
+            let _: () =
+                msg!(self.workspace_nc, sel(b"removeObserver:\0"), self.delegate => Id => ());
+        }
         // SAFETY: clears queue ivar pointers so callbacks stop touching queue during teardown.
         unsafe {
             object_setInstanceVariable(self.view, c"_holoQueue".as_ptr(), null_mut());

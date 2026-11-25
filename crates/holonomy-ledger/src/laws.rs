@@ -107,7 +107,7 @@ pub const LAWS: &[Law] = &[
         name: "Passphrase portability",
         bound: "a copied .wavefunction opens on a fresh machine with a passphrase alone; no account, token, or device required",
         block: "Block 6 \u{2014} First Light",
-        status: LawStatus::Spec,
+        status: LawStatus::Gated,
     },
     Law {
         id: "L-10",
@@ -184,10 +184,12 @@ pub const BUDGETS: &[Budget] = &[
         law: "L-4",
         measured_by: Some(
             "`holonomy-text` tests::keystroke_latency interleaves offset 0 and N-1 and prints \
-             HOLONOMY_KEYSTROKE_LATENCY p50/p99",
+             HOLONOMY_KEYSTROKE_LATENCY p50/p99, and `holonomy-gui` \
+             paint_echo::software_paint_echo_latency_at_30m_words_head_and_tail measures \
+             PixelSurface keystroke-to-pixel echo at 30 M words (HOLONOMY_PAINT_ECHO_30M)",
         ),
-        owes: "the p99 on reference hardware and the paint half \u{2014} keystroke-to-*paint*, not \
-               keystroke-to-edit, which needs Block 6's renderer",
+        owes: "the p99 on reference consumer hardware and inside Block 6's GPUI GPU render path \
+               (software PixelSurface echo is measured at 30 M words)",
     },
     Budget {
         vision: "Idle work: zero repaint, zero background scanning when nothing changes",
@@ -216,21 +218,24 @@ pub const BUDGETS: &[Budget] = &[
             "`holonomy-text` tests::wipe_gate fires the reaper across a 4 MiB ResidentSet, live \
              capability keys and 32 zeroize canaries and prints HOLONOMY_WIPE_GATE; the shipped \
              window keeps `ReaperOutcome` and reports a confirmed wipe (counts, exit 0) versus an \
-             unconfirmed one (reason, exit 1) — AUDIT D-89",
+             unconfirmed one (reason, exit 1) \u{2014} AUDIT D-89",
         ),
-        owes: "OS suspend / USB-yank hooks wired into the shipped window and reference-hardware \
-               calibration — Block 9's OS shell and Block 10",
+        owes: "USB-deadbolt disconnect hardware trigger, external out-of-process editor \
+               supervisor (WIPE_SUPERVISOR_REVIEW.md) against SIGSTOP/SIGKILL, and \
+               reference-hardware calibration (OS suspend hooks are wired across X11, Cocoa, \
+               Win32, and TUI)",
     },
     Budget {
         vision: "Portability: one passphrase, one file, any machine, no account",
         law: "L-9",
         measured_by: Some(
-            "`scripts/qualify-l9-portability.sh` (CI job `portability`) copies a document and \
-             imports it in a second process under `env -i` with every `HOME`/`XDG_*`/`TMPDIR` \
-             pointed at an empty directory that must stay empty (`HOLONOMY_PORTABILITY \
-             L-9=partial`), plus cross-OS matrix compilation and tests on Linux, macOS, and Windows",
+            "`scripts/qualify-l9-portability.sh` (`portability` CI job) enforces zero-state \
+             `env -i` single-host isolation, and `l9-cross-os` verifies Linux x86_64 -> macOS \
+             aarch64 & Windows x86_64 `.wavefunction` hand-off with passphrase alone and \
+             byte-identical plaintext round-trip",
         ),
-        owes: "a copied file opened on a second physical machine in the Block 10 release drill",
+        owes: "nothing \u{2014} zero-state process isolation and 3-OS cross-architecture hand-off \
+               (Linux -> macOS & Windows) are both enforced in CI",
     },
     Budget {
         vision: "Tail-only sync: backing up after a save transfers O(appended bytes)",
@@ -386,9 +391,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             partial,
-            vec!["L-9"],
-            "exactly one budget (L-9 portability) is measured only in part; if another becomes \
-             partial, name it here and in the prose that ships with it"
+            Vec::<&str>::new(),
+            "no budget carries `=partial` once L-9 enforces 3-OS hand-off alongside single-host \
+             zero-state portability; re-add any partial caveat here if a gate regresses"
         );
     }
 }

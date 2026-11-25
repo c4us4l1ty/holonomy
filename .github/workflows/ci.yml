@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    needs: [fmt, clippy, test, gates, sync, filesystem, portability, xvfb, cross-os]
+    needs: [fmt, clippy, test, gates, sync, filesystem, portability, l9-cross-os, lifecycle, xvfb, cross-os]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -73,8 +73,10 @@ jobs:
               "cargo run --locked -p xtask -- gates --check" \
               "cargo test --locked -p holonomy-line --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored --nocapture" \
               "cargo test --locked -p holonomy-gui --release --test persist -- --ignored --nocapture" \
+              "cargo test --locked -p holonomy-gui --release --test paint_echo -- --ignored --nocapture" \
               "scripts/qualify-x11-gui.sh" \
               "cargo build --locked --release -p holonomy-gui --bin holonomy && HOLONOMY_BINARY=$(pwd)/target/release/holonomy scripts/qualify-l9-portability.sh" \
+              "cargo build --locked --release -p holonomy-gui --bin holonomy && HOLONOMY_BINARY=$(pwd)/target/release/holonomy scripts/qualify-24yr-lifecycle.sh" \
               "scripts/qualify-ext4-enospc.sh"; do
               echo "== $cmd"
               output_file="$(mktemp)"
@@ -278,13 +280,18 @@ jobs:
           grep 'HOLONOMY_PERSIST order' "$RUNNER_TEMP/persist.log" > "$RUNNER_TEMP/persist.txt"
           grep 'HOLONOMY_PERSIST erase' "$RUNNER_TEMP/persist.log" >> "$RUNNER_TEMP/persist.txt"
           cat "$RUNNER_TEMP/persist.txt"
-      # L-1 / L-2 / L-3 release benchmarks: 60-year (21,900 witness) scrub + 30 M-word cold open.
-      - name: Measure 60-year witness scrub and 30 M-word cold open (L-1, L-2, L-3)
+      # L-1 / L-2 / L-3 / L-4 release benchmarks: 60-year (21,900 witness) scrub, 24-year lifecycle,
+      # 30 M-word cold open, and 30 M-word software keystroke-to-pixel echo latency.
+      - name: Measure 60-year scrub, 30 M-word cold open, and 30 M-word paint echo (L-1..L-4)
         run: |
           set -o pipefail
           cargo test --locked -p holonomy-gui --release --test persist -- --ignored --nocapture 2>&1 \
             | tee "$RUNNER_TEMP/persist-scale.log"
-          grep -E 'HOLONOMY_(60YR_SCRUB|COLD_OPEN_30M)' "$RUNNER_TEMP/persist-scale.log" \
+          cargo test --locked -p holonomy-gui --release --test paint_echo -- --ignored --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/paint-echo.log"
+          grep -E 'HOLONOMY_(60YR_SCRUB|COLD_OPEN_30M|24YR_LIFECYCLE)' "$RUNNER_TEMP/persist-scale.log" \
+            | tee -a "$RUNNER_TEMP/persist.txt"
+          grep 'HOLONOMY_PAINT_ECHO_30M' "$RUNNER_TEMP/paint-echo.log" \
             | tee -a "$RUNNER_TEMP/persist.txt"
       # The step above prints a test's `--nocapture` output, and this repository's job logs are not
       # retrievable from the environment the audit runs in. So the numbers go where the other
@@ -514,16 +521,146 @@ jobs:
           HOLONOMY_BINARY="$(pwd)/target/release/holonomy" \
             scripts/qualify-l9-portability.sh 2>&1 | tee "$RUNNER_TEMP/l9.log"
           grep 'HOLONOMY_PORTABILITY' "$RUNNER_TEMP/l9.log"
+      - name: Seed Linux x86_64 multi-script .wavefunction hand-off artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/l9-handoff"
+          printf '%s\n' \
+            'Holonomy v6 L-9 cross-architecture hand-off document.' \
+            'Scripts: Français café, 日本語テスト, العربية النص, 🦀.' \
+            'Verified with passphrase alone across Linux, macOS, and Windows.' \
+            > "$RUNNER_TEMP/l9-handoff/handoff.expected.txt"
+          printf '%s\n' "cross-os-l9-passphrase" | target/release/holonomy import --format plain \
+            "$RUNNER_TEMP/l9-handoff/handoff.expected.txt" \
+            "$RUNNER_TEMP/l9-handoff/handoff.wavefunction"
+          printf '%s\n' "cross-os-l9-passphrase" | target/release/holonomy verify \
+            "$RUNNER_TEMP/l9-handoff/handoff.wavefunction"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: l9-linux-handoff
+          path: ${{ runner.temp }}/l9-handoff
+          retention-days: 1
       - name: Record the portability evidence in the audit issue
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          { echo '### L-9 hand-off drill — the process half'; echo '```text'; \
-            grep -E 'HOLONOMY_PORTABILITY|^l9: ' "$RUNNER_TEMP/l9.log"; echo '```'; \
-            echo 'L-9 remains `spec`: this proves no account/token/device/inherited state is needed,'; \
-            echo 'not that a second machine can open the file. That is the release drill.'; } \
+          { echo '### L-9 hand-off drill — Linux zero-state & artifact seed'; echo '```text'; \
+            grep -E 'HOLONOMY_PORTABILITY|^l9: ' "$RUNNER_TEMP/l9.log"; echo '```'; } \
             > "$RUNNER_TEMP/l9-comment.md"
           gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/l9-comment.md" --silent || echo "::warning::issue 51 comment failed"
+
+  l9-cross-os:
+    name: L-9 cross-OS hand-off (Linux -> ${{ matrix.os }})
+    needs: [portability]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: l9-linux-handoff
+          path: l9-handoff
+      - name: Build release binary on ${{ matrix.os }}
+        shell: bash
+        run: cargo build --locked --release -p holonomy-gui --bin holonomy
+      - name: Verify and export Linux .wavefunction in isolated profile with passphrase alone
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/release/holonomy"
+          if [ -f "target/release/holonomy.exe" ]; then
+            BIN="target/release/holonomy.exe"
+          fi
+          WORK="$(mktemp -d)"
+          FRESH="$WORK/empty-profile"
+          mkdir -p "$FRESH"
+          if [ "$(uname -s)" = "Darwin" ]; then
+            printf '%s\n' "cross-os-l9-passphrase" | env -i PATH="$PATH" HOME="$FRESH" \
+              XDG_CONFIG_HOME="$FRESH/cfg" XDG_DATA_HOME="$FRESH/data" \
+              XDG_CACHE_HOME="$FRESH/cache" XDG_STATE_HOME="$FRESH/state" \
+              TMPDIR="$WORK" "$BIN" verify l9-handoff/handoff.wavefunction
+            printf '%s\n' "cross-os-l9-passphrase" | env -i PATH="$PATH" HOME="$FRESH" \
+              XDG_CONFIG_HOME="$FRESH/cfg" XDG_DATA_HOME="$FRESH/data" \
+              XDG_CACHE_HOME="$FRESH/cache" XDG_STATE_HOME="$FRESH/state" \
+              TMPDIR="$WORK" "$BIN" export --force --format plain \
+              l9-handoff/handoff.wavefunction "$WORK/exported.txt"
+          else
+            WIN_FRESH="$(cygpath -w "$FRESH")"
+            WIN_WORK="$(cygpath -w "$WORK")"
+            printf '%s\n' "cross-os-l9-passphrase" | env -i PATH="$PATH" \
+              SystemRoot="${SystemRoot:-${SYSTEMROOT:-C:\\Windows}}" \
+              SYSTEMROOT="${SYSTEMROOT:-${SystemRoot:-C:\\Windows}}" \
+              WINDIR="${WINDIR:-C:\\Windows}" \
+              USERPROFILE="$WIN_FRESH" HOME="$WIN_FRESH" \
+              LOCALAPPDATA="$WIN_FRESH\\local" APPDATA="$WIN_FRESH\\roaming" \
+              TMP="$WIN_WORK" TEMP="$WIN_WORK" \
+              "$BIN" verify l9-handoff/handoff.wavefunction
+            printf '%s\n' "cross-os-l9-passphrase" | env -i PATH="$PATH" \
+              SystemRoot="${SystemRoot:-${SYSTEMROOT:-C:\\Windows}}" \
+              SYSTEMROOT="${SYSTEMROOT:-${SystemRoot:-C:\\Windows}}" \
+              WINDIR="${WINDIR:-C:\\Windows}" \
+              USERPROFILE="$WIN_FRESH" HOME="$WIN_FRESH" \
+              LOCALAPPDATA="$WIN_FRESH\\local" APPDATA="$WIN_FRESH\\roaming" \
+              TMP="$WIN_WORK" TEMP="$WIN_WORK" \
+              "$BIN" export --force --format plain \
+              l9-handoff/handoff.wavefunction "$WIN_WORK\\exported.txt"
+          fi
+          cmp -s l9-handoff/handoff.expected.txt "$WORK/exported.txt"
+          if find "$FRESH" -type f | grep -q .; then
+            echo "l9-cross-os: FAIL — binary created unexpected state in $FRESH" >&2
+            exit 1
+          fi
+          echo "HOLONOMY_L9_CROSS_OS source=ubuntu-latest target=${{ matrix.os }} verified=true byte_identical=true profile_clean=true" \
+            | tee "$RUNNER_TEMP/l9-cross-os.txt"
+          rm -rf "$WORK"
+      - name: Record cross-OS L-9 hand-off evidence in issue 51
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          { echo "### L-9 cross-OS hand-off (Linux -> ${{ matrix.os }})"; echo '```text'; \
+            cat "$RUNNER_TEMP/l9-cross-os.txt"; echo '```'; } > "$RUNNER_TEMP/l9-cross-os-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/l9-cross-os-comment.md" --silent || echo "::warning::issue 51 comment failed"
+
+  lifecycle:
+    name: Block 10 24-year fresh-user lifecycle drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --locked --release -p holonomy-gui --bin holonomy
+      - name: Run 24-year fresh-user install -> backup -> wipe -> restore -> continue drill
+        run: |
+          set -o pipefail
+          HOLONOMY_BINARY="$(pwd)/target/release/holonomy" \
+            scripts/qualify-24yr-lifecycle.sh 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
+          grep -E 'HOLONOMY_24YR_(CLI_DRILL|LIFECYCLE)' "$RUNNER_TEMP/lifecycle.log" > "$RUNNER_TEMP/lifecycle.txt"
+      - name: Record 24-year lifecycle drill in issue 51
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { echo '### Block 10 24-year fresh-user lifecycle drill'; echo '```text'; \
+            cat "$RUNNER_TEMP/lifecycle.txt"; echo '```'; } > "$RUNNER_TEMP/lifecycle-comment.md"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/lifecycle-comment.md" --silent || echo "::warning::issue 51 comment failed"
 
   gates:
     name: gates contract

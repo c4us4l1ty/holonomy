@@ -36,6 +36,15 @@ const CS_VREDRAW: u32 = 0x0001;
 const IDC_ARROW: *const u16 = 32512 as *const u16;
 const COLOR_WINDOW: usize = 5;
 
+const WM_POWERBROADCAST: u32 = 0x0218;
+const PBT_APMSUSPEND: usize = 0x0004;
+const WM_IME_STARTCOMPOSITION: u32 = 0x010D;
+const WM_IME_ENDCOMPOSITION: u32 = 0x010E;
+const WM_IME_COMPOSITION: u32 = 0x010F;
+const WM_IME_CHAR: u32 = 0x0286;
+const GCS_COMPSTR: u32 = 0x0008;
+const GCS_RESULTSTR: u32 = 0x0800;
+
 const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
@@ -143,6 +152,8 @@ struct BitmapInfo {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(lp_module_name: *const u16) -> Hinstance;
+    fn LoadLibraryA(lp_lib_file_name: *const u8) -> *mut c_void;
+    fn GetProcAddress(h_module: *mut c_void, lp_proc_name: *const u8) -> *const c_void;
     fn GlobalAlloc(u_flags: u32, dw_bytes: usize) -> Hglobal;
     fn GlobalFree(h_mem: Hglobal) -> Hglobal;
     fn GlobalLock(h_mem: Hglobal) -> *mut c_void;
@@ -320,18 +331,94 @@ fn decode_wm_char(pending_surrogate: &mut Option<u16>, unit: u16) -> Option<char
     char::from_u32(u32::from(unit))
 }
 
+fn utf16_le_bytes_to_string(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&u| u != 0)
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+#[derive(Clone, Copy)]
+struct Imm32Api {
+    get_context: unsafe extern "system" fn(Hwnd) -> *mut c_void,
+    get_comp_str_w: unsafe extern "system" fn(*mut c_void, u32, *mut c_void, u32) -> i32,
+    release_context: unsafe extern "system" fn(Hwnd, *mut c_void) -> Bool,
+}
+
+fn imm32_api() -> Option<Imm32Api> {
+    static API: std::sync::OnceLock<Option<Imm32Api>> = std::sync::OnceLock::new();
+    *API.get_or_init(|| {
+        // SAFETY: dynamically loads `imm32.dll` and resolves standard Win32 IME symbols.
+        unsafe {
+            let hmod = LoadLibraryA(c"imm32.dll".as_ptr().cast());
+            if hmod.is_null() {
+                return None;
+            }
+            let get_context = GetProcAddress(hmod, c"ImmGetContext".as_ptr().cast());
+            let get_comp_str_w = GetProcAddress(hmod, c"ImmGetCompositionStringW".as_ptr().cast());
+            let release_context = GetProcAddress(hmod, c"ImmReleaseContext".as_ptr().cast());
+            if get_context.is_null() || get_comp_str_w.is_null() || release_context.is_null() {
+                return None;
+            }
+            Some(Imm32Api {
+                get_context: std::mem::transmute::<
+                    *const c_void,
+                    unsafe extern "system" fn(Hwnd) -> *mut c_void,
+                >(get_context),
+                get_comp_str_w: std::mem::transmute::<
+                    *const c_void,
+                    unsafe extern "system" fn(*mut c_void, u32, *mut c_void, u32) -> i32,
+                >(get_comp_str_w),
+                release_context: std::mem::transmute::<
+                    *const c_void,
+                    unsafe extern "system" fn(Hwnd, *mut c_void) -> Bool,
+                >(release_context),
+            })
+        }
+    })
+}
+
+fn read_imm_string(hwnd: Hwnd, kind: u32) -> Option<String> {
+    let api = imm32_api()?;
+    // SAFETY: function pointers resolved from `imm32.dll` match Win32 `imm.h` signatures.
+    unsafe {
+        let himc = (api.get_context)(hwnd);
+        if himc.is_null() {
+            return None;
+        }
+        let byte_len = (api.get_comp_str_w)(himc, kind, null_mut(), 0);
+        if byte_len <= 0 {
+            let _ = (api.release_context)(hwnd, himc);
+            return Some(String::new());
+        }
+        let mut buf = Zeroizing::new(vec![0u8; byte_len as usize]);
+        let read = (api.get_comp_str_w)(himc, kind, buf.as_mut_ptr().cast(), byte_len as u32);
+        let _ = (api.release_context)(hwnd, himc);
+        if read <= 0 {
+            return None;
+        }
+        Some(utf16_le_bytes_to_string(
+            &buf[..(read as usize).min(buf.len())],
+        ))
+    }
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: Hwnd,
     msg: u32,
     w_param: Wparam,
     l_param: Lparam,
 ) -> Lresult {
+    let mut def_l_param = l_param;
     // SAFETY: `GetPropW` retrieves the `Rc<RefCell<WinQueue>>` installed during `open`.
     let raw_ptr = unsafe { GetPropW(hwnd, PROP_NAME.as_ptr()) } as *const RefCell<WinQueue>;
     if !raw_ptr.is_null() {
         // SAFETY: `raw_ptr` stays alive until `Drop` removes the property and balances `into_raw`.
         let q_ref = unsafe { &*raw_ptr };
         let mut handled_close = false;
+        let mut clear_owned_clip = false;
         {
             let mut q = q_ref.borrow_mut();
             match msg {
@@ -345,10 +432,43 @@ unsafe extern "system" fn wnd_proc(
                 WM_KILLFOCUS => {
                     q.left_down = false;
                     q.pending_surrogate = None;
+                    q.events.push_back(DesktopEvent::Preedit(String::new()));
                     q.events.push_back(DesktopEvent::FocusOut);
+                }
+                WM_POWERBROADCAST if w_param == PBT_APMSUSPEND => {
+                    clear_owned_clip = q.owns_clipboard;
+                    q.owns_clipboard = false;
+                    q.events.push_back(DesktopEvent::SystemSuspend);
                 }
                 WM_DESTROYCLIPBOARD => {
                     q.owns_clipboard = false;
+                }
+                WM_IME_STARTCOMPOSITION => {
+                    q.events.push_back(DesktopEvent::Preedit(String::new()));
+                }
+                WM_IME_COMPOSITION => {
+                    let flags = l_param as u32;
+                    if (flags & GCS_RESULTSTR) != 0 {
+                        if let Some(res) = read_imm_string(hwnd, GCS_RESULTSTR) {
+                            q.events.push_back(DesktopEvent::Preedit(String::new()));
+                            if !res.is_empty() {
+                                q.events.push_back(DesktopEvent::CommitText(res));
+                            }
+                            // Suppress GCS_RESULTSTR in DefWindowProcW so Windows does not re-emit
+                            // duplicate WM_CHAR / WM_IME_CHAR messages for the committed string.
+                            def_l_param = (flags & !GCS_RESULTSTR) as isize;
+                        }
+                    }
+                    if (flags & GCS_COMPSTR) != 0 {
+                        let comp = read_imm_string(hwnd, GCS_COMPSTR).unwrap_or_default();
+                        q.events.push_back(DesktopEvent::Preedit(comp));
+                    }
+                }
+                WM_IME_ENDCOMPOSITION => {
+                    q.events.push_back(DesktopEvent::Preedit(String::new()));
+                }
+                WM_IME_CHAR => {
+                    handled_close = true;
                 }
                 WM_SIZE => {
                     let w = ((l_param as usize) & 0xFFFF) as u16;
@@ -423,12 +543,21 @@ unsafe extern "system" fn wnd_proc(
                 _ => {}
             }
         }
+        if clear_owned_clip {
+            // SAFETY: empties system clipboard immediately before OS enters suspend.
+            unsafe {
+                if OpenClipboard(hwnd) != 0 {
+                    EmptyClipboard();
+                    CloseClipboard();
+                }
+            }
+        }
         if handled_close {
             return 0;
         }
     }
     // SAFETY: `q` lock is released before calling `DefWindowProcW`, preventing re-entrancy panics.
-    unsafe { DefWindowProcW(hwnd, msg, w_param, l_param) }
+    unsafe { DefWindowProcW(hwnd, msg, w_param, def_l_param) }
 }
 
 /// Native Win32 desktop window presenting a 32-bpp `0x00RRGGBB` framebuffer via `StretchDIBits`.
@@ -782,5 +911,13 @@ mod tests {
         assert_eq!(decode_wm_char(&mut pending, 0xD83E), None);
         assert_eq!(decode_wm_char(&mut pending, 0xDD80), Some('🦀'));
         assert_eq!(pending, None);
+
+        // Win32 UTF-16LE IME composition strings (multi-codepoint CJK + surrogate + NUL) decode cleanly.
+        let mut ime_utf16: Vec<u8> = "日本語🦀\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(utf16_le_bytes_to_string(&ime_utf16), "日本語🦀");
+        ime_utf16.zeroize();
     }
 }
