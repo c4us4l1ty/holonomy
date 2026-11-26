@@ -648,7 +648,7 @@ mod tests {
                 Input::Key(Key::Character('中'), Modifiers::none()),
             ]
         );
-        let (mut decoder, first) = decoder_receiving(b"\xc3", false);
+        let (mut decoder, first) = decoder_receiving(b"\xc2", false);
         assert!(first.is_empty());
         assert_eq!(
             decoder.feed_all(&[0xa9]),
