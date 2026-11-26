@@ -68,6 +68,18 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-26 — D-99 — Bug hunt: a committed style manifest could reopen with its runs gone.**
+  `WorldLine`'s `validate_manifest_against_lengths` accepted list wire values that
+  `holonomy_text::DocStyle::from_wire` rejects as a whole: a bullet or ordered run with `depth = 0`,
+  a bullet carrying an ordinal, or plain text carrying an ordinal. It also accepted a 1-based
+  `link_id` one past the end of the link table. Since `manifest_to_spine` drops any run the decoder
+  refuses, all of those let an authenticated commit reopen with *less formatting than it wrote* —
+  the entire run, not just the bad attribute, disappeared. The commit gate now checks the exact
+  tuple of list kind/depth/start and the 1-based link range before writing a witness. A regression
+  test in `holonomy-line/src/tests.rs` commits the valid combinations and refuses each invalid
+  one. Found by reading the container/text boundary during the app-wide bug hunt, not by a failing
+  test; local Rust tooling is unavailable, so verification is by GitHub Actions on this branch.
+
 - **2026-11-26 — D-98 — Bug hunt: interrupted UTF-8 no longer swallows a keystroke, and a shrunk
   terminal no longer positions the caret outside its grid.**
   - `holonomy_gui::term::Decoder` used to accept *any* byte as the continuation of a partial UTF-8
