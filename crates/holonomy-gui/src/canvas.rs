@@ -1088,7 +1088,12 @@ fn draw_toolbar_button(
                 fb.stroke_rounded_rect(rect, 7, theme.line_border, clip);
             }
             ButtonHighlight::Off => {
-                fb.fill_rounded_rect(rect, 7, HOME_CARD, clip);
+                let neutral = if is_dark_theme(theme) {
+                    Rgba8::rgb(0x2a, 0x2a, 0x29)
+                } else {
+                    HOME_CARD
+                };
+                fb.fill_rounded_rect(rect, 7, neutral, clip);
             }
         }
     }
@@ -2417,6 +2422,23 @@ fn home_library_root() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// Suggests a non-existing filename inside the Home library so pressing Enter in a new-document
+/// prompt creates a document rather than silently reopening an existing one.
+fn home_new_document_path(root: &Path) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut candidate = root.join(format!("notes-{stamp}.wavefunction"));
+    for suffix in 1..100u32 {
+        if !candidate.exists() {
+            break;
+        }
+        candidate = root.join(format!("notes-{stamp}-{suffix}.wavefunction"));
+    }
+    candidate
+}
+
 fn enumerate_home_entries(root: &Path) -> Vec<HomeEntry> {
     fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<HomeEntry>) {
         if depth > 3 || out.len() >= 240 {
@@ -2587,7 +2609,12 @@ fn draw_home_folder_icon(fb: &mut FrameBuffer, x: i32, y: i32, color: Rgba8, cli
 /// Draws the Home shell into a logical-pixel framebuffer and returns its click targets. Every
 /// surface paired with [`crate::platform::DesktopWindow`] pointer coordinates, so scaling stays
 /// consistent with the editor.
-fn render_home(fb: &mut FrameBuffer, fonts: &FontSet, state: &HomeState) -> Vec<(Rect, HomeHit)> {
+fn render_home(
+    fb: &mut FrameBuffer,
+    fonts: &FontSet,
+    state: &HomeState,
+    scale_percent: u16,
+) -> Vec<(Rect, HomeHit)> {
     let w = i32::from(fb.width);
     let h = i32::from(fb.height);
     let full = Rect::new(0, 0, w, h);
@@ -2899,11 +2926,12 @@ fn render_home(fb: &mut FrameBuffer, fonts: &FontSet, state: &HomeState) -> Vec<
             overlay,
             true,
         );
+        let scale_line = format!("Display scale {scale_percent}% (Ctrl Alt + / -)");
         for (row, line) in [
             "Ctrl J \u{2014} focus search",
-            "Ctrl Alt + / - \u{2014} display scale 100\u{2013}200%",
             "Ctrl Shift H \u{2014} return Home from a document",
             "HOLONOMY_NOTES_DIR \u{2014} library folder",
+            scale_line.as_str(),
         ]
         .iter()
         .enumerate()
@@ -3199,7 +3227,7 @@ fn render_home_document_cards(
 /// Shows the library and returns the document the user chose, already unlocked by the in-window
 /// passphrase prompt. Returning `None` means the native window was closed.
 fn show_home(
-    win: &mut dyn DesktopWindow,
+    win: &mut ScaledWindow,
     fonts: &FontSet,
 ) -> Result<Option<(PathBuf, Document)>, Box<dyn std::error::Error>> {
     let mut state = HomeState::new();
@@ -3210,7 +3238,7 @@ fn show_home(
     loop {
         if dirty {
             let mut fb = FrameBuffer::new(w, h, HOME_CANVAS_BG);
-            hits = render_home(&mut fb, fonts, &state);
+            hits = render_home(&mut fb, fonts, &state, win.scale().percent());
             win.present_argb(&fb.pixels, w, h)?;
             dirty = false;
         }
@@ -3230,16 +3258,25 @@ fn show_home(
                     if let Some((_, hit)) = hits.iter().rev().find(|(r, _)| r.contains(px, py)) {
                         match *hit {
                             HomeHit::NewDocument => {
-                                if let Some(chosen) = prompt_gui_document(win, fonts, None)? {
+                                let default_path = home_new_document_path(&home_library_root());
+                                if let Some(chosen) = prompt_gui_document(
+                                    win.as_window_mut(),
+                                    fonts,
+                                    None,
+                                    Some(&default_path),
+                                )? {
                                     return Ok(Some(chosen));
                                 }
                             }
                             HomeHit::Document(idx) => {
                                 if let Some(entry) = state.entries.get(idx) {
                                     let path = entry.path.clone();
-                                    if let Some(chosen) =
-                                        prompt_gui_document(win, fonts, Some(&path))?
-                                    {
+                                    if let Some(chosen) = prompt_gui_document(
+                                        win.as_window_mut(),
+                                        fonts,
+                                        Some(&path),
+                                        None,
+                                    )? {
                                         return Ok(Some(chosen));
                                     }
                                 }
@@ -3268,6 +3305,23 @@ fn show_home(
                     dirty = true;
                 }
                 DesktopEvent::Key { key, modifiers } => {
+                    if modifiers.control && modifiers.alt {
+                        let steps = match key {
+                            Key::Character('=' | '+') => Some(1),
+                            Key::Character('-') => Some(-1),
+                            Key::Character('0') => Some(0),
+                            _ => None,
+                        };
+                        if let Some(steps) = steps {
+                            let mut status = String::new();
+                            apply_display_scale(win, steps, &mut status);
+                            dirty = true;
+                            continue;
+                        }
+                    }
+                    if modifiers.control && !modifiers.alt && matches!(key, Key::Character('q')) {
+                        return Ok(None);
+                    }
                     if modifiers.control && !modifiers.alt && matches!(key, Key::Character('j')) {
                         state.search_focused = true;
                         dirty = true;
@@ -3290,8 +3344,12 @@ fn show_home(
                         Key::Enter if state.search_focused => {
                             if let Some(&idx) = state.matching_entries().first() {
                                 let path = state.entries[idx].path.clone();
-                                if let Some(chosen) = prompt_gui_document(win, fonts, Some(&path))?
-                                {
+                                if let Some(chosen) = prompt_gui_document(
+                                    win.as_window_mut(),
+                                    fonts,
+                                    Some(&path),
+                                    None,
+                                )? {
                                     return Ok(Some(chosen));
                                 }
                             }
@@ -3392,9 +3450,11 @@ fn prompt_gui_document(
     x11: &mut dyn DesktopWindow,
     fonts: &FontSet,
     initial_path: Option<&Path>,
+    default_path: Option<&Path>,
 ) -> Result<Option<(PathBuf, Document)>, Box<dyn std::error::Error>> {
     let (recent_paths, mut remember_recent) = load_opt_in_recent_paths();
     let mut path_buf = initial_path
+        .or(default_path)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "notes.wavefunction".to_owned());
     let mut editing_path = initial_path.is_none();
@@ -3895,12 +3955,14 @@ fn run_desktop_with_window(
 
     loop {
         let (doc_path, document) = if let Some(ref path) = preselected {
-            let Some(chosen) = prompt_gui_document(x11.as_window_mut(), &fonts, Some(path))? else {
+            let Some(chosen) =
+                prompt_gui_document(x11.as_window_mut(), &fonts, Some(path), None)?
+            else {
                 return Ok(DesktopEnd::Cancelled);
             };
             chosen
         } else {
-            let Some(chosen) = show_home(x11.as_window_mut(), &fonts)? else {
+            let Some(chosen) = show_home(&mut x11, &fonts)? else {
                 return Ok(DesktopEnd::Cancelled);
             };
             chosen
@@ -5937,7 +5999,7 @@ mod tests {
             settings_open: false,
         };
         let mut fb = FrameBuffer::new(1_120, 780, HOME_CANVAS_BG);
-        let hits = render_home(&mut fb, &fonts, &state);
+        let hits = render_home(&mut fb, &fonts, &state, 100);
         assert!(hits.iter().any(|(_, hit)| *hit == HomeHit::NewDocument));
         assert!(hits.iter().any(|(_, hit)| *hit == HomeHit::Search));
         assert!(hits
@@ -5951,5 +6013,28 @@ mod tests {
         assert_eq!(search_state.matching_entries(), vec![1]);
         search_state.active_folder = Some(0);
         assert!(search_state.matching_entries().is_empty());
+    }
+
+
+    #[test]
+    fn new_document_suggestion_stays_in_library_and_avoids_collisions() {
+        let root = std::env::temp_dir().join(format!(
+            "holonomy-new-doc-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("library folder");
+        let first = home_new_document_path(&root);
+        assert_eq!(first.parent(), Some(root.as_path()));
+        assert_eq!(first.extension().and_then(|e| e.to_str()), Some("wavefunction"));
+        assert!(!first.exists());
+        std::fs::write(&first, b"").expect("suggested path");
+        let second = home_new_document_path(&root);
+        assert_ne!(first, second);
+        assert!(!second.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

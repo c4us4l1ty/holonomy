@@ -55,8 +55,9 @@ The file is created if it does not exist and opened if it does; either way it as
 passphrase. When launched without a file, the desktop app opens a **Home** library instead: a
 sidebar of folders containing `*.wavefunction` documents, a searchable card grid, and `+` to create
 a new encrypted document. Set `HOLONOMY_NOTES_DIR` to point the library at another folder; by
-default it scans the working directory. `Ctrl+J` focuses search, and the Home button or
-`Ctrl+Shift+H` saves and returns to the library from a document.
+default it scans the working directory. `Ctrl+J` focuses search, `Ctrl+Q` closes the window, and the Home button or `Ctrl+Shift+H` saves
+and returns to the library from a document. Display-scale shortcuts work in Home too, and the
+Settings panel shows the active scale.
 
 Then: printable text types, arrows and Home/End/PageUp/PageDown move the caret
 (`Shift` extends, `Ctrl/Option+Arrow` steps by word), backspace and delete remove
