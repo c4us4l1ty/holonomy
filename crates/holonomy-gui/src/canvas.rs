@@ -179,6 +179,58 @@ impl FrameBuffer {
         );
     }
 
+    /// Horizontal span of a rounded rectangle on one scanline, inset by `radius` at the corners.
+    fn rounded_span(rect: Rect, radius: i32, y: i32) -> Option<(i32, i32)> {
+        if y < rect.y || y >= rect.y + rect.h || rect.w <= 0 || rect.h <= 0 {
+            return None;
+        }
+        let r = radius.min(rect.w / 2).min(rect.h / 2).max(0);
+        let center_y = if y < rect.y + r {
+            rect.y + r
+        } else if y >= rect.y + rect.h - r {
+            rect.y + rect.h - r - 1
+        } else {
+            y
+        };
+        let dy = (y - center_y).abs();
+        let inset = if r == 0 {
+            0
+        } else {
+            let inner = (r * r - dy * dy).max(0) as f64;
+            r - (inner.sqrt() as i32)
+        };
+        Some((rect.x + inset, rect.x + rect.w - inset))
+    }
+
+    /// Fills a rectangle with circular corners — the soft cards used by the Home shell.
+    fn fill_rounded_rect(&mut self, rect: Rect, radius: i32, color: Rgba8, clip: Rect) {
+        for y in rect.y..rect.y + rect.h {
+            if let Some((x0, x1)) = Self::rounded_span(rect, radius, y) {
+                if x1 > x0 {
+                    self.fill_rect_clipped(Rect::new(x0, y, x1 - x0, 1), color, clip);
+                }
+            }
+        }
+    }
+
+    /// Strokes a 1 px rounded outline without obscuring the interior.
+    fn stroke_rounded_rect(&mut self, rect: Rect, radius: i32, color: Rgba8, clip: Rect) {
+        let inner = Rect::new(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+        for y in rect.y..rect.y + rect.h {
+            let (Some((ox0, ox1)), Some((ix0, ix1))) = (
+                Self::rounded_span(rect, radius, y),
+                Self::rounded_span(inner, radius - 1, y),
+            ) else {
+                continue;
+            };
+            if ox1 - ox0 <= 0 || ix1 - ix0 <= 0 {
+                continue;
+            }
+            self.fill_rect_clipped(Rect::new(ox0, y, (ix0 - ox0).max(1), 1), color, clip);
+            self.fill_rect_clipped(Rect::new(ix1, y, (ox1 - ix1).max(1), 1), color, clip);
+        }
+    }
+
     /// Alpha-blends a rasterized A8 glyph bitmap at `(dst_x, dst_y)`.
     fn blend_glyph(&mut self, dst_x: i32, dst_y: i32, bmp: &GlyphBitmap, color: Rgba8, clip: Rect) {
         if bmp.width == 0 || bmp.height == 0 {
@@ -907,6 +959,8 @@ impl Surface for PixelSurface {
 /// Interactive action triggered by clicking a Ribbon button (`UI-SPEC.md` §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
+    /// Save and return to the Home document library.
+    GoHome,
     /// Cycle font family (`Sans` -> `Serif` -> `Mono`).
     CycleFamily,
     /// Cycle body font size (`13` -> `15` -> `17` -> `21` -> `25` -> `34` px).
@@ -1026,14 +1080,16 @@ fn draw_toolbar_button(
     if !disabled {
         match highlight {
             ButtonHighlight::Active => {
-                fb.fill_rect_clipped(rect, Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 16), clip);
-                fb.stroke_rect(rect, Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 45), clip);
+                fb.fill_rounded_rect(rect, 7, HOME_WASH, clip);
+                fb.stroke_rounded_rect(rect, 7, Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 55), clip);
             }
             ButtonHighlight::Mixed => {
-                fb.fill_rect_clipped(rect, theme.code_bg, clip);
-                fb.stroke_rect(rect, theme.line_border, clip);
+                fb.fill_rounded_rect(rect, 7, theme.code_bg, clip);
+                fb.stroke_rounded_rect(rect, 7, theme.line_border, clip);
             }
-            ButtonHighlight::Off => {}
+            ButtonHighlight::Off => {
+                fb.fill_rounded_rect(rect, 7, HOME_CARD, clip);
+            }
         }
     }
     let ink = if disabled {
@@ -1181,6 +1237,13 @@ where
     let gap = i32::from(theme.toolbar_group_gap_px);
 
     let items: &[(ToolbarAction, &str, ButtonHighlight, bool, bool)] = &[
+        (
+            ToolbarAction::GoHome,
+            "Home",
+            ButtonHighlight::Off,
+            true,
+            false,
+        ),
         (
             ToolbarAction::CycleFamily,
             fam_label,
@@ -1374,7 +1437,10 @@ where
             read_only_history
                 && !matches!(
                     action,
-                    ToolbarAction::ZoomIn | ToolbarAction::ZoomOut | ToolbarAction::CycleUiScale
+                    ToolbarAction::ZoomIn
+                        | ToolbarAction::ZoomOut
+                        | ToolbarAction::CycleUiScale
+                        | ToolbarAction::GoHome
                 ),
             &theme,
             bar,
@@ -1523,6 +1589,7 @@ where
                         ToolbarAction::ZoomIn
                             | ToolbarAction::ZoomOut
                             | ToolbarAction::CycleUiScale
+                            | ToolbarAction::GoHome
                             | ToolbarAction::ToggleTheme
                             | ToolbarAction::ToggleReducedMotion
                     ),
@@ -2283,7 +2350,8 @@ where
             app.surface_mut().set_theme(next);
             app.mark_dirty();
         }
-        ToolbarAction::CycleUiScale
+        ToolbarAction::GoHome
+        | ToolbarAction::CycleUiScale
         | ToolbarAction::OpenLinkDialog
         | ToolbarAction::ToggleOverflow
         | ToolbarAction::ToggleReducedMotion
@@ -2291,6 +2359,768 @@ where
         | ToolbarAction::ToggleSecurity => {}
     }
     Ok(())
+}
+
+/// Visual tokens for the Home shell. They mirror the calm, low-contrast palette of the
+/// `quiet-md` inspiration while staying independent of the document parity theme.
+const HOME_SIDE_BG: Rgba8 = Rgba8::rgb(0xee, 0xf1, 0xf5);
+const HOME_CANVAS_BG: Rgba8 = Rgba8::rgb(0xf7, 0xf8, 0xfa);
+const HOME_SURFACE: Rgba8 = Rgba8::rgb(0xff, 0xff, 0xff);
+const HOME_CARD: Rgba8 = Rgba8::rgb(0xf1, 0xf3, 0xf5);
+const HOME_TAB: Rgba8 = Rgba8::rgb(0xdc, 0xe0, 0xe5);
+const HOME_INK: Rgba8 = Rgba8::rgb(0x20, 0x23, 0x27);
+const HOME_MUTED: Rgba8 = Rgba8::rgb(0x77, 0x7c, 0x84);
+const HOME_FAINT: Rgba8 = Rgba8::rgb(0xd5, 0xd9, 0xde);
+const HOME_ACCENT: Rgba8 = Rgba8::rgb(0x2f, 0x6f, 0xeb);
+const HOME_WASH: Rgba8 = Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 12);
+
+const HOME_SIDEBAR_W: i32 = 216;
+const HOME_CARD_MIN_W: i32 = 196;
+const HOME_CARD_H: i32 = 196;
+const HOME_GAP: i32 = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeHit {
+    Home,
+    Search,
+    NewDocument,
+    Folder(usize),
+    Document(usize),
+    Back,
+    Favorites,
+    MyDocuments,
+    ManualOrder,
+    ListView,
+    Settings,
+    CloseOverlay,
+}
+
+#[derive(Debug, Clone)]
+struct HomeEntry {
+    name: String,
+    folder: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct HomeFolder {
+    name: String,
+    entries: Vec<usize>,
+}
+
+/// Root of the Home library. `HOLONOMY_NOTES_DIR` lets a user point the shell at a synced folder;
+/// otherwise the process's working directory is used, so no hidden database is introduced.
+fn home_library_root() -> PathBuf {
+    std::env::var_os("HOLONOMY_NOTES_DIR")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn enumerate_home_entries(root: &Path) -> Vec<HomeEntry> {
+    fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<HomeEntry>) {
+        if depth > 3 || out.len() >= 240 {
+            return;
+        }
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = read.filter_map(|item| item.ok().map(|e| e.path())).collect();
+        paths.sort();
+        for path in paths {
+            let hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'));
+            if hidden {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, root, depth + 1, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("wavefunction") {
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Untitled".to_owned());
+                let folder = path
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(|p| p.parent())
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, " / "))
+                    .unwrap_or_else(|| "My documents".to_owned());
+                out.push(HomeEntry {
+                    name,
+                    folder,
+                    path,
+                });
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    walk(root, root, 0, &mut entries);
+    entries.sort_by(|a, b| a.folder.cmp(&b.folder).then(a.name.cmp(&b.name)));
+    entries
+}
+
+fn group_home_folders(entries: &[HomeEntry]) -> Vec<HomeFolder> {
+    let mut folders: Vec<HomeFolder> = Vec::new();
+    for (idx, entry) in entries.iter().enumerate() {
+        if let Some(folder) = folders.iter_mut().find(|f| f.name == entry.folder) {
+            folder.entries.push(idx);
+        } else {
+            folders.push(HomeFolder {
+                name: entry.folder.clone(),
+                entries: vec![idx],
+            });
+        }
+    }
+    folders
+}
+
+#[derive(Debug)]
+struct HomeState {
+    root: PathBuf,
+    entries: Vec<HomeEntry>,
+    folders: Vec<HomeFolder>,
+    active_folder: Option<usize>,
+    query: String,
+    search_focused: bool,
+    favorites: bool,
+    manual_order: bool,
+    list_view: bool,
+    settings_open: bool,
+}
+
+impl HomeState {
+    fn new() -> Self {
+        let root = home_library_root();
+        let entries = enumerate_home_entries(&root);
+        let folders = group_home_folders(&entries);
+        Self {
+            root,
+            entries,
+            folders,
+            active_folder: None,
+            query: String::new(),
+            search_focused: false,
+            favorites: false,
+            manual_order: false,
+            list_view: false,
+            settings_open: false,
+        }
+    }
+
+    fn matching_entries(&self) -> Vec<usize> {
+        let needle = self.query.trim().to_lowercase();
+        let mut hits: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                if self.favorites {
+                    return false;
+                }
+                if let Some(folder) = self.active_folder {
+                    if entry.folder != self.folders[folder].name {
+                        return false;
+                    }
+                }
+                needle.is_empty()
+                    || entry.name.to_lowercase().contains(&needle)
+                    || entry.folder.to_lowercase().contains(&needle)
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        if self.manual_order {
+            hits.reverse();
+        }
+        hits
+    }
+}
+
+fn home_fit_text(fonts: &FontSet, text: &str, milli: i64, max_width: i32) -> String {
+    if home_text_width(fonts, text, milli) <= max_width {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        let next = format!("{out}{ch}");
+        if home_text_width(fonts, &next, milli) > max_width.saturating_sub(8) {
+            break;
+        }
+        out = next;
+    }
+    if out.is_empty() {
+        out.push('\u{2026}');
+    } else {
+        out.push('\u{2026}');
+    }
+    out
+}
+
+fn home_text_width(fonts: &FontSet, text: &str, milli: i64) -> i32 {
+    (fonts.advance(text, Style::at(milli)).sixtyfourths() >> 6) as i32
+}
+
+fn draw_home_text(
+    fb: &mut FrameBuffer,
+    fonts: &FontSet,
+    x: i32,
+    baseline: i32,
+    text: &str,
+    milli: i64,
+    color: Rgba8,
+    clip: Rect,
+    bold: bool,
+) {
+    let style = if bold {
+        Style::at(milli).bold()
+    } else {
+        Style::at(milli)
+    };
+    draw_ui_text(fb, fonts, x, baseline, text, style, color, clip);
+}
+
+fn draw_home_folder_icon(fb: &mut FrameBuffer, x: i32, y: i32, color: Rgba8, clip: Rect) {
+    fb.fill_rect_clipped(Rect::new(x + 1, y + 2, 8, 4), color, clip);
+    fb.fill_rounded_rect(Rect::new(x, y + 4, 14, 9), 2, color, clip);
+}
+
+/// Draws the Home shell into a logical-pixel framebuffer and returns its click targets. Every
+/// surface paired with [`crate::platform::DesktopWindow`] pointer coordinates, so scaling stays
+/// consistent with the editor.
+fn render_home(
+    fb: &mut FrameBuffer,
+    fonts: &FontSet,
+    state: &HomeState,
+) -> Vec<(Rect, HomeHit)> {
+    let w = i32::from(fb.width);
+    let h = i32::from(fb.height);
+    let full = Rect::new(0, 0, w, h);
+    let sidebar = Rect::new(0, 0, HOME_SIDEBAR_W.min(w / 3), h);
+    let content_x = sidebar.w;
+    let content = Rect::new(content_x, 0, w - content_x, h);
+    let mut hits = Vec::new();
+
+    fb.fill_rect_clipped(full, HOME_SIDE_BG, full);
+    fb.fill_rect_clipped(content, HOME_CANVAS_BG, content);
+    fb.fill_rect_clipped(Rect::new(sidebar.w - 1, 0, 1, h), HOME_FAINT, full);
+
+    // Sidebar: Home, library folders, and a settings row pinned to the bottom.
+    let side_pad = 16;
+    let side_w = sidebar.w - 2 * side_pad;
+    let mut sy = 30;
+    let home_row = Rect::new(side_pad, sy - 8, side_w, 36);
+    if !state.favorites && state.active_folder.is_none() {
+        fb.fill_rounded_rect(home_row, 8, HOME_WASH, full);
+    }
+    draw_home_folder_icon(fb, side_pad + 12, sy, HOME_ACCENT, full);
+    draw_home_text(
+        fb, fonts, side_pad + 36, sy + 17, "Home", 920, HOME_INK, full, false,
+    );
+    hits.push((home_row, HomeHit::Home));
+    sy += 62;
+
+    let lib_row = Rect::new(side_pad, sy - 8, side_w, 36);
+    fb.fill_rounded_rect(lib_row, 8, HOME_WASH, full);
+    draw_home_text(
+        fb,
+        fonts,
+        side_pad + 12,
+        sy + 17,
+        "My documents",
+        880,
+        HOME_INK,
+        full,
+        false,
+    );
+    let plus_x = sidebar.w - side_pad - 22;
+    draw_home_text(
+        fb, fonts, plus_x, sy + 17, "+", 1_040, HOME_MUTED, full, false,
+    );
+    hits.push((Rect::new(plus_x - 4, sy - 6, 26, 28), HomeHit::NewDocument));
+    hits.push((lib_row, HomeHit::MyDocuments));
+    sy += 42;
+
+    for (idx, folder) in state.folders.iter().enumerate().take(14) {
+        if sy + 30 > h - 64 {
+            break;
+        }
+        if Some(idx) == state.active_folder {
+            fb.fill_rounded_rect(Rect::new(side_pad, sy - 7, side_w, 30), 7, HOME_WASH, full);
+        }
+        draw_home_folder_icon(fb, side_pad + 14, sy - 2, HOME_MUTED, full);
+        let label = home_fit_text(fonts, &folder.name, 840, side_w - 48);
+        draw_home_text(
+            fb, fonts, side_pad + 38, sy + 14, &label, 840, HOME_INK, full, false,
+        );
+        hits.push((Rect::new(side_pad, sy - 8, side_w, 30), HomeHit::Folder(idx)));
+        sy += 32;
+    }
+
+    let settings = Rect::new(side_pad, h - 52, side_w, 34);
+    fb.fill_rounded_rect(settings, 8, HOME_WASH, full);
+    draw_home_text(
+        fb, fonts, side_pad + 12, h - 30, "Settings", 860, HOME_MUTED, full, false,
+    );
+    hits.push((settings, HomeHit::Settings));
+
+    // Header: title, search field, quick actions.
+    let header_x = content.x + 32;
+    draw_home_text(
+        fb, fonts, header_x, 46, "Home", 1_180, HOME_INK, content, true,
+    );
+    let search_w = (content.w - 420).clamp(180, 380);
+    let search_x = content.x + (content.w - search_w) / 2;
+    let search_rect = Rect::new(search_x, 20, search_w, 36);
+    fb.fill_rounded_rect(search_rect, 10, HOME_SURFACE, content);
+    fb.stroke_rounded_rect(search_rect, 10, HOME_FAINT, content);
+    let search_text = if state.query.is_empty() {
+        "Search documents\u{2026}".to_owned()
+    } else {
+        state.query.clone()
+    };
+    draw_home_text(
+        fb,
+        fonts,
+        search_x + 14,
+        43,
+        &search_text,
+        880,
+        if state.query.is_empty() {
+            HOME_MUTED
+        } else {
+            HOME_INK
+        },
+        search_rect,
+        false,
+    );
+    if state.search_focused {
+        fb.fill_rect_clipped(
+            Rect::new(search_x + 14 + home_text_width(fonts, &search_text, 880), 27, 1, 18),
+            HOME_ACCENT,
+            search_rect,
+        );
+    }
+    let shortcut = if cfg!(target_os = "macos") { "\u{2318} J" } else { "Ctrl J" };
+    draw_home_text(
+        fb,
+        fonts,
+        search_x + search_w - home_text_width(fonts, shortcut, 760) - 12,
+        43,
+        shortcut,
+        760,
+        HOME_MUTED,
+        search_rect,
+        false,
+    );
+    hits.push((search_rect, HomeHit::Search));
+
+    let action_new = Rect::new(content.x + content.w - 56, 20, 32, 32);
+    fb.fill_rounded_rect(action_new, 8, HOME_SURFACE, content);
+    fb.stroke_rounded_rect(action_new, 8, HOME_FAINT, content);
+    draw_home_text(
+        fb,
+        fonts,
+        action_new.x + 9,
+        43,
+        "+",
+        1_080,
+        HOME_INK,
+        action_new,
+        false,
+    );
+    hits.push((action_new, HomeHit::NewDocument));
+
+    // Segmented tabs and library controls.
+    let tabs_y = 84;
+    let my_tab = Rect::new(header_x, tabs_y, 150, 32);
+    let fav_tab = Rect::new(my_tab.x + my_tab.w + 8, tabs_y, 112, 32);
+    for (rect, active) in [(my_tab, !state.favorites), (fav_tab, state.favorites)] {
+        fb.fill_rounded_rect(rect, 9, if active { HOME_WASH } else { HOME_CANVAS_BG }, content);
+        if active {
+            fb.stroke_rounded_rect(rect, 9, HOME_ACCENT, content);
+        }
+    }
+    draw_home_text(
+        fb, fonts, my_tab.x + 16, tabs_y + 22, "My documents", 840, HOME_INK, my_tab, !state.favorites,
+    );
+    draw_home_text(
+        fb, fonts, fav_tab.x + 16, tabs_y + 22, "Favorites", 840, HOME_MUTED, fav_tab, false,
+    );
+    hits.push((my_tab, HomeHit::MyDocuments));
+    hits.push((fav_tab, HomeHit::Favorites));
+
+    let controls_y = tabs_y + 48;
+    let order = Rect::new(content.x + content.w - 236, controls_y, 116, 28);
+    let view_toggle = Rect::new(content.x + content.w - 108, controls_y, 76, 28);
+    fb.fill_rounded_rect(order, 7, HOME_WASH, content);
+    fb.fill_rounded_rect(view_toggle, 7, HOME_WASH, content);
+    draw_home_text(
+        fb,
+        fonts,
+        order.x + 10,
+        controls_y + 19,
+        if state.manual_order { "Manual order" } else { "Name order" },
+        780,
+        HOME_INK,
+        order,
+        false,
+    );
+    draw_home_text(
+        fb,
+        fonts,
+        view_toggle.x + 12,
+        controls_y + 19,
+        if state.list_view { "List" } else { "Grid" },
+        780,
+        HOME_INK,
+        view_toggle,
+        false,
+    );
+    hits.push((order, HomeHit::ManualOrder));
+    hits.push((view_toggle, HomeHit::ListView));
+    draw_home_text(
+        fb,
+        fonts,
+        header_x,
+        controls_y + 19,
+        if state.active_folder.is_some() { "Documents" } else { "Manage" },
+        800,
+        HOME_MUTED,
+        content,
+        false,
+    );
+    if state.active_folder.is_some() {
+        let back = Rect::new(header_x + 76, controls_y - 2, 56, 26);
+        fb.fill_rounded_rect(back, 7, HOME_WASH, content);
+        draw_home_text(fb, fonts, back.x + 12, controls_y + 17, "Back", 780, HOME_INK, back, false);
+        hits.push((back, HomeHit::Back));
+    }
+
+    let grid_y = controls_y + 42;
+    let hits_end = render_home_cards(fb, fonts, state, grid_y, content);
+    hits.extend(hits_end);
+
+    if state.settings_open {
+        let overlay = Rect::new(
+            content.x + (content.w - 440).max(20) / 2,
+            150,
+            440.min(content.w - 40),
+            248,
+        );
+        fb.fill_rounded_rect(overlay, 14, HOME_SURFACE, full);
+        fb.stroke_rounded_rect(overlay, 14, HOME_FAINT, full);
+        draw_home_text(fb, fonts, overlay.x + 22, overlay.y + 38, "Settings", 1_020, HOME_INK, overlay, true);
+        for (row, line) in [
+            "Ctrl J \u{2014} focus search",
+            "Ctrl Alt + / - \u{2014} display scale 100\u{2013}200%",
+            "Ctrl Shift H \u{2014} return Home from a document",
+            "HOLONOMY_NOTES_DIR \u{2014} library folder",
+        ]
+        .iter()
+        .enumerate()
+        {
+            draw_home_text(
+                fb, fonts, overlay.x + 22, overlay.y + 78 + row as i32 * 30, line, 820, HOME_MUTED, overlay, false,
+            );
+        }
+        let close = Rect::new(overlay.x + overlay.w - 40, overlay.y + 12, 28, 28);
+        draw_home_text(fb, fonts, close.x + 8, close.y + 20, "\u{00D7}", 940, HOME_MUTED, close, false);
+        hits.push((close, HomeHit::CloseOverlay));
+    }
+
+    hits
+}
+
+fn render_home_cards(
+    fb: &mut FrameBuffer,
+    fonts: &FontSet,
+    state: &HomeState,
+    top: i32,
+    content: Rect,
+) -> Vec<(Rect, HomeHit)> {
+    let mut hits = Vec::new();
+    let pad = 32;
+    let available = content.w - 2 * pad;
+    if state.favorites || (state.query.is_empty() && state.folders.is_empty()) {
+        let card = Rect::new(content.x + pad, top, available.min(560), 176);
+        fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
+        fb.stroke_rounded_rect(card, 14, HOME_FAINT, content);
+        draw_home_text(
+            fb, fonts, card.x + 24, card.y + 46, "No documents yet", 980, HOME_INK, card, true,
+        );
+        draw_home_text(
+            fb,
+            fonts,
+            card.x + 24,
+            card.y + 78,
+            "Create an encrypted document to start your library.",
+            840,
+            HOME_MUTED,
+            card,
+            false,
+        );
+        let button = Rect::new(card.x + 24, card.y + 108, 156, 36);
+        fb.fill_rounded_rect(button, 9, HOME_ACCENT, card);
+        draw_home_text(fb, fonts, button.x + 20, button.y + 24, "+ New document", 860, HOME_SURFACE, button, false);
+        hits.push((button, HomeHit::NewDocument));
+        return hits;
+    }
+
+    let matching = state.matching_entries();
+    if !state.query.is_empty() {
+        return render_home_document_cards(fb, fonts, state, &matching, top, content);
+    }
+    if let Some(idx) = state.active_folder {
+        if let Some(folder) = state.folders.get(idx) {
+            let mut visible: Vec<usize> = folder.entries.clone();
+            if state.manual_order {
+                visible.reverse();
+            }
+            return render_home_document_cards(fb, fonts, state, &visible, top, content);
+        }
+    }
+
+    let cols = ((available + HOME_GAP) / (HOME_CARD_MIN_W + HOME_GAP)).clamp(1, 4);
+    let card_w = (available - HOME_GAP * (cols - 1)) / cols;
+    for (i, folder) in state.folders.iter().enumerate() {
+        let col = i % cols as usize;
+        let row = i / cols as usize;
+        let x = content.x + pad + col as i32 * (card_w + HOME_GAP);
+        let y = top + row as i32 * (HOME_CARD_H + HOME_GAP);
+        if y + HOME_CARD_H > content.y + content.h || x + card_w > content.x + content.w {
+            break;
+        }
+        let card = Rect::new(x, y, card_w, HOME_CARD_H);
+        fb.fill_rounded_rect(card, 14, HOME_CARD, content);
+        // Stacked paper preview, echoing the folder cards in the reference shell.
+        for layer in (0..3).rev() {
+            let page = Rect::new(
+                x + 16 + layer * 5,
+                y + 20 - layer * 4,
+                card_w - 40 - layer * 10,
+                108,
+            );
+            fb.fill_rounded_rect(page, 7, HOME_SURFACE, card);
+            fb.stroke_rounded_rect(page, 7, HOME_FAINT, card);
+        }
+        let preview = Rect::new(x + 22, y + 26, card_w - 52, 86);
+        let seed = folder.entries.first().copied().unwrap_or(0) + folder.name.len();
+        for line in 0..5 {
+            let width = ((seed * 17 + line * 29) % 61 + 28) as i32;
+            fb.fill_rounded_rect(
+                Rect::new(
+                    preview.x + 4 + (line % 3) * 3,
+                    preview.y + 12 + line * 15,
+                    (preview.w - 16).min(width * preview.w / 100),
+                    3,
+                ),
+                1,
+                if line == 0 { HOME_FAINT } else { HOME_TAB },
+                preview,
+            );
+        }
+        let label = home_fit_text(fonts, &folder.name, 900, card_w - 28);
+        draw_home_text(fb, fonts, x + 16, y + 154, &label, 900, HOME_INK, card, true);
+        let count = format!("{} item{}", folder.entries.len(), if folder.entries.len() == 1 { "" } else { "s" });
+        draw_home_text(fb, fonts, x + 16, y + 178, &count, 800, HOME_MUTED, card, false);
+        hits.push((card, HomeHit::Folder(i)));
+    }
+    hits
+}
+
+fn render_home_document_cards(
+    fb: &mut FrameBuffer,
+    fonts: &FontSet,
+    state: &HomeState,
+    entries: &[usize],
+    top: i32,
+    content: Rect,
+) -> Vec<(Rect, HomeHit)> {
+    let mut hits = Vec::new();
+    let pad = 32;
+    let available = content.w - 2 * pad;
+    if entries.is_empty() {
+        draw_home_text(
+            fb, fonts, content.x + pad, top + 40, "No matching documents", 920, HOME_MUTED, content, false,
+        );
+        return hits;
+    }
+    if state.list_view {
+        let row_h = 54;
+        for (row, &idx) in entries.iter().enumerate().take(8) {
+            let y = top + row as i32 * row_h;
+            let card = Rect::new(content.x + pad, y, available.min(720), row_h - 8);
+            fb.fill_rounded_rect(card, 9, HOME_SURFACE, content);
+            fb.stroke_rounded_rect(card, 9, HOME_FAINT, content);
+            draw_home_folder_icon(fb, card.x + 14, card.y + 12, HOME_ACCENT, card);
+            draw_home_text(
+                fb, fonts, card.x + 42, card.y + 30,
+                &home_fit_text(fonts, &state.entries[idx].name, 880, card.w - 60),
+                880, HOME_INK, card, false,
+            );
+            draw_home_text(
+                fb, fonts, card.x + card.w - 118, card.y + 30, "Open", 800, HOME_ACCENT, card, false,
+            );
+            hits.push((card, HomeHit::Document(idx)));
+        }
+        return hits;
+    }
+    let cols = ((available + HOME_GAP) / (HOME_CARD_MIN_W + HOME_GAP)).clamp(1, 4);
+    let card_w = (available - HOME_GAP * (cols - 1)) / cols;
+    for (i, &idx) in entries.iter().enumerate().take(12) {
+        let col = i % cols as usize;
+        let row = i / cols as usize;
+        let x = content.x + pad + col as i32 * (card_w + HOME_GAP);
+        let y = top + row as i32 * (168 + HOME_GAP);
+        if y + 168 > content.y + content.h || x + card_w > content.x + content.w {
+            break;
+        }
+        let card = Rect::new(x, y, card_w, 168);
+        fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
+        fb.stroke_rounded_rect(card, 14, HOME_FAINT, content);
+        fb.fill_rounded_rect(Rect::new(x + 14, y + 14, card_w - 28, 88), 8, HOME_CARD, card);
+        let preview = Rect::new(x + 22, y + 22, card_w - 44, 72);
+        for line in 0..4 {
+            fb.fill_rounded_rect(
+                Rect::new(preview.x + 4, preview.y + 10 + line * 15, (preview.w - 12) * (60 + line * 8) / 100, 3),
+                1,
+                if line == 0 { HOME_FAINT } else { HOME_TAB },
+                preview,
+            );
+        }
+        draw_home_text(
+            fb, fonts, x + 16, y + 128,
+            &home_fit_text(fonts, &state.entries[idx].name, 900, card_w - 28),
+            900, HOME_INK, card, true,
+        );
+        draw_home_text(
+            fb, fonts, x + 16, y + 152,
+            &home_fit_text(fonts, &state.entries[idx].folder, 780, card_w - 28),
+            780, HOME_MUTED, card, false,
+        );
+        hits.push((card, HomeHit::Document(idx)));
+    }
+    hits
+}
+
+/// Shows the library and returns the document the user chose, already unlocked by the in-window
+/// passphrase prompt. Returning `None` means the native window was closed.
+fn show_home(
+    win: &mut dyn DesktopWindow,
+    fonts: &FontSet,
+) -> Result<Option<(PathBuf, Document)>, Box<dyn std::error::Error>> {
+    let mut state = HomeState::new();
+    let (mut w, mut h) = win.size();
+    let mut dirty = true;
+    let mut hits = Vec::new();
+
+    loop {
+        if dirty {
+            let mut fb = FrameBuffer::new(w, h, HOME_CANVAS_BG);
+            hits = render_home(&mut fb, fonts, &state);
+            win.present_argb(&fb.pixels, w, h)?;
+            dirty = false;
+        }
+
+        for event in win.poll_events(100)? {
+            match event {
+                DesktopEvent::CloseRequested => return Ok(None),
+                DesktopEvent::Resize { width, height } => {
+                    w = width;
+                    h = height;
+                    dirty = true;
+                }
+                DesktopEvent::MouseDown { x, y, .. } => {
+                    let px = i32::from(x);
+                    let py = i32::from(y);
+                    state.search_focused = false;
+                    if let Some((_, hit)) = hits.iter().rev().find(|(r, _)| r.contains(px, py)) {
+                        match *hit {
+                            HomeHit::NewDocument => {
+                                if let Some(chosen) = prompt_gui_document(win, fonts, None)? {
+                                    return Ok(Some(chosen));
+                                }
+                            }
+                            HomeHit::Document(idx) => {
+                                if let Some(entry) = state.entries.get(idx) {
+                                    let path = entry.path.clone();
+                                    if let Some(chosen) =
+                                        prompt_gui_document(win, fonts, Some(&path))?
+                                    {
+                                        return Ok(Some(chosen));
+                                    }
+                                }
+                            }
+                            HomeHit::Folder(idx) => {
+                                state.active_folder = Some(idx);
+                                state.favorites = false;
+                            }
+                            HomeHit::Home | HomeHit::MyDocuments => {
+                                state.active_folder = None;
+                                state.favorites = false;
+                                state.query.clear();
+                            }
+                            HomeHit::Back => state.active_folder = None,
+                            HomeHit::Favorites => {
+                                state.favorites = true;
+                                state.active_folder = None;
+                            }
+                            HomeHit::Search => state.search_focused = true,
+                            HomeHit::ManualOrder => state.manual_order = !state.manual_order,
+                            HomeHit::ListView => state.list_view = !state.list_view,
+                            HomeHit::Settings => state.settings_open = true,
+                            HomeHit::CloseOverlay => state.settings_open = false,
+                        }
+                    }
+                    dirty = true;
+                }
+                DesktopEvent::Key { key, modifiers } => {
+                    if modifiers.control && !modifiers.alt && matches!(key, Key::Character('j')) {
+                        state.search_focused = true;
+                        dirty = true;
+                        continue;
+                    }
+                    match key {
+                        Key::Escape => {
+                            if state.settings_open {
+                                state.settings_open = false;
+                            } else if state.search_focused || !state.query.is_empty() {
+                                state.search_focused = false;
+                                state.query.clear();
+                            } else {
+                                state.active_folder = None;
+                            }
+                        }
+                        Key::Backspace if state.search_focused => {
+                            state.query.pop();
+                        }
+                        Key::Enter if state.search_focused => {
+                            if let Some(&idx) = state.matching_entries().first() {
+                                let path = state.entries[idx].path.clone();
+                                if let Some(chosen) = prompt_gui_document(win, fonts, Some(&path))? {
+                                    return Ok(Some(chosen));
+                                }
+                            }
+                        }
+                        Key::Character(ch)
+                            if state.search_focused && !modifiers.control && !modifiers.alt =>
+                        {
+                            if state.query.len() < 64 {
+                                state.query.push(ch);
+                            }
+                        }
+                        _ => {}
+                    }
+                    dirty = true;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 fn recent_paths_file() -> Option<PathBuf> {
@@ -2386,7 +3216,7 @@ fn prompt_gui_document(
     loop {
         if dirty {
             let (w, h) = x11.size();
-            let mut fb = FrameBuffer::new(w, h, Rgba8::rgb(0xf6, 0xf7, 0xf9));
+            let mut fb = FrameBuffer::new(w, h, HOME_CANVAS_BG);
             let clip = Rect::new(0, 0, i32::from(w), i32::from(h));
             let recents_rows = recent_paths.len().min(4) as i32;
             let card_w = i32::from(w).min(520) - 32;
@@ -2399,8 +3229,8 @@ fn prompt_gui_document(
             let cx = (i32::from(w) - card_w) / 2;
             let cy = (i32::from(h) - card_h) / 2;
             let card = Rect::new(cx, cy, card_w, card_h);
-            fb.fill_rect_clipped(card, QUIET_MD_THEME.bg_body, clip);
-            fb.stroke_rect(card, QUIET_MD_THEME.line_border, clip);
+            fb.fill_rounded_rect(card, 16, HOME_SURFACE, clip);
+            fb.stroke_rounded_rect(card, 16, HOME_FAINT, clip);
 
             let path_obj = Path::new(&path_buf);
             let exists = !path_buf.trim().is_empty() && path_obj.exists();
@@ -2418,7 +3248,7 @@ fn prompt_gui_document(
                 cy + 36,
                 heading,
                 Style::at(1_250).bold(),
-                QUIET_MD_THEME.text,
+                HOME_INK,
                 card,
             );
             draw_ui_text(
@@ -2428,25 +3258,27 @@ fn prompt_gui_document(
                 cy + 62,
                 "Path:",
                 Style::at(850),
-                QUIET_MD_THEME.text_caption,
+                HOME_MUTED,
                 card,
             );
             let path_box = Rect::new(cx + 24, cy + 70, card_w - 48, 30);
-            fb.fill_rect_clipped(
+            fb.fill_rounded_rect(
                 path_box,
+                8,
                 if editing_path {
-                    QUIET_MD_THEME.bg_body
+                    HOME_SURFACE
                 } else {
-                    QUIET_MD_THEME.code_bg
+                    HOME_CARD
                 },
                 card,
             );
-            fb.stroke_rect(
+            fb.stroke_rounded_rect(
                 path_box,
+                8,
                 if editing_path {
-                    QUIET_MD_THEME.caret
+                    HOME_ACCENT
                 } else {
-                    QUIET_MD_THEME.line_border
+                    HOME_FAINT
                 },
                 card,
             );
@@ -2457,7 +3289,7 @@ fn prompt_gui_document(
                 path_box.y + 20,
                 &path_buf,
                 Style::at(920),
-                QUIET_MD_THEME.text,
+                HOME_INK,
                 path_box,
             );
 
@@ -2468,17 +3300,18 @@ fn prompt_gui_document(
                 cy + 124,
                 "Passphrase (memory-scrubbed; Esc cancels):",
                 Style::at(850),
-                QUIET_MD_THEME.text_caption,
+                HOME_MUTED,
                 card,
             );
             let pass_box = Rect::new(cx + 24, cy + 132, card_w - 48, 32);
-            fb.fill_rect_clipped(pass_box, QUIET_MD_THEME.bg_body, card);
-            fb.stroke_rect(
+            fb.fill_rounded_rect(pass_box, 8, HOME_SURFACE, card);
+            fb.stroke_rounded_rect(
                 pass_box,
+                8,
                 if !editing_path {
-                    QUIET_MD_THEME.caret
+                    HOME_ACCENT
                 } else {
-                    QUIET_MD_THEME.line_border
+                    HOME_FAINT
                 },
                 card,
             );
@@ -2491,13 +3324,13 @@ fn prompt_gui_document(
                 pass_box.y + 21,
                 &dots,
                 Style::at(1_000),
-                QUIET_MD_THEME.text,
+                HOME_INK,
                 pass_box,
             );
 
             // Live passphrase strength meter (`UI-SPEC.md` §5.2).
             let meter_track = Rect::new(cx + 24, cy + 172, card_w - 48, 5);
-            fb.fill_rect_clipped(meter_track, QUIET_MD_THEME.code_bg, card);
+            fb.fill_rounded_rect(meter_track, 2, HOME_CARD, card);
             let pass_text = std::str::from_utf8(&pass_buf).unwrap_or("");
             let strength = estimate_passphrase_strength(pass_text);
             let (tier_color, fill_pct) = match strength.tier {
@@ -2537,7 +3370,7 @@ fn prompt_gui_document(
                 &meter_label,
                 Style::at(780),
                 if char_count == 0 {
-                    QUIET_MD_THEME.text_caption
+                    HOME_MUTED
                 } else {
                     tier_color
                 },
@@ -2563,7 +3396,7 @@ fn prompt_gui_document(
                 &footer,
                 Style::at(820),
                 if error_msg.is_empty() {
-                    QUIET_MD_THEME.text_caption
+                    HOME_MUTED
                 } else {
                     SecurityDotState::Tripped.color()
                 },
@@ -2582,7 +3415,7 @@ fn prompt_gui_document(
                 remember_box.y + 16,
                 &opt_label,
                 Style::at(780),
-                QUIET_MD_THEME.text_caption,
+                HOME_MUTED,
                 card,
             );
 
@@ -2596,13 +3429,13 @@ fn prompt_gui_document(
                     ry + 12,
                     "Recent world-lines:",
                     Style::at(780).bold(),
-                    QUIET_MD_THEME.text_caption,
+                    HOME_MUTED,
                     card,
                 );
                 ry += 20;
                 for recent in recent_paths.iter().take(4) {
                     let row = Rect::new(cx + 24, ry, card_w - 48, 20);
-                    fb.fill_rect_clipped(row, QUIET_MD_THEME.code_bg, card);
+                    fb.fill_rounded_rect(row, 6, HOME_CARD, card);
                     draw_ui_text(
                         &mut fb,
                         fonts,
@@ -2610,7 +3443,7 @@ fn prompt_gui_document(
                         row.y + 15,
                         recent,
                         Style::at(800),
-                        QUIET_MD_THEME.link,
+                        HOME_ACCENT,
                         row,
                     );
                     recent_hits.push((row, recent.clone()));
@@ -2761,7 +3594,7 @@ pub enum GuiWipeUnconfirmed {
 }
 
 /// Final outcome of a graphical desktop editing session.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DesktopEnd {
     /// Window closed normally with all pending edits saved.
     Saved,
@@ -2769,6 +3602,8 @@ pub enum DesktopEnd {
     NothingToWrite,
     /// User cancelled unlock/open dialog cleanly.
     Cancelled,
+    /// User asked to return to the Home library; the session saved and closed cleanly.
+    GoHome,
     /// Final save refused on exit.
     SaveFailed,
     /// Emergency reaper wiped plaintext on deadman / `Ctrl+L`.
@@ -2865,13 +3700,36 @@ fn run_desktop_with_window(
     deadman: Option<Duration>,
 ) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
     let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px)?;
+    let mut preselected = initial_path.map(PathBuf::from);
 
-    let Some((doc_path, document)) =
-        prompt_gui_document(x11.as_window_mut(), &fonts, initial_path)?
-    else {
-        return Ok(DesktopEnd::Cancelled);
-    };
+    loop {
+        let (doc_path, document) = if let Some(ref path) = preselected {
+            let Some(chosen) = prompt_gui_document(x11.as_window_mut(), &fonts, Some(path))? else {
+                return Ok(DesktopEnd::Cancelled);
+            };
+            chosen
+        } else {
+            let Some(chosen) = show_home(x11.as_window_mut(), &fonts)? else {
+                return Ok(DesktopEnd::Cancelled);
+            };
+            chosen
+        };
+        preselected = None;
+        let end = run_document_session(&mut x11, fonts.clone(), doc_path, document, deadman)?;
+        if end == DesktopEnd::GoHome {
+            continue;
+        }
+        return Ok(end);
+    }
+}
 
+fn run_document_session(
+    x11: &mut ScaledWindow,
+    fonts: FontSet,
+    doc_path: PathBuf,
+    document: Document,
+    deadman: Option<Duration>,
+) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
     let arenas = SecretArenas::new();
     let mut canary_set = CanarySet::new(8, 256);
     let _ = canary_set.arm_all(&arenas);
@@ -2932,6 +3790,7 @@ fn run_desktop_with_window(
     let mut last_activity = Instant::now();
     let mut pending_paint = true;
     let mut quit = false;
+    let mut home_requested = false;
 
     loop {
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
@@ -3262,6 +4121,11 @@ fn run_desktop_with_window(
                         .copied()
                     {
                         match hit.action {
+                            ToolbarAction::GoHome => {
+                                home_requested = true;
+                                pending_paint = true;
+                                continue;
+                            }
                             ToolbarAction::CycleUiScale => {
                                 overflow_open = false;
                                 apply_display_scale(&mut x11, 1, &mut status_msg);
@@ -3494,6 +4358,11 @@ fn run_desktop_with_window(
                                 pending_paint = true;
                                 continue;
                             }
+                            Key::Character('h' | 'H') if modifiers.shift => {
+                                home_requested = true;
+                                pending_paint = true;
+                                continue;
+                            }
                             Key::Character('m' | 'M') if modifiers.shift => {
                                 reduced_motion = !reduced_motion;
                                 status_msg = if reduced_motion {
@@ -3682,6 +4551,10 @@ fn run_desktop_with_window(
     }
 
     x11.clear_clipboard();
+    if home_requested {
+        let _ = save_gui(&mut app);
+        return Ok(DesktopEnd::GoHome);
+    }
     Ok(if !app.has_pending() {
         DesktopEnd::NothingToWrite
     } else if save_gui(&mut app) {
@@ -4794,5 +5667,85 @@ mod tests {
         let dismiss = render_recovery_banner(app.surface_mut(), 42, bar_y);
         assert!(dismiss.is_some());
         render_link_bar(app.surface_mut(), "https://holonomy.example");
+    }
+
+
+    #[test]
+    fn rounded_spans_inset_the_corner_rows() {
+        let rect = Rect::new(0, 0, 20, 20);
+        assert_eq!(FrameBuffer::rounded_span(rect, 6, 0), Some((6, 14)));
+        assert_eq!(FrameBuffer::rounded_span(rect, 6, 6), Some((0, 20)));
+        assert_eq!(FrameBuffer::rounded_span(rect, 6, 19), Some((6, 14)));
+    }
+
+    #[test]
+    fn home_library_groups_documents_by_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "holonomy-home-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let blue = root.join("Blue");
+        let city = root.join("Maps & Cities");
+        std::fs::create_dir_all(&blue).expect("blue folder");
+        std::fs::create_dir_all(&city).expect("city folder");
+        std::fs::write(blue.join("Board.wavefunction"), b"").expect("board");
+        std::fs::write(blue.join("Blueprint.wavefunction"), b"").expect("blueprint");
+        std::fs::write(city.join("Snow.wavefunction"), b"").expect("snow");
+
+        let entries = enumerate_home_entries(&root);
+        assert_eq!(entries.len(), 3);
+        let folders = group_home_folders(&entries);
+        assert_eq!(folders.len(), 2);
+        assert!(folders.iter().any(|f| f.name == "Blue" && f.entries.len() == 2));
+        assert!(folders.iter().any(|f| f.name == "Maps & Cities" && f.entries.len() == 1));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn home_shell_exposes_search_and_document_hit_targets() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+        let entries = vec![
+            HomeEntry {
+                name: "Board".to_owned(),
+                folder: "Blue".to_owned(),
+                path: PathBuf::from("Blue/Board.wavefunction"),
+            },
+            HomeEntry {
+                name: "Snow".to_owned(),
+                folder: "Maps".to_owned(),
+                path: PathBuf::from("Maps/Snow.wavefunction"),
+            },
+        ];
+        let folders = group_home_folders(&entries);
+        let state = HomeState {
+            root: PathBuf::from("."),
+            entries,
+            folders,
+            active_folder: None,
+            query: String::new(),
+            search_focused: false,
+            favorites: false,
+            manual_order: false,
+            list_view: false,
+            settings_open: false,
+        };
+        let mut fb = FrameBuffer::new(1_120, 780, HOME_CANVAS_BG);
+        let hits = render_home(&mut fb, &fonts, &state);
+        assert!(hits.iter().any(|(_, hit)| *hit == HomeHit::NewDocument));
+        assert!(hits.iter().any(|(_, hit)| *hit == HomeHit::Search));
+        assert!(hits.iter().any(|(_, hit)| matches!(hit, HomeHit::Folder(_))));
+
+        let mut search_state = HomeState {
+            query: "snow".to_owned(),
+            ..state
+        };
+        assert_eq!(search_state.matching_entries(), vec![1]);
+        search_state.active_folder = Some(0);
+        assert!(search_state.matching_entries().is_empty());
     }
 }

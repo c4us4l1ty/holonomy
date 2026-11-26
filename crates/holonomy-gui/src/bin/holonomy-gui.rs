@@ -50,7 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     };
     match run_desktop(doc.as_deref(), deadman)? {
-        DesktopEnd::Saved | DesktopEnd::NothingToWrite | DesktopEnd::Cancelled => Ok(()),
+        DesktopEnd::Saved
+        | DesktopEnd::NothingToWrite
+        | DesktopEnd::Cancelled
+        | DesktopEnd::GoHome => Ok(()),
         DesktopEnd::SaveFailed => {
             eprintln!(
                 "holonomy-gui: final save refused — bytes after last witness are unpersisted"
