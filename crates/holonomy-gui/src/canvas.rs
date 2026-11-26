@@ -2482,7 +2482,6 @@ fn group_home_folders(entries: &[HomeEntry]) -> Vec<HomeFolder> {
 
 #[derive(Debug)]
 struct HomeState {
-    root: PathBuf,
     entries: Vec<HomeEntry>,
     folders: Vec<HomeFolder>,
     active_folder: Option<usize>,
@@ -2500,7 +2499,6 @@ impl HomeState {
         let entries = enumerate_home_entries(&root);
         let folders = group_home_folders(&entries);
         Self {
-            root,
             entries,
             folders,
             active_folder: None,
@@ -2553,11 +2551,7 @@ fn home_fit_text(fonts: &FontSet, text: &str, milli: i64, max_width: i32) -> Str
         }
         out = next;
     }
-    if out.is_empty() {
-        out.push('\u{2026}');
-    } else {
-        out.push('\u{2026}');
-    }
+    out.push('\u{2026}');
     out
 }
 
@@ -2565,6 +2559,7 @@ fn home_text_width(fonts: &FontSet, text: &str, milli: i64) -> i32 {
     (fonts.advance(text, Style::at(milli)).sixtyfourths() >> 6) as i32
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_home_text(
     fb: &mut FrameBuffer,
     fonts: &FontSet,
@@ -3302,11 +3297,12 @@ fn show_home(
                             }
                         }
                         Key::Character(ch)
-                            if state.search_focused && !modifiers.control && !modifiers.alt =>
+                            if state.search_focused
+                                && !modifiers.control
+                                && !modifiers.alt
+                                && state.query.len() < 64 =>
                         {
-                            if state.query.len() < 64 {
-                                state.query.push(ch);
-                            }
+                            state.query.push(ch);
                         }
                         _ => {}
                     }
@@ -5921,7 +5917,6 @@ mod tests {
         ];
         let folders = group_home_folders(&entries);
         let state = HomeState {
-            root: PathBuf::from("."),
             entries,
             folders,
             active_folder: None,
