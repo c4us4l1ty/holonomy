@@ -3036,7 +3036,7 @@ fn render_home_cards(
         let preview = Rect::new(x + 22, y + 26, card_w - 52, 86);
         let seed = folder.entries.first().copied().unwrap_or(0) + folder.name.len();
         for line in 0..5i32 {
-            let width = ((seed * 17 + line * 29) % 61 + 28) as i32;
+            let width = ((seed * 17 + line as usize * 29) % 61 + 28) as i32;
             fb.fill_rounded_rect(
                 Rect::new(
                     preview.x + 4 + (line % 3) * 3,
