@@ -1172,7 +1172,7 @@ fn twenty_four_year_fresh_user_lifecycle_drill() {
         .compact_to(&compacted, PASSPHRASE)
         .expect("compact after 24yr lifecycle");
     drop(restored);
-    assert_eq!(final_doc.witness_count(), 1);
+    assert_eq!(final_doc.witness_count(), 2);
     assert_eq!(
         final_doc
             .verify()

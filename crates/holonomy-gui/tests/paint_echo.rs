@@ -88,6 +88,14 @@ fn software_paint_echo_latency_at_30m_words_head_and_tail() {
     let mut app = App::new(editor, Keymap::new(lh), surface);
     assert!(app.draw().expect("initial paint"));
 
+    // `Typing::resume` initializes the caret at `spine.len()`; jump to byte 0 so head echoes
+    // measure typing and painting at the beginning of the 30M-word document.
+    let head_effects = app
+        .press(Key::Home, Modifiers::control())
+        .expect("Ctrl+Home jump to head of 30M words");
+    assert!(!head_effects.is_empty());
+    assert!(app.draw().expect("paint at 30M-word head"));
+
     let mut head_us = Vec::with_capacity(50);
     for ch in "Keystroke-to-pixel echo benchmark at head of 30M doc."
         .chars()
