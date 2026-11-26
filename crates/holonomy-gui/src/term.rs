@@ -112,7 +112,7 @@ impl Decoder {
             self.escape = Some(vec![byte]);
             return None;
         }
-        if self.expect > 0 {
+        if self.expect > 0 && (0x80..=0xbf).contains(&byte) {
             self.utf8.push(byte);
             if self.utf8.len() == self.expect {
                 let bytes = std::mem::take(&mut self.utf8);
@@ -128,6 +128,15 @@ impl Decoder {
                 };
             }
             return None;
+        }
+        if self.expect > 0 {
+            // A byte that cannot be a continuation ends the half-character. Without this, a
+            // terminal that delivered a lead byte and then a keystroke (a paste cut mid-character,
+            // a serial line dropping bytes) would glue the keystroke to the orphan and report
+            // `Ignored`: Ctrl+S, Enter or an ordinary letter would silently do nothing. The ESC
+            // case above is one instance of the same rule; this is every other ASCII byte.
+            self.utf8.clear();
+            self.expect = 0;
         }
         match byte {
             0x00..=0x1f => Some(control(byte)),
@@ -420,7 +429,10 @@ pub fn screen_with(
     out.push_str(&truncate_to_columns(status, columns));
     out.push_str("\x1b[0m\x1b[K");
     if let Some((column, row)) = surface.caret_cell() {
-        if row < surface.rows() {
+        // A terminal clamps an out-of-range cursor position to the edge, which would paint the
+        // caret in a cell that does not contain it after the window shrinks. Omit it instead:
+        // the next frame that can show the caret will position it.
+        if row < surface.rows() && column < columns {
             out.push_str(&format!("\x1b[{};{}H", row + 1, column + 1));
         }
     }
@@ -588,6 +600,59 @@ mod tests {
             panel_fits(&panel, 6).len(),
             4,
             "rows - 1 surface - 1 status"
+        );
+    }
+
+    #[test]
+    fn a_caret_outside_a_shrunk_grid_is_not_positioned() {
+        let mut surface = CellSurface::new(80, 24, 1);
+        crate::Surface::caret(&mut surface, Fixed::units(79), Fixed::ZERO, Fixed::ONE);
+        surface.resize(40, 10);
+        assert_eq!(surface.caret_cell(), Some((79, 0)));
+        let screen = screen_with(&surface, 40, &[], "status");
+        assert!(
+            !screen.contains("\x1b[1;80H"),
+            "a shrunken terminal must not clamp the caret into the wrong cell"
+        );
+
+        let mut visible = CellSurface::new(40, 10, 1);
+        crate::Surface::caret(&mut visible, Fixed::units(5), Fixed::units(2), Fixed::ONE);
+        assert!(screen_with(&visible, 40, &[], "status").contains("\x1b[3;6H"));
+    }
+
+    #[test]
+    fn a_non_continuation_byte_does_not_swallow_the_next_keystroke() {
+        // A lead byte with no continuation yet is not a license to eat the next key. The old
+        // decoder pushed every byte into the half-character until `expect` was reached, so an
+        // interrupted `é` followed by Ctrl+S reported `Ignored` and never saved the document.
+        assert_eq!(
+            keys(b"\xc3\x13a"),
+            vec![
+                Input::Key(Key::Character('s'), Modifiers::control()),
+                Input::Key(Key::Character('a'), Modifiers::none()),
+            ]
+        );
+        assert_eq!(
+            keys(b"\xe4Z"),
+            vec![Input::Key(Key::Character('Z'), Modifiers::none())]
+        );
+        assert_eq!(
+            keys(b"\xf0\r"),
+            vec![Input::Key(Key::Enter, Modifiers::none())]
+        );
+        // An uninterrupted character, including one split across reads, is still one key.
+        assert_eq!(
+            keys("é中".as_bytes()),
+            vec![
+                Input::Key(Key::Character('é'), Modifiers::none()),
+                Input::Key(Key::Character('中'), Modifiers::none()),
+            ]
+        );
+        let (mut decoder, first) = decoder_receiving(b"\xc2", false);
+        assert!(first.is_empty());
+        assert_eq!(
+            decoder.feed_all(&[0xa9]),
+            vec![Input::Key(Key::Character('©'), Modifiers::none())]
         );
     }
 

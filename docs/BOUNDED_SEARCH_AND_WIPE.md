@@ -1,7 +1,8 @@
 # Dense search and emergency-wipe design work
 
-This is an engineering plan, not a passed gate. The current terminal uses a cooperative reaper;
-L-7 and Block 7's complete find/replace memory gate remain open.
+This is an engineering record, not a passed gate. The current terminal uses a cooperative reaper,
+so L-7 remains open; Block 7's bounded search and dense replace-all are measured in CI, but a
+total-process-memory qualification is still open.
 
 ## Dense search and replacement
 
@@ -10,22 +11,24 @@ and scans in small byte windows, including for fragmented spines. The terminal u
 to count and select a match without collecting the result set. Source implementations and
 visitors may allocate additional memory, so this is not a total-process-memory guarantee.
 
-`find_all` and the current transactional `replace_all` still build a vector of match positions.
-They now explicitly reject more than 16,384 matches before modifying the document, rather than
-attempting an unbounded allocation. This is a **functional limit**, not a solution for dense
-replace-all. The persisted manifest also has a 1,048,576-slab format limit; repeated path-copy
-edits can produce one or more slabs per match. Removing only the result-vector limit would not
-make arbitrary dense replacement correct or bounded.
+The collecting API still has a **functional limit**: `find_all` / `find_streaming` reject more
+than 16,384 matches rather than attempting an unbounded allocation. Dense callers use
+`find_nth`, which counts and selects one match without collecting the result set. That limit is
+about the collecting API, not about what the editor can replace.
 
-A plausible full implementation needs a streaming output transaction, not millions of slab
-references: scan the original in bounded chunks, produce replacement text and transformed style
-runs incrementally, re-seal the result in bounded segments, and publish all resulting segment
-records and the final manifest under one witness. The transaction needs a bounded staging API in
-`WorldLine`, including explicit rollback/reopen semantics on every write and sync failure. It must
-preserve UTF-8, cross-segment matches, style/link semantics, and single-step undo; bound and check
-its manifest and style representation; and wipe transient plaintext on all exits. This trades
-extra encrypted writes for memory independent of the number of matches. It needs fault injection,
-reopen/undo tests, and dense 30-million-word tests before the restriction can be removed.
+`Typing::replace_all` now has two paths (OQ-32). Sparse matches reuse one sealed replacement across
+spine path copies. Above the collection limit it falls back to `stream_replace_chunks`, which
+scans the original in bounded windows, emits valid UTF-8 output chunks, transforms style runs
+incrementally and publishes through `WorldLine::StreamingTx` as one undoable transaction. CI
+measures 30,013,649 dense matches at 1.83 MiB incremental heap against a 4 MiB bound, and
+`persist.rs` verifies dense replacement plus undo across reopen. A sink without streaming support
+still fails closed with `MatchLimitExceeded`, and the persisted manifest has a 1,048,576-slab
+format limit; neither is removed by the streaming path.
+
+What remains is qualification, not the missing mechanism: total-process RSS/working-set and
+allocator peak under arbitrary allocator stress, fault injection on the staged transaction's
+write/sync/rollback boundaries, and the same treatment for sparse path-copy replacements. The
+incremental-heap number is not a total-memory ceiling.
 
 Memory qualification must distinguish plaintext residency, Rust heap, total process RSS/working
 set, allocator overhead, stacks, mappings and kernel cache. A sampled RSS is only a lower bound on

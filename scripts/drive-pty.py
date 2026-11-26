@@ -12,7 +12,8 @@ ambiguity: keys go in on a schedule, output is read until the child exits or the
 and the deadline is enforced with a kill rather than hoped for.
 
 Usage:
-    drive.py --timeout 30 --out session.bin -- <argv...>  (keys on stdin as JSON: [[delay, text]])
+    drive.py --timeout 30 --out session.bin -- <argv...>  (keys via --keys: [[delay, text]])
+    drive.py --kill-after 1.9 --expect-kill -- ...       (crash the child on purpose)
 
 Exits 0 when the child exited 0 within the deadline, 1 otherwise, and prints a one-line summary so
 a caller can grep it the way the other measured jobs grep their markers.
@@ -28,8 +29,8 @@ import sys
 import time
 
 
-def drive(argv, keys, timeout, size=None):
-    """Run `argv` on a pty, feed `keys` (a list of (delay_seconds, text)), return (output, code).
+def drive(argv, keys, timeout, size=None, kill_after=None):
+    """Run `argv` on a pty, feed `keys` ([(delay_seconds, text), ...]), return (output, code, killed).
 
     `code` is the child's exit status, or `None` if it had to be killed at the deadline. `None`
     is distinct from a non-zero status on purpose: a program that hung is a different bug from a
@@ -40,6 +41,10 @@ def drive(argv, keys, timeout, size=None):
     (or a pipe whose ioctl fails) renders a wrapped screen and an assertion about visible text
     fails for a reason unrelated to the program. A caller that greps the screen should declare the
     window it expects.
+
+    `kill_after` is a deliberate SIGKILL at that many seconds after start, used by crash-recovery
+    drills. It is distinct from the deadline kill: the caller can require it with `--expect-kill`
+    and tell a crash it asked for from a hung process. Returns `(output, code, intentional_kill)`.
     """
     pid, fd = pty.fork()
     if pid == 0:  # child
@@ -64,13 +69,30 @@ def drive(argv, keys, timeout, size=None):
             os._exit(127)
 
     output = bytearray()
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    kill_at = None if kill_after is None else started + kill_after
     pending = list(keys)
-    next_key_at = time.monotonic() + (pending[0][0] if pending else 0.0)
+    next_key_at = started + (pending[0][0] if pending else 0.0)
     code = None
+    intentional_kill = False
 
     while True:
         now = time.monotonic()
+        if not intentional_kill and kill_at is not None and now >= kill_at:
+            # The caller asked for this death: record it as such instead of letting a late
+            # deadline kill look like the same event.
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            intentional_kill = True
+            try:
+                _, status = os.waitpid(pid, 0)
+                code = os.waitstatus_to_exitcode(status)
+            except ChildProcessError:
+                pass
+            break
         if now > deadline:
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -123,7 +145,7 @@ def drive(argv, keys, timeout, size=None):
         os.close(fd)
     except OSError:
         pass
-    return bytes(output), code
+    return bytes(output), code, intentional_kill
 
 
 def main():
@@ -136,6 +158,17 @@ def main():
     )
     parser.add_argument(
         "--rows", type=int, default=None, help="pty height in rows (default: inherited)"
+    )
+    parser.add_argument(
+        "--kill-after",
+        type=float,
+        default=None,
+        help="SIGKILL the child this many seconds after start (crash drills)",
+    )
+    parser.add_argument(
+        "--expect-kill",
+        action="store_true",
+        help="treat the deliberate --kill-after SIGKILL as success",
     )
     parser.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -150,14 +183,24 @@ def main():
     size = None
     if args.cols is not None and args.rows is not None:
         size = (args.cols, args.rows)
-    output, code = drive(argv, [(float(d), t) for d, t in keys], args.timeout, size)
+    output, code, intentional_kill = drive(
+        argv, [(float(d), t) for d, t in keys], args.timeout, size, args.kill_after
+    )
 
     if args.out:
         with open(args.out, "wb") as handle:
             handle.write(output)
 
-    sys.stdout.write(f"HOLONOMY_DRIVE exit={code} bytes={len(output)}\n")
+    sys.stdout.write(
+        f"HOLONOMY_DRIVE exit={code} bytes={len(output)} "
+        f"intentional_kill={'yes' if intentional_kill else 'no'}\n"
+    )
     sys.stdout.flush()
+    if args.expect_kill:
+        if not intentional_kill or code not in (-9, None):
+            sys.stderr.write("drive: expected the deliberate SIGKILL and did not get it\n")
+            return 1
+        return 0
     if code != 0:
         sys.stderr.write(f"drive: {'killed at the deadline' if code is None else f'exit {code}'}\n")
         return 1

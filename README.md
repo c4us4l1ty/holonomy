@@ -101,7 +101,7 @@ detail lives.
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
 | Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection + `GDEF`/`GSUB`/`GPOS` shaping** (`displaced = 0`, split selection spans, kerning/ligatures/marks) | OQ-11 (D-77), OQ-24 (D-95) |
 | Emergency wipe & zeroize canaries (`L-7`) | **Not qualified.** Historical headless tests wipe selected buffers and canaries; the live reaper is cooperative and can stall with the UI, so a blocked window cannot meet the 50 ms deadline. The window now reports a wipe by the reaper's own outcome and exits 1 when it cannot be confirmed (D-89), but that is a receipt for *registered* arenas, not complete plaintext coverage. A Linux isolated-supervisor test is not wired into the editor. | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-82–D-89) |
-| Crash before a save | **Unsaved edits can be lost.** The open typing buffer and unsaved structural changes are not durable until a successful commit; physical power-loss behavior remains unqualified. | D-64, OQ-29/OQ-30 |
+| Crash before a save | **Unsaved edits can be lost.** The open typing buffer and unsaved structural changes are not durable until a successful commit. `SIGKILL` after a witnessed commit is now exercised end to end against the shipped binary (`HOLONOMY_CRASH_RECOVERY`); physical power-loss behavior remains unqualified. | D-64, OQ-29/OQ-30, D-97 |
 | Search and replace | **Streaming find + streaming dense replace-all** — `find_all` still refuses > 16,384 positions, while `replace_all` streams dense replacements (`30,013,649` matches in CI, `1.83 MiB` heap delta vs `4 MiB` bound) via `StreamingTx` whenever the sink supports streaming | `holonomy-text::search`, `AUDIT.md` D-94, `docs/BOUNDED_SEARCH_AND_WIPE.md` |
 | Documents open at once | **One**, one window, one caret. No panes or settings | — |
 | DEM key & passphrase buffers | **Owned and zeroized on drop** — `WorldLine` owns `DEMKey` (`OQ-27`), and prompt input is pre-allocated + NFC-normalized in `PassphraseInput` (`OQ-28`) | `holonomy-seal`, `holonomy-line`, `holonomy-gui` |
@@ -158,6 +158,7 @@ cargo test --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo run -p xtask -- gates --check
 scripts/smoke-install.sh
+scripts/qualify-crash-recovery.sh
 ```
 
 The last one builds the release binary and drives it through a real terminal — a passphrase, a
