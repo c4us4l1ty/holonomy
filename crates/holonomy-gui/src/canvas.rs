@@ -2425,7 +2425,9 @@ fn enumerate_home_entries(root: &Path) -> Vec<HomeEntry> {
         let Ok(read) = std::fs::read_dir(dir) else {
             return;
         };
-        let mut paths: Vec<PathBuf> = read.filter_map(|item| item.ok().map(|e| e.path())).collect();
+        let mut paths: Vec<PathBuf> = read
+            .filter_map(|item| item.ok().map(|e| e.path()))
+            .collect();
         paths.sort();
         for path in paths {
             let hidden = path
@@ -2447,13 +2449,12 @@ fn enumerate_home_entries(root: &Path) -> Vec<HomeEntry> {
                     .ok()
                     .and_then(|p| p.parent())
                     .filter(|p| !p.as_os_str().is_empty())
-                    .map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, " / "))
+                    .map(|p| {
+                        p.to_string_lossy()
+                            .replace(std::path::MAIN_SEPARATOR, " / ")
+                    })
                     .unwrap_or_else(|| "My documents".to_owned());
-                out.push(HomeEntry {
-                    name,
-                    folder,
-                    path,
-                });
+                out.push(HomeEntry { name, folder, path });
             }
         }
     }
@@ -2591,11 +2592,7 @@ fn draw_home_folder_icon(fb: &mut FrameBuffer, x: i32, y: i32, color: Rgba8, cli
 /// Draws the Home shell into a logical-pixel framebuffer and returns its click targets. Every
 /// surface paired with [`crate::platform::DesktopWindow`] pointer coordinates, so scaling stays
 /// consistent with the editor.
-fn render_home(
-    fb: &mut FrameBuffer,
-    fonts: &FontSet,
-    state: &HomeState,
-) -> Vec<(Rect, HomeHit)> {
+fn render_home(fb: &mut FrameBuffer, fonts: &FontSet, state: &HomeState) -> Vec<(Rect, HomeHit)> {
     let w = i32::from(fb.width);
     let h = i32::from(fb.height);
     let full = Rect::new(0, 0, w, h);
@@ -2618,7 +2615,15 @@ fn render_home(
     }
     draw_home_folder_icon(fb, side_pad + 12, sy, HOME_ACCENT, full);
     draw_home_text(
-        fb, fonts, side_pad + 36, sy + 17, "Home", 920, HOME_INK, full, false,
+        fb,
+        fonts,
+        side_pad + 36,
+        sy + 17,
+        "Home",
+        920,
+        HOME_INK,
+        full,
+        false,
     );
     hits.push((home_row, HomeHit::Home));
     sy += 62;
@@ -2638,7 +2643,15 @@ fn render_home(
     );
     let plus_x = sidebar.w - side_pad - 22;
     draw_home_text(
-        fb, fonts, plus_x, sy + 17, "+", 1_040, HOME_MUTED, full, false,
+        fb,
+        fonts,
+        plus_x,
+        sy + 17,
+        "+",
+        1_040,
+        HOME_MUTED,
+        full,
+        false,
     );
     hits.push((Rect::new(plus_x - 4, sy - 6, 26, 28), HomeHit::NewDocument));
     hits.push((lib_row, HomeHit::MyDocuments));
@@ -2654,16 +2667,35 @@ fn render_home(
         draw_home_folder_icon(fb, side_pad + 14, sy - 2, HOME_MUTED, full);
         let label = home_fit_text(fonts, &folder.name, 840, side_w - 48);
         draw_home_text(
-            fb, fonts, side_pad + 38, sy + 14, &label, 840, HOME_INK, full, false,
+            fb,
+            fonts,
+            side_pad + 38,
+            sy + 14,
+            &label,
+            840,
+            HOME_INK,
+            full,
+            false,
         );
-        hits.push((Rect::new(side_pad, sy - 8, side_w, 30), HomeHit::Folder(idx)));
+        hits.push((
+            Rect::new(side_pad, sy - 8, side_w, 30),
+            HomeHit::Folder(idx),
+        ));
         sy += 32;
     }
 
     let settings = Rect::new(side_pad, h - 52, side_w, 34);
     fb.fill_rounded_rect(settings, 8, HOME_WASH, full);
     draw_home_text(
-        fb, fonts, side_pad + 12, h - 30, "Settings", 860, HOME_MUTED, full, false,
+        fb,
+        fonts,
+        side_pad + 12,
+        h - 30,
+        "Settings",
+        860,
+        HOME_MUTED,
+        full,
+        false,
     );
     hits.push((settings, HomeHit::Settings));
 
@@ -2699,12 +2731,21 @@ fn render_home(
     );
     if state.search_focused {
         fb.fill_rect_clipped(
-            Rect::new(search_x + 14 + home_text_width(fonts, &search_text, 880), 27, 1, 18),
+            Rect::new(
+                search_x + 14 + home_text_width(fonts, &search_text, 880),
+                27,
+                1,
+                18,
+            ),
             HOME_ACCENT,
             search_rect,
         );
     }
-    let shortcut = if cfg!(target_os = "macos") { "\u{2318} J" } else { "Ctrl J" };
+    let shortcut = if cfg!(target_os = "macos") {
+        "\u{2318} J"
+    } else {
+        "Ctrl J"
+    };
     draw_home_text(
         fb,
         fonts,
@@ -2739,16 +2780,37 @@ fn render_home(
     let my_tab = Rect::new(header_x, tabs_y, 150, 32);
     let fav_tab = Rect::new(my_tab.x + my_tab.w + 8, tabs_y, 112, 32);
     for (rect, active) in [(my_tab, !state.favorites), (fav_tab, state.favorites)] {
-        fb.fill_rounded_rect(rect, 9, if active { HOME_WASH } else { HOME_CANVAS_BG }, content);
+        fb.fill_rounded_rect(
+            rect,
+            9,
+            if active { HOME_WASH } else { HOME_CANVAS_BG },
+            content,
+        );
         if active {
             fb.stroke_rounded_rect(rect, 9, HOME_ACCENT, content);
         }
     }
     draw_home_text(
-        fb, fonts, my_tab.x + 16, tabs_y + 22, "My documents", 840, HOME_INK, my_tab, !state.favorites,
+        fb,
+        fonts,
+        my_tab.x + 16,
+        tabs_y + 22,
+        "My documents",
+        840,
+        HOME_INK,
+        my_tab,
+        !state.favorites,
     );
     draw_home_text(
-        fb, fonts, fav_tab.x + 16, tabs_y + 22, "Favorites", 840, HOME_MUTED, fav_tab, false,
+        fb,
+        fonts,
+        fav_tab.x + 16,
+        tabs_y + 22,
+        "Favorites",
+        840,
+        HOME_MUTED,
+        fav_tab,
+        false,
     );
     hits.push((my_tab, HomeHit::MyDocuments));
     hits.push((fav_tab, HomeHit::Favorites));
@@ -2763,7 +2825,11 @@ fn render_home(
         fonts,
         order.x + 10,
         controls_y + 19,
-        if state.manual_order { "Manual order" } else { "Name order" },
+        if state.manual_order {
+            "Manual order"
+        } else {
+            "Name order"
+        },
         780,
         HOME_INK,
         order,
@@ -2787,7 +2853,11 @@ fn render_home(
         fonts,
         header_x,
         controls_y + 19,
-        if state.active_folder.is_some() { "Documents" } else { "Manage" },
+        if state.active_folder.is_some() {
+            "Documents"
+        } else {
+            "Manage"
+        },
         800,
         HOME_MUTED,
         content,
@@ -2796,7 +2866,17 @@ fn render_home(
     if state.active_folder.is_some() {
         let back = Rect::new(header_x + 76, controls_y - 2, 56, 26);
         fb.fill_rounded_rect(back, 7, HOME_WASH, content);
-        draw_home_text(fb, fonts, back.x + 12, controls_y + 17, "Back", 780, HOME_INK, back, false);
+        draw_home_text(
+            fb,
+            fonts,
+            back.x + 12,
+            controls_y + 17,
+            "Back",
+            780,
+            HOME_INK,
+            back,
+            false,
+        );
         hits.push((back, HomeHit::Back));
     }
 
@@ -2813,7 +2893,17 @@ fn render_home(
         );
         fb.fill_rounded_rect(overlay, 14, HOME_SURFACE, full);
         fb.stroke_rounded_rect(overlay, 14, HOME_FAINT, full);
-        draw_home_text(fb, fonts, overlay.x + 22, overlay.y + 38, "Settings", 1_020, HOME_INK, overlay, true);
+        draw_home_text(
+            fb,
+            fonts,
+            overlay.x + 22,
+            overlay.y + 38,
+            "Settings",
+            1_020,
+            HOME_INK,
+            overlay,
+            true,
+        );
         for (row, line) in [
             "Ctrl J \u{2014} focus search",
             "Ctrl Alt + / - \u{2014} display scale 100\u{2013}200%",
@@ -2824,11 +2914,29 @@ fn render_home(
         .enumerate()
         {
             draw_home_text(
-                fb, fonts, overlay.x + 22, overlay.y + 78 + row as i32 * 30, line, 820, HOME_MUTED, overlay, false,
+                fb,
+                fonts,
+                overlay.x + 22,
+                overlay.y + 78 + row as i32 * 30,
+                line,
+                820,
+                HOME_MUTED,
+                overlay,
+                false,
             );
         }
         let close = Rect::new(overlay.x + overlay.w - 40, overlay.y + 12, 28, 28);
-        draw_home_text(fb, fonts, close.x + 8, close.y + 20, "\u{00D7}", 940, HOME_MUTED, close, false);
+        draw_home_text(
+            fb,
+            fonts,
+            close.x + 8,
+            close.y + 20,
+            "\u{00D7}",
+            940,
+            HOME_MUTED,
+            close,
+            false,
+        );
         hits.push((close, HomeHit::CloseOverlay));
     }
 
@@ -2850,7 +2958,15 @@ fn render_home_cards(
         fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
         fb.stroke_rounded_rect(card, 14, HOME_FAINT, content);
         draw_home_text(
-            fb, fonts, card.x + 24, card.y + 46, "No documents yet", 980, HOME_INK, card, true,
+            fb,
+            fonts,
+            card.x + 24,
+            card.y + 46,
+            "No documents yet",
+            980,
+            HOME_INK,
+            card,
+            true,
         );
         draw_home_text(
             fb,
@@ -2865,7 +2981,17 @@ fn render_home_cards(
         );
         let button = Rect::new(card.x + 24, card.y + 108, 156, 36);
         fb.fill_rounded_rect(button, 9, HOME_ACCENT, card);
-        draw_home_text(fb, fonts, button.x + 20, button.y + 24, "+ New document", 860, HOME_SURFACE, button, false);
+        draw_home_text(
+            fb,
+            fonts,
+            button.x + 20,
+            button.y + 24,
+            "+ New document",
+            860,
+            HOME_SURFACE,
+            button,
+            false,
+        );
         hits.push((button, HomeHit::NewDocument));
         return hits;
     }
@@ -2909,7 +3035,7 @@ fn render_home_cards(
         }
         let preview = Rect::new(x + 22, y + 26, card_w - 52, 86);
         let seed = folder.entries.first().copied().unwrap_or(0) + folder.name.len();
-        for line in 0..5 {
+        for line in 0..5i32 {
             let width = ((seed * 17 + line * 29) % 61 + 28) as i32;
             fb.fill_rounded_rect(
                 Rect::new(
@@ -2924,9 +3050,33 @@ fn render_home_cards(
             );
         }
         let label = home_fit_text(fonts, &folder.name, 900, card_w - 28);
-        draw_home_text(fb, fonts, x + 16, y + 154, &label, 900, HOME_INK, card, true);
-        let count = format!("{} item{}", folder.entries.len(), if folder.entries.len() == 1 { "" } else { "s" });
-        draw_home_text(fb, fonts, x + 16, y + 178, &count, 800, HOME_MUTED, card, false);
+        draw_home_text(
+            fb,
+            fonts,
+            x + 16,
+            y + 154,
+            &label,
+            900,
+            HOME_INK,
+            card,
+            true,
+        );
+        let count = format!(
+            "{} item{}",
+            folder.entries.len(),
+            if folder.entries.len() == 1 { "" } else { "s" }
+        );
+        draw_home_text(
+            fb,
+            fonts,
+            x + 16,
+            y + 178,
+            &count,
+            800,
+            HOME_MUTED,
+            card,
+            false,
+        );
         hits.push((card, HomeHit::Folder(i)));
     }
     hits
@@ -2945,7 +3095,15 @@ fn render_home_document_cards(
     let available = content.w - 2 * pad;
     if entries.is_empty() {
         draw_home_text(
-            fb, fonts, content.x + pad, top + 40, "No matching documents", 920, HOME_MUTED, content, false,
+            fb,
+            fonts,
+            content.x + pad,
+            top + 40,
+            "No matching documents",
+            920,
+            HOME_MUTED,
+            content,
+            false,
         );
         return hits;
     }
@@ -2958,12 +3116,26 @@ fn render_home_document_cards(
             fb.stroke_rounded_rect(card, 9, HOME_FAINT, content);
             draw_home_folder_icon(fb, card.x + 14, card.y + 12, HOME_ACCENT, card);
             draw_home_text(
-                fb, fonts, card.x + 42, card.y + 30,
+                fb,
+                fonts,
+                card.x + 42,
+                card.y + 30,
                 &home_fit_text(fonts, &state.entries[idx].name, 880, card.w - 60),
-                880, HOME_INK, card, false,
+                880,
+                HOME_INK,
+                card,
+                false,
             );
             draw_home_text(
-                fb, fonts, card.x + card.w - 118, card.y + 30, "Open", 800, HOME_ACCENT, card, false,
+                fb,
+                fonts,
+                card.x + card.w - 118,
+                card.y + 30,
+                "Open",
+                800,
+                HOME_ACCENT,
+                card,
+                false,
             );
             hits.push((card, HomeHit::Document(idx)));
         }
@@ -2982,25 +3154,47 @@ fn render_home_document_cards(
         let card = Rect::new(x, y, card_w, 168);
         fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
         fb.stroke_rounded_rect(card, 14, HOME_FAINT, content);
-        fb.fill_rounded_rect(Rect::new(x + 14, y + 14, card_w - 28, 88), 8, HOME_CARD, card);
+        fb.fill_rounded_rect(
+            Rect::new(x + 14, y + 14, card_w - 28, 88),
+            8,
+            HOME_CARD,
+            card,
+        );
         let preview = Rect::new(x + 22, y + 22, card_w - 44, 72);
-        for line in 0..4 {
+        for line in 0..4i32 {
             fb.fill_rounded_rect(
-                Rect::new(preview.x + 4, preview.y + 10 + line * 15, (preview.w - 12) * (60 + line * 8) / 100, 3),
+                Rect::new(
+                    preview.x + 4,
+                    preview.y + 10 + line * 15,
+                    (preview.w - 12) * (60 + line * 8) / 100,
+                    3,
+                ),
                 1,
                 if line == 0 { HOME_FAINT } else { HOME_TAB },
                 preview,
             );
         }
         draw_home_text(
-            fb, fonts, x + 16, y + 128,
+            fb,
+            fonts,
+            x + 16,
+            y + 128,
             &home_fit_text(fonts, &state.entries[idx].name, 900, card_w - 28),
-            900, HOME_INK, card, true,
+            900,
+            HOME_INK,
+            card,
+            true,
         );
         draw_home_text(
-            fb, fonts, x + 16, y + 152,
+            fb,
+            fonts,
+            x + 16,
+            y + 152,
             &home_fit_text(fonts, &state.entries[idx].folder, 780, card_w - 28),
-            780, HOME_MUTED, card, false,
+            780,
+            HOME_MUTED,
+            card,
+            false,
         );
         hits.push((card, HomeHit::Document(idx)));
     }
@@ -3101,7 +3295,8 @@ fn show_home(
                         Key::Enter if state.search_focused => {
                             if let Some(&idx) = state.matching_entries().first() {
                                 let path = state.entries[idx].path.clone();
-                                if let Some(chosen) = prompt_gui_document(win, fonts, Some(&path))? {
+                                if let Some(chosen) = prompt_gui_document(win, fonts, Some(&path))?
+                                {
                                     return Ok(Some(chosen));
                                 }
                             }
@@ -4128,7 +4323,7 @@ fn run_document_session(
                             }
                             ToolbarAction::CycleUiScale => {
                                 overflow_open = false;
-                                apply_display_scale(&mut x11, 1, &mut status_msg);
+                                apply_display_scale(x11, 1, &mut status_msg);
                                 let (w, h) = x11.size();
                                 resize_editor_viewport(&mut app, &mut history_drawer, w, h);
                             }
@@ -4321,7 +4516,7 @@ fn run_document_session(
                             _ => None,
                         };
                         if let Some(steps) = steps {
-                            apply_display_scale(&mut x11, steps, &mut status_msg);
+                            apply_display_scale(x11, steps, &mut status_msg);
                             let (w, h) = x11.size();
                             resize_editor_viewport(&mut app, &mut history_drawer, w, h);
                             pending_paint = true;
@@ -5669,7 +5864,6 @@ mod tests {
         render_link_bar(app.surface_mut(), "https://holonomy.example");
     }
 
-
     #[test]
     fn rounded_spans_inset_the_corner_rows() {
         let rect = Rect::new(0, 0, 20, 20);
@@ -5700,8 +5894,12 @@ mod tests {
         assert_eq!(entries.len(), 3);
         let folders = group_home_folders(&entries);
         assert_eq!(folders.len(), 2);
-        assert!(folders.iter().any(|f| f.name == "Blue" && f.entries.len() == 2));
-        assert!(folders.iter().any(|f| f.name == "Maps & Cities" && f.entries.len() == 1));
+        assert!(folders
+            .iter()
+            .any(|f| f.name == "Blue" && f.entries.len() == 2));
+        assert!(folders
+            .iter()
+            .any(|f| f.name == "Maps & Cities" && f.entries.len() == 1));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -5738,7 +5936,9 @@ mod tests {
         let hits = render_home(&mut fb, &fonts, &state);
         assert!(hits.iter().any(|(_, hit)| *hit == HomeHit::NewDocument));
         assert!(hits.iter().any(|(_, hit)| *hit == HomeHit::Search));
-        assert!(hits.iter().any(|(_, hit)| matches!(hit, HomeHit::Folder(_))));
+        assert!(hits
+            .iter()
+            .any(|(_, hit)| matches!(hit, HomeHit::Folder(_))));
 
         let mut search_state = HomeState {
             query: "snow".to_owned(),
