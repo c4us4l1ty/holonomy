@@ -3955,8 +3955,7 @@ fn run_desktop_with_window(
 
     loop {
         let (doc_path, document) = if let Some(ref path) = preselected {
-            let Some(chosen) =
-                prompt_gui_document(x11.as_window_mut(), &fonts, Some(path), None)?
+            let Some(chosen) = prompt_gui_document(x11.as_window_mut(), &fonts, Some(path), None)?
             else {
                 return Ok(DesktopEnd::Cancelled);
             };
@@ -6015,7 +6014,6 @@ mod tests {
         assert!(search_state.matching_entries().is_empty());
     }
 
-
     #[test]
     fn new_document_suggestion_stays_in_library_and_avoids_collisions() {
         let root = std::env::temp_dir().join(format!(
@@ -6029,7 +6027,10 @@ mod tests {
         std::fs::create_dir_all(&root).expect("library folder");
         let first = home_new_document_path(&root);
         assert_eq!(first.parent(), Some(root.as_path()));
-        assert_eq!(first.extension().and_then(|e| e.to_str()), Some("wavefunction"));
+        assert_eq!(
+            first.extension().and_then(|e| e.to_str()),
+            Some("wavefunction")
+        );
         assert!(!first.exists());
         std::fs::write(&first, b"").expect("suggested path");
         let second = home_new_document_path(&root);
