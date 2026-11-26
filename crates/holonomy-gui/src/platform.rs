@@ -36,7 +36,7 @@ impl UiScale {
 
     /// Scale in thousandths (`1_000` = unscaled).
     #[must_use]
-    pub const fn milli(self) -> i32 {
+    pub fn milli(self) -> i32 {
         i32::from(self.0) * 10
     }
 
@@ -62,7 +62,9 @@ impl UiScale {
             return Some(Self(200));
         }
         if let Ok(percent) = text.parse::<u16>() {
-            return (50..=300).contains(&percent).then(|| Self::from_percent(percent));
+            return (50..=300)
+                .contains(&percent)
+                .then(|| Self::from_percent(percent));
         }
         let fraction = text.strip_prefix("1.")?;
         if fraction.is_empty()
@@ -290,7 +292,11 @@ pub trait DesktopWindow {
 
 fn ui_scale_config_path() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        return Some(PathBuf::from(dir).join("holonomy").join("display-scale.txt"));
+        return Some(
+            PathBuf::from(dir)
+                .join("holonomy")
+                .join("display-scale.txt"),
+        );
     }
     std::env::var_os("HOME")
         .filter(|s| !s.is_empty())
@@ -479,7 +485,8 @@ impl DesktopWindow for ScaledWindow {
                 }
             }
         }
-        self.inner.present_argb(&self.scratch, physical_w, physical_h)
+        self.inner
+            .present_argb(&self.scratch, physical_w, physical_h)
     }
 
     fn poll_events(&mut self, timeout_ms: i32) -> Result<Vec<DesktopEvent>, Box<dyn Error>> {
@@ -565,14 +572,17 @@ pub fn open_desktop_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    type Presentation = Rc<RefCell<(Vec<u32>, (u16, u16))>>;
 
     #[derive(Default)]
     struct MockWindow {
         size: (u16, u16),
         events: VecDeque<DesktopEvent>,
-        presented: Vec<u32>,
-        presented_size: (u16, u16),
+        presented: Presentation,
     }
 
     impl DesktopWindow for MockWindow {
@@ -590,8 +600,7 @@ mod tests {
             width: u16,
             height: u16,
         ) -> Result<(), Box<dyn Error>> {
-            self.presented = pixels.to_vec();
-            self.presented_size = (width, height);
+            *self.presented.borrow_mut() = (pixels.to_vec(), (width, height));
             Ok(())
         }
 
@@ -610,10 +619,11 @@ mod tests {
         fn clear_clipboard(&mut self) {}
     }
 
-    fn window(scale: UiScale) -> ScaledWindow {
+    fn window(scale: UiScale) -> (ScaledWindow, Presentation) {
         let mut inner = MockWindow::default();
         inner.size = (1_120, 780);
-        ScaledWindow::new(Box::new(inner), scale)
+        let presented = Rc::clone(&inner.presented);
+        (ScaledWindow::new(Box::new(inner), scale), presented)
     }
 
     #[test]
@@ -656,12 +666,13 @@ mod tests {
             y: 90,
             modifiers: Modifiers::none(),
         });
-        inner.events.push_back(DesktopEvent::MouseDrag { x: 30, y: 60 });
+        inner
+            .events
+            .push_back(DesktopEvent::MouseDrag { x: 30, y: 60 });
         inner.events.push_back(DesktopEvent::Resize {
             width: 1_200,
             height: 900,
         });
-        // Replace the wrapper's inner window with this event source for the assertion.
         let mut win = ScaledWindow::new(Box::new(inner), UiScale::from_percent(150));
         assert_eq!(win.size(), (747, 520));
         let events = win.poll_events(0).expect("poll");
@@ -693,21 +704,21 @@ mod tests {
 
     #[test]
     fn integer_scale_repeats_pixels_without_blurring() {
-        let mut win = window(UiScale::from_percent(200));
-        win.present_argb(&[0x00ff_0000, 0x0000_00ff], 2, 1)
-            .expect("present");
-        assert_eq!(win.presented_size, (1_120, 780));
-        assert_eq!(win.presented[0], 0x00ff_0000);
-        assert_eq!(win.presented[1], 0x00ff_0000);
-        assert_eq!(win.presented[2], 0x0000_00ff);
+        let (mut win, presented) = window(UiScale::from_percent(200));
+        win.present_argb(&[0x00ff_0000, 0x0000_00ff], 2, 1).expect("present");
+        let (pixels, size) = presented.borrow();
+        assert_eq!(*size, (1_120, 780));
+        assert_eq!(pixels[0], 0x00ff_0000);
+        assert_eq!(pixels[1], 0x00ff_0000);
+        assert_eq!(pixels[2], 0x0000_00ff);
     }
 
     #[test]
     fn fractional_scale_presents_at_the_physical_size() {
-        let mut win = window(UiScale::from_percent(133));
-        win.present_argb(&[0x00ff_0000; 4], 2, 2)
-            .expect("present");
-        assert_eq!(win.presented_size, (1_120, 780));
-        assert_eq!(win.presented.len(), 1_120 * 780);
+        let (mut win, presented) = window(UiScale::from_percent(133));
+        win.present_argb(&[0x00ff_0000; 4], 2, 2).expect("present");
+        let (pixels, size) = presented.borrow();
+        assert_eq!(*size, (1_120, 780));
+        assert_eq!(pixels.len(), 1_120 * 780);
     }
 }

@@ -2807,7 +2807,11 @@ pub fn run_desktop(
         None => "Holonomy".to_owned(),
     };
     let win = open_desktop_window(&title, 1_120, 780)?;
-    run_desktop_with_window(ScaledWindow::new(win, load_ui_scale()), initial_path, deadman)
+    run_desktop_with_window(
+        ScaledWindow::new(win, load_ui_scale()),
+        initial_path,
+        deadman,
+    )
 }
 
 /// Runs the pure-`libc` X11 desktop window for Holonomy (`quiet-md` layout, live `ToolbarState`,
@@ -2841,7 +2845,8 @@ fn run_desktop_with_window(
 ) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
     let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px)?;
 
-    let Some((doc_path, document)) = prompt_gui_document(x11.as_window_mut(), &fonts, initial_path)?
+    let Some((doc_path, document)) =
+        prompt_gui_document(x11.as_window_mut(), &fonts, initial_path)?
     else {
         return Ok(DesktopEnd::Cancelled);
     };
@@ -4375,13 +4380,7 @@ mod tests {
 
         assert!(app.draw().expect("draw selection"));
         assert!(app.surface().painted_selections() > 0);
-        let hits = render_toolbar(
-            &mut app,
-            SecurityDotState::Protected,
-            false,
-            false,
-            100,
-        );
+        let hits = render_toolbar(&mut app, SecurityDotState::Protected, false, false, 100);
         assert!(
             hits.iter().any(|h| h.action == ToolbarAction::ToggleBold),
             "bold button hit-box must exist"
@@ -4453,13 +4452,7 @@ mod tests {
             .any(|e| matches!(e, Effect::Saved)));
 
         assert!(app.draw().expect("draw"));
-        let hits = render_toolbar(
-            &mut app,
-            SecurityDotState::Unprotected,
-            false,
-            false,
-            100,
-        );
+        let hits = render_toolbar(&mut app, SecurityDotState::Unprotected, false, false, 100);
         assert!(
             !hits.iter().any(|h| h.action == ToolbarAction::ZoomIn),
             "narrow width (< 720 px) must collapse overflow controls cleanly"
