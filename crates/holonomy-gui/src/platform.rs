@@ -95,6 +95,12 @@ pub enum DesktopEvent {
     CloseRequested,
     /// Window lost keyboard focus.
     FocusOut,
+    /// OS requested sleep/suspend or delivered a suspend tripwire notification.
+    SystemSuspend,
+    /// Active dead-key or OS IME preedit string (`""` clears preedit composition).
+    Preedit(String),
+    /// Multi-codepoint text committed by OS IME or dead-key composition.
+    CommitText(String),
     /// Clipboard UTF-8 contents arrived in response to [`DesktopWindow::request_clipboard`].
     ClipboardPasted(Zeroizing<Vec<u8>>),
 }

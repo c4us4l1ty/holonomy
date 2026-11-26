@@ -96,8 +96,8 @@ detail lives.
 | Terminal window, cross-OS native desktop (`X11` / `Cocoa` / `Win32`), & CLI: open, type, save, unlock, panel, `gui`, `import`, `export`, `migrate-v5`, `verify`, `compact` | **Real** (`holonomy <doc>` PTY verified + `holonomy-gui` Xvfb framebuffer/xdotool E2E verified on Linux + cross-compiled/tested on macOS & Windows) | `holonomy-gui`, `holonomy-eye::raster`, `scripts/qualify-x11-gui.sh`, `AUDIT.md` D-94/D-95 |
 | That binary, driven end to end by CI | **Real** — created, sealed, reopened, `verify`, `compact`, `import`, `export`, wrong/empty passphrases refused | `scripts/smoke-install.sh` (D-72), `tests/transfer_migrate.rs` |
 | A packaged release or installer | **Unsigned archives for Linux x86_64, macOS arm64, and Windows x86_64** per `v*` tag, built from the lockfile and smoke-tested before packaging. No installer, no signing/notarization | `docs/TO-APP.md` M8, `.github/workflows/release.yml` |
-| Opening a copied file on a fresh profile (`L-9`) | **Process half + 3-OS compilation measured**: imported under `env -i` with empty state tree (`HOME`/`XDG_*`/`TMPDIR` untouched; GUI recent list opt-in OFF by default), plus macOS/Windows CI builds. A second *physical* machine remains unmeasured | `scripts/qualify-l9-portability.sh`, CI jobs `portability` & `cross-os` |
-| GPUI & platform IME | **Not built** — pure-FFI X11/Cocoa/Win32 native desktop shells + `FontSet` OpenType rasterizer & `GDEF`/`GSUB`/`GPOS` shaper (`OQ-24` closed) exist on all three OSes; GPUI (requires crates.io resolution) & IME composition remain open | `docs/TO-APP.md` M4b-ii, `AUDIT.md` D-94/D-95 |
+| Opening a copied file on a fresh profile (`L-9`) | **Enforced (`L-9` gated)**: single-host `env -i` zero-state drill (`portability`) + Linux `x86_64` → macOS `aarch64` & Windows `x86_64` cross-OS hand-off with passphrase alone (`l9-cross-os`) | `scripts/qualify-l9-portability.sh`, `.github/workflows/ci.yml` |
+| Platform IME / dead keys & OS suspend tripwires | **Implemented in native windows** — `NSTextInputClient` + `NSWorkspaceWillSleepNotification` (`Cocoa`), `imm32.dll` `WM_IME_*` + `PBT_APMSUSPEND` (`Win32`), dead-key/`Multi_key` compose + `SIGUSR2`/`SIGTSTP`/`SIGPWR` (`X11` & TUI). Full GPUI GPU shell remains unbuilt under `--locked` | `holonomy-gui/src/{cocoa,win32,x11,canvas,bin/holonomy}.rs` (`D-96`) |
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
 | Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection + `GDEF`/`GSUB`/`GPOS` shaping** (`displaced = 0`, split selection spans, kerning/ligatures/marks) | OQ-11 (D-77), OQ-24 (D-95) |
 | Emergency wipe & zeroize canaries (`L-7`) | **Not qualified.** Historical headless tests wipe selected buffers and canaries; the live reaper is cooperative and can stall with the UI, so a blocked window cannot meet the 50 ms deadline. The window now reports a wipe by the reaper's own outcome and exits 1 when it cannot be confirmed (D-89), but that is a receipt for *registered* arenas, not complete plaintext coverage. A Linux isolated-supervisor test is not wired into the editor. | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-82–D-89) |
@@ -116,8 +116,8 @@ One document per window is a scope decision, not a defect.
 
 ## Status
 
-**Three of the ten laws (`L-1`, `L-2`, `L-8`) are `gated`.** The remaining seven (`L-3`..`L-7`,
-`L-9`, `L-10`) remain `spec` in `docs/GATES.md`; that file is generated from
+**Four of the ten laws (`L-1`, `L-2`, `L-8`, `L-9`) are `gated`.** The remaining six (`L-3`..`L-7`,
+`L-10`) remain `spec` in `docs/GATES.md`; that file is generated from
 `crates/holonomy-ledger/src/laws.rs`, and `xtask gates --check` fails the build if the two ever
 disagree. A law becomes `gated` only when its enforcing measurements run cleanly in CI — not by
 editing prose.
@@ -140,8 +140,14 @@ cargo run --release -p holonomy-gui --bin holonomy -- notes.wavefunction
 cargo run --release -p holonomy-gui --bin holonomy-gui -- notes.wavefunction
 ```
 
-`L-9`'s full cross-machine physical drill (opening the same copied `.wavefunction` across separate
-physical hardware) remains `spec` in `docs/GATES.md`.
+**Every documented block gate is now checked only where measured:** `L-1`, `L-2`, `L-8`, and
+`L-9` (`4/10` laws) are `gated`; hardware reference-benchmark (`L-3`, `L-4`, `L-5`), physical
+power-cut (`L-6`), out-of-process `SIGSTOP`/`SIGKILL` editor supervisor (`L-7`), and external
+third-party sync clients (`L-10`) remain honestly open in `docs/GATES.md`.
+
+Documentation: see [`docs/MIGRATION-V5.md`](docs/MIGRATION-V5.md) for v5.1.0 `.holo` → v6
+migration and [`docs/SECURITY-WHITEPAPER.md`](docs/SECURITY-WHITEPAPER.md) for the full
+cryptographic, memory-protection, and platform-boundary specification.
 
 ## Verifying it yourself
 

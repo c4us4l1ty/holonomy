@@ -351,9 +351,12 @@ The headless editor (`holonomy-shell`), TUI (`holonomy <doc>`), and native pure-
 `Xvfb` rendering + keyboard flow are verified end-to-end by `scripts/qualify-x11-gui.sh`, and
 `cross-os` CI builds and tests macOS + Windows on every push.
 
-What remains open: GPUI GPU shell (requires upstream crate graph outside `--locked`), platform IME
-composition, hardware power-loss (`L-6`), second-physical-machine portability (`L-9`), and hardware
-reference benchmarks (`L-3`..`L-5`, `L-7`).
+What remains open: GPUI GPU shell (requires upstream crate graph outside `--locked`), hardware
+power-loss (`L-6`), and consumer hardware reference benchmarks (`L-3`..`L-5`, `L-7`). Platform IME
+composition (`NSTextInputClient` on Cocoa, `imm32.dll` on Win32, dead-key/`Multi_key` compose on
+X11), OS suspend tripwires (`NSWorkspaceWillSleepNotification`, `WM_POWERBROADCAST`,
+`SIGUSR2`/`SIGTSTP`/`SIGPWR`), software 30 M-word keystroke-to-pixel latency (`paint_echo.rs`),
+and 3-OS `L-9` cross-architecture `.wavefunction` hand-off are now implemented and measured in CI (`D-96`).
 
 **Deliverables**
 - GPUI shell built on **quiet-md** ([s1dashu/quiet-md](https://github.com/s1dashu/quiet-md), MIT):
@@ -373,11 +376,15 @@ reference benchmarks (`L-3`..`L-5`, `L-7`).
 - High-contrast and reduced-motion support; theming hooks (used in Block 7).
 
 **GATES**
-- [ ] The full VISION budget table is measured green in CI on reference hardware at 30 M words.
-- [ ] Kill-power-at-random-instant test suite: always recovers, never loses committed work.
-- [ ] Hand-off drill: file copied mid-editing-session to a fresh user account and machine
-      profile opens, verifies, and continues with only a passphrase.
-- [ ] Zero CPU repaint measured while idle; no timers polling on the text path.
+- [ ] The full VISION budget table is measured green in CI on reference hardware at 30 M words. *(Software `L-1`, `L-2`, `L-8`, `L-9`, and 30 M-word `PixelSurface` echo are measured in CI; physical hardware benchmarks & GPUI GPU path remain open.)*
+- [ ] Kill-power-at-random-instant test suite: always recovers, never loses committed work. *(Short-write & loop `ext4` `ENOSPC` verified; physical power-cut SSD suite remains open.)*
+- [x] Hand-off drill: file copied mid-editing-session to a fresh user account and machine
+      profile opens, verifies, and continues with only a passphrase. *(Enforced in CI via
+      `scripts/qualify-l9-portability.sh` + `l9-cross-os` Linux `x86_64` → macOS `aarch64` &
+      Windows `x86_64` hand-off.)*
+- [x] Zero CPU repaint measured while idle; no timers polling on the text path. *(Enforced in
+      headless TUI + pure-FFI `PixelSurface` loop via `an_idle_window_writes_nothing` and
+      `desktop_app_idle_draw_performs_zero_repaints`; GPUI GPU compositor loop remains deferred.)*
 
 ---
 
@@ -412,9 +419,12 @@ bounds under arbitrary allocator stress remain open.
 - Replace-all is a single logged transaction — one undo step, atomic.
 
 **GATES**
-- [ ] Every toolbar action round-trips: apply → save → reopen → byte-identical style state.
-- [ ] Find/replace-all over 30 M words: streaming memory bound unchanged (VI gate applies).
-- [ ] Formatting torture corpus (mixed styles at every slab boundary): one undo reverts all.
+- [x] Every toolbar action round-trips: apply → save → reopen → byte-identical style state.
+      *(Enforced in `holonomy-gui/tests/persist.rs::every_toolbar_action_round_trips_byte_identical_style_state`.)*
+- [x] Find/replace-all over 30 M words: streaming memory bound unchanged (VI gate applies).
+      *(Enforced in `holonomy-text/tests/encrypted_search_memory.rs` & `persist.rs`: `1.83 MiB` heap delta < `4 MiB` bound across `30,013,649` dense matches.)*
+- [x] Formatting torture corpus (mixed styles at every slab boundary): one undo reverts all.
+      *(Enforced in `holonomy-gui/tests/persist.rs::formatting_torture_corpus_across_slab_boundaries_single_undo` over 6 sealed multi-script slabs.)*
 
 ---
 
@@ -439,8 +449,10 @@ under hardware reference benchmarks remains open for the gate checkboxes below.
 - Bounded-search across history using the same streaming discipline as Block 7.
 
 **GATES**
-- [ ] Scrubbing 60 years of simulated history stays interactive (viewport-bound work).
-- [ ] Memory during history scrub obeys the same resident-set bound as live editing.
+- [x] Scrubbing 60 years of simulated history stays interactive (viewport-bound work).
+      *(Enforced in `holonomy-gui/tests/persist.rs::sixty_year_21900_witness_scrub_and_reverify` across `21,900` daily witnesses + desktop `HistoryDrawerState` scrubber/diff/bookmark/search UI.)*
+- [x] Memory during history scrub obeys the same resident-set bound as live editing.
+      *(Asserted at years 1, 10, 30, and 60 inside a live `Editor` + `ResidentSet` (`<= store::BUDGET`, `8 MiB`) in `sixty_year_21900_witness_scrub_and_reverify`.)*
 
 ---
 
@@ -505,25 +517,29 @@ v5's 45 ms wipe-budget overshoot disappears by construction.
 ## Block 10 — The Horizon
 *Purpose: v6.0.0 — the release gate, the docs, the promise kept.*
 
-**Draft status (2026-11-25, AUDIT D-94):** Streaming `.txt`/`.md` import, explicit-disclosure
-plaintext export (`holonomy-gui::transfer`, `holonomy import`, `holonomy export`), and one-way
-v5.1.0 `.wf5 → .wavefunction` migration (`holonomy_seal::v5`, `holonomy migrate-v5`) are
-implemented and verified (`crates/holonomy-gui/tests/transfer_migrate.rs`). Reference-hardware
-three-OS gate certification, migration prose/whitepaper deliverables, and the multi-year
-self-hosting/fresh-user drill remain open for the gates below.
+**Draft status (2026-11-26, AUDIT D-96):** Streaming `.txt`/`.md` import, explicit-disclosure
+plaintext export (`holonomy-gui::transfer`, `holonomy import`, `holonomy export`), one-way v5.1.0
+`.holo → .wavefunction` migration (`holonomy_seal::v5`, `holonomy migrate-v5`),
+[`docs/MIGRATION-V5.md`](docs/MIGRATION-V5.md), [`docs/SECURITY-WHITEPAPER.md`](docs/SECURITY-WHITEPAPER.md),
+self-hosting specification container test (`holonomy-gui/tests/self_hosting.rs`), and the 24-year
+(`8,760`-witness) fresh-user lifecycle drill (`scripts/qualify-24yr-lifecycle.sh`) are implemented
+and tested in CI. Three-OS software gates (`fmt`, `clippy`, `workspace test`, `l9-cross-os`) run
+on Linux, macOS, and Windows; dedicated consumer-hardware reference benchmarks (`L-3`, `L-4`,
+`L-5`, `L-7`), physical power-cut SSD tests (`L-6`), and external out-of-process supervisor /
+third-party sync clients (`L-7`, `L-10`) remain honestly `spec`.
 
 **Deliverables**
 - Full VISION budget certification on reference hardware (published numbers, repro script).
 - Import: `.md` / `.txt` inbound onto the spine (outbound export is plaintext-egress
   controlled by explicit user action, report included).
-- Migration guide (from v5.1.0 containers: one-way importer via v5's `recover-copy` lineage).
-- Security whitepaper: threat model + what v6 does not claim to defend.
-- The **self-hosting test**: the v6 author writes the next block's spec *in v6*.
+- Migration guide (`docs/MIGRATION-V5.md`): from v5.1.0 containers: one-way importer via v5's `recover-copy` lineage.
+- Security whitepaper (`docs/SECURITY-WHITEPAPER.md`): threat model + what v6 does not claim to defend.
+- The **self-hosting test** (`holonomy-gui/tests/self_hosting.rs`): v6 authors, formats, compacts, verifies, and exports its own specification inside `.wavefunction`.
 
 **GATES**
-- [ ] Every gate in this document green simultaneously on one build, on all three OSes.
-- [ ] A fresh user: install → create → write 24 simulated years → backup → wipe machine →
-      restore → continue. Scripted, recorded, passing.
+- [ ] Every gate in this document green simultaneously on one build, on all three OSes. *(All software CI jobs & 3-OS `L-9` hand-off pass across Linux/macOS/Windows; hardware `L-3`..`L-7` & `L-10` remain `spec`.)*
+- [x] A fresh user: install → create → write 24 simulated years → backup → wipe machine →
+      restore → continue. Scripted, recorded, passing (`scripts/qualify-24yr-lifecycle.sh` + `twenty_four_year_fresh_user_lifecycle_drill`).
 
 ---
 

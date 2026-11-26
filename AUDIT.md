@@ -68,6 +68,57 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-26 — D-96 — Platform IME & OS suspend tripwires across all OSes, Block 6–10 gates,
+  Block 10 handbook/whitepaper/self-hosting/24-year lifecycle drill, and 3-OS `L-9` hand-off
+  promotion (`4/10` laws `gated`).**
+  - **Platform IME/dead-key composition & OS suspend tripwires (`platform.rs`, `cocoa.rs`,
+    `win32.rs`, `x11.rs`, `canvas.rs`, `bin/holonomy.rs`):**
+    - `DesktopEvent` added `Preedit(String)`, `CommitText(String)`, and `SystemSuspend`.
+    - `cocoa.rs`: implemented `NSTextInputClient` protocol selectors (`hasMarkedText`,
+      `markedRange`, `selectedRange`, `setMarkedText:selectedRange:replacementRange:`,
+      `unmarkText`, `validAttributesForMarkedText`,
+      `attributedSubstringForProposedRange:actualRange:`, `insertText:replacementRange:`,
+      `doCommandBySelector:`, `characterIndexForPoint:`,
+      `firstRectForCharacterRange:actualRange:`) + `interpretKeyEvents:` in `view_key_down` and
+      registered `NSWorkspaceWillSleepNotification` observer on `NSWorkspace`.
+    - `win32.rs`: dynamically resolved `imm32.dll` (`ImmGetContext`/`ImmGetCompositionStringW`/
+      `ImmReleaseContext`) to emit `Preedit` / `CommitText` from `WM_IME_STARTCOMPOSITION`,
+      `WM_IME_COMPOSITION`, and `WM_IME_ENDCOMPOSITION` without double-delivering `WM_CHAR`, and
+      handled `WM_POWERBROADCAST` (`PBT_APMSUSPEND`) by clearing clipboard & emitting
+      `SystemSuspend`.
+    - `x11.rs` & `bin/holonomy.rs`: added `DeadComposeState` (13 X11 `XK_dead_*` diacritics +
+      `XK_Multi_key` Compose accumulator) and installed async-signal-safe POSIX suspend/power
+      tripwires (`SIGUSR2`/`SIGTSTP`/`SIGPWR` on X11, `SIGUSR2`/`SIGPWR` on TUI).
+    - `canvas.rs`: renders live `ime_preedit` pill anchored at caret (`render_ime_preedit`), clears
+      preedit on blur/commit, routes `CommitText` into active prose or prompt bars, and trips
+      `TripReason::Suspend` on `SystemSuspend`.
+  - **Block 6, 7, 8 & 10 gates (`persist.rs`, `paint_echo.rs`, `self_hosting.rs`,
+    `scripts/qualify-24yr-lifecycle.sh`, `.github/workflows/ci.yml`):**
+    - `persist.rs`: added `every_toolbar_action_round_trips_byte_identical_style_state` (Block 7
+      Gate 1), `formatting_torture_corpus_across_slab_boundaries_single_undo` over 6 sealed slabs
+      (Block 7 Gate 3, via `Editor::apply_styles_batch`), `twenty_four_year_fresh_user_lifecycle_drill`
+      (`8,760` witnesses -> backup -> wipe -> restore -> continue -> compact), and wrapped
+      `sixty_year_21900_witness_scrub_and_reverify` in live `Editor` + `ResidentSet` (`<= 8 MiB`
+      budget) across years 1, 10, 30, and 60 (Block 8 Gate 2).
+    - `paint_echo.rs`: measures software `PixelSurface` keystroke-to-pixel latency at head & tail
+      of a real sealed 30 M-word `.wavefunction` (`HOLONOMY_PAINT_ECHO_30M`).
+    - `self_hosting.rs`: Block 10 self-hosting gate authoring, formatting, bookmarking, compacting,
+      verifying, and Markdown-exporting/re-importing the Block 10 specification in `.wavefunction`.
+    - `scripts/qualify-24yr-lifecycle.sh` & `lifecycle` CI job: fresh-profile `env -i` create ->
+      backup -> wipe -> restore -> PTY continue -> compact -> verify -> export drill paired with
+      the 8,760-witness release scale drill.
+  - **Block 10 prose deliverables & 3-OS `L-9` promotion (`docs/MIGRATION-V5.md`,
+    `docs/SECURITY-WHITEPAPER.md`, `.github/workflows/ci.yml`, `laws.rs`, `docs/GATES.md`):**
+    - Added [`docs/MIGRATION-V5.md`](docs/MIGRATION-V5.md) and
+      [`docs/SECURITY-WHITEPAPER.md`](docs/SECURITY-WHITEPAPER.md).
+    - Wired `portability` (`ubuntu-latest`) artifact upload (`l9-linux-handoff`) into `l9-cross-os`
+      (`macos-latest` `aarch64` + `windows-latest` `x86_64`), verifying Linux-authored
+      `.wavefunction` opens in scrubbed empty profiles with passphrase alone and byte-identical
+      plaintext export; promoted `L-9` to `gated` (`4/10` laws `gated`: `L-1`, `L-2`, `L-8`, `L-9`)
+      while keeping `L-3`..`L-7` and `L-10` honestly `spec` pending consumer hardware benchmarks,
+      physical power-cut testing, out-of-process `SIGSTOP`/`SIGKILL` editor supervision, and
+      non-rsync sync clients.
+
 - **2026-11-26 — D-95 — Complete desktop & TUI UX pass, cross-OS native FFI parity, OpenType
   `GDEF`/`GSUB`/`GPOS` shaping, `L-1`/`L-2`/`L-8` gate promotion, and unsigned 3-OS release bundles.**
   - **Crypto & Eye (`holonomy-seal`, `holonomy-eye`):** Added constant-stack/zeroized integer

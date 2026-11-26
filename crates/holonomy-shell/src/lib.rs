@@ -482,6 +482,19 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         Ok(changed)
     }
 
+    /// Applies a batch of `(start, end, patch)` style edits as one single-undo Spine transaction
+    /// across arbitrary slab boundaries (Block 7 Gate 3).
+    pub fn apply_styles_batch(
+        &mut self,
+        edits: &[(u64, u64, StylePatch)],
+    ) -> Result<bool, ShellError> {
+        let before = self.typing.spine().clone();
+        self.typing.apply_styles_batch(edits)?;
+        let changed = !self.typing.spine().ptr_eq(&before);
+        self.invalidate_after_cut_or_restore(&before);
+        Ok(changed)
+    }
+
     /// Sets or clears (`url = None`) a hyperlink target across the active selection.
     pub fn set_selection_link(&mut self, url: Option<&str>) -> Result<bool, ShellError> {
         let (lo, hi) = self.selection.normalised();
@@ -1563,6 +1576,9 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
     ///
     /// One leaf is faulted in at a time, like every other measurement in this file.
     fn measure_through(&mut self, leaf: usize) -> Result<(), ShellError> {
+        const MAX_CONTIGUOUS_MEASURE_LEAVES: usize = 16;
+        const MAX_TAIL_FILL_LEAVES: usize = 64;
+
         if self.measured.is_measured(leaf) {
             return Ok(());
         }
@@ -1572,22 +1588,52 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
         while from > 0 && !self.measured.is_measured(from - 1) {
             from -= 1;
         }
-        let mut carried = if from == 0 {
-            Carry::default()
-        } else {
-            // The leaf before the run is re-measured to recover the carry it hands on. The index
-            // stores the carry a leaf is measured **with**, not the one it ends at, and the
-            // difference is the cluster tail it looked past its own end to place (AUDIT D-25) —
-            // which `carry_after` sets to zero. Guessing there would write a height off by one
-            // advance into the index, where `is_measured` then makes it permanent.
-            let inherited = self.measured.carry(from - 1);
-            let (_, next) = self.measure_leaf((from - 1) as u32, inherited)?;
-            next
-        };
-        for index in from..=leaf {
-            let (height, next) = self.measure_leaf(index as u32, carried)?;
-            self.measured.set(index, height, carried);
-            carried = next;
+        if leaf - from < MAX_CONTIGUOUS_MEASURE_LEAVES {
+            let mut carried = if from == 0 {
+                Carry::default()
+            } else {
+                // The leaf before the run is re-measured to recover the carry it hands on. The
+                // index stores the carry a leaf is measured **with**, not the one it ends at, and
+                // the difference is the cluster tail it looked past its own end to place (AUDIT
+                // D-25) — which `carry_after` sets to zero. Guessing there would write a height
+                // off by one advance into the index, where `is_measured` then makes it permanent.
+                let inherited = self.measured.carry(from - 1);
+                let (_, next) = self.measure_leaf((from - 1) as u32, inherited)?;
+                next
+            };
+            for index in from..=leaf {
+                let (height, next) = self.measure_leaf(index as u32, carried)?;
+                self.measured.set(index, height, carried);
+                carried = next;
+            }
+            return Ok(());
+        }
+
+        // Long jump into unmeasured space (such as `Ctrl+End` on a 30M-word document): anchor a
+        // bounded viewport-sized suffix ending at `leaf` (`O(viewport)` leaves, never `O(N)`
+        // whole-document shaping). `HeightModel::leaf_at` skips zero-height unmeasured leaves.
+        let avail = leaf - from + 1;
+        let max_span = MAX_TAIL_FILL_LEAVES.min(avail);
+        let mut span = 2usize.min(max_span);
+        loop {
+            let anchor = leaf + 1 - span;
+            let mut carried = if anchor == from && from > 0 {
+                let inherited = self.measured.carry(from - 1);
+                self.measure_leaf((from - 1) as u32, inherited)?.1
+            } else {
+                Carry::default()
+            };
+            let mut tail_height = Fixed::ZERO;
+            for index in anchor..=leaf {
+                let (height, next) = self.measure_leaf(index as u32, carried)?;
+                self.measured.set(index, height, carried);
+                tail_height += height;
+                carried = next;
+            }
+            if tail_height >= self.viewport || span >= max_span {
+                break;
+            }
+            span = (span * 2).min(max_span);
         }
         Ok(())
     }
@@ -1985,12 +2031,44 @@ impl<S: SegmentSink, R: SegmentSource, H: Shaper> Editor<S, R, H> {
             let end = self.typing.document_len();
             return Ok((end, end, Window::empty(), false));
         };
-        let window = byte_window(
+        let mut window = byte_window(
             self.typing.spine(),
             &self.measured.heights,
             self.scroll,
             self.viewport,
         );
+        let leaf_count = self.typing.spine().slab_count() as usize;
+        let mut first_gap = None;
+        for k in window.leaves().leaves() {
+            if !self.measured.is_measured(k) {
+                first_gap = Some(k);
+                break;
+            }
+        }
+        if let Some(gap) = first_gap {
+            let mut carried = if gap == 0 {
+                Carry::default()
+            } else {
+                let inherited = self.measured.carry(gap - 1);
+                self.measure_leaf((gap - 1) as u32, inherited)?.1
+            };
+            let gap_top = self.measured.heights.prefix(gap).sixtyfourths();
+            let mut covered = Fixed::from_64ths((gap_top - self.scroll.sixtyfourths()).max(0));
+            let mut idx = gap;
+            while idx < leaf_count && covered < self.viewport {
+                let (height, next) = self.measure_leaf(idx as u32, carried)?;
+                self.measured.set(idx, height, carried);
+                covered += height;
+                carried = next;
+                idx += 1;
+            }
+            window = byte_window(
+                self.typing.spine(),
+                &self.measured.heights,
+                self.scroll,
+                self.viewport,
+            );
+        }
         let start = self.line_start(leaf, into)?;
         Ok((start, window.end(), window.leaves(), false))
     }
