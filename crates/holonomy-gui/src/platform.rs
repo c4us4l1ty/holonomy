@@ -620,8 +620,10 @@ mod tests {
     }
 
     fn window(scale: UiScale) -> (ScaledWindow, Presentation) {
-        let mut inner = MockWindow::default();
-        inner.size = (1_120, 780);
+        let inner = MockWindow {
+            size: (1_120, 780),
+            ..Default::default()
+        };
         let presented = Rc::clone(&inner.presented);
         (ScaledWindow::new(Box::new(inner), scale), presented)
     }
@@ -660,7 +662,10 @@ mod tests {
 
     #[test]
     fn pointer_and_resize_events_use_the_logical_coordinate_space() {
-        let mut inner = MockWindow::default();
+        let mut inner = MockWindow {
+            size: (1_120, 780),
+            ..Default::default()
+        };
         inner.events.push_back(DesktopEvent::MouseDown {
             x: 150,
             y: 90,
