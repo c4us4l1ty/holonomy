@@ -2790,6 +2790,27 @@ fn apply_display_scale(win: &mut ScaledWindow, steps: i32, status_msg: &mut Stri
     *status_msg = format!("display scale {}%", win.scale().percent());
 }
 
+/// Reflows editor and read-only history viewports to a new logical client size. Used by both
+/// native resize events and a display-scale change so the first frame after a scale step already
+/// has the correct framebuffer dimensions.
+fn resize_editor_viewport(
+    app: &mut App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>,
+    history_drawer: &mut Option<HistoryDrawerState>,
+    width: u16,
+    height: u16,
+) {
+    let view = app.editor().view();
+    app.surface_mut().set_viewport(view, width, height);
+    let (lw, lh) = app.surface().logical_editor_extent();
+    let _ = app.resize(lw, lh);
+    if let Some(ref mut h) = history_drawer {
+        if let Some(ref mut hed) = h.history_editor {
+            hed.set_view(view);
+            hed.resize(lw, lh);
+        }
+    }
+}
+
 /// Runs the native desktop window for Holonomy (`X11` on Linux, `Cocoa`/`X11` on macOS,
 /// `Win32` on Windows): `quiet-md` layout, live `ToolbarState`, embedded `Inter`/`JetBrains Mono`
 /// A8 rasterization, clipboard, security dot/panel, Block 8 timeline scrubber, autosave, and
@@ -3204,16 +3225,7 @@ fn run_desktop_with_window(
                 }
                 DesktopEvent::Resize { width, height } => {
                     idle_chrome_visible = true;
-                    let cur_view = app.editor().view();
-                    app.surface_mut().set_viewport(cur_view, width, height);
-                    let (lw, lh) = app.surface().logical_editor_extent();
-                    let _ = app.resize(lw, lh);
-                    if let Some(ref mut h) = history_drawer {
-                        if let Some(ref mut hed) = h.history_editor {
-                            hed.set_view(cur_view);
-                            hed.resize(lw, lh);
-                        }
-                    }
+                    resize_editor_viewport(&mut app, &mut history_drawer, width, height);
                     pending_paint = true;
                 }
                 DesktopEvent::Scroll { delta_lines } => {
@@ -3253,6 +3265,8 @@ fn run_desktop_with_window(
                             ToolbarAction::CycleUiScale => {
                                 overflow_open = false;
                                 apply_display_scale(&mut x11, 1, &mut status_msg);
+                                let (w, h) = x11.size();
+                                resize_editor_viewport(&mut app, &mut history_drawer, w, h);
                             }
                             ToolbarAction::ToggleOverflow => {
                                 overflow_open = !overflow_open;
@@ -3444,6 +3458,8 @@ fn run_desktop_with_window(
                         };
                         if let Some(steps) = steps {
                             apply_display_scale(&mut x11, steps, &mut status_msg);
+                            let (w, h) = x11.size();
+                            resize_editor_viewport(&mut app, &mut history_drawer, w, h);
                             pending_paint = true;
                             continue;
                         }
