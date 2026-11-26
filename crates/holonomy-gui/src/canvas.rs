@@ -28,7 +28,10 @@ use holonomy_text::{
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::panel::Facts;
-use crate::platform::{open_desktop_window, DesktopEvent, DesktopWindow, MAX_CLIPBOARD_BYTES};
+use crate::platform::{
+    load_ui_scale, open_desktop_window, save_ui_scale, DesktopEvent, DesktopWindow, ScaledWindow,
+    UiScale, MAX_CLIPBOARD_BYTES,
+};
 use crate::store::{self, Document, HistorySearchHit};
 use crate::{App, Key, Keymap, Modifiers, SealWipeBridge, Surface};
 
@@ -944,6 +947,8 @@ pub enum ToolbarAction {
     ZoomOut,
     /// Increase zoom (`+10%`, cap `250%`).
     ZoomIn,
+    /// Cycle whole-desktop display scale (`100/125/133/150/175/200%`).
+    CycleUiScale,
     /// Toggle light/dark Quiet Markdown paper theme (`#FFFFFF` / `#1A1A19`).
     ToggleTheme,
     /// Toggle reduced-motion static chrome mode.
@@ -1059,6 +1064,7 @@ fn render_toolbar<S, R>(
     dot_state: SecurityDotState,
     read_only_history: bool,
     history_open: bool,
+    display_percent: u16,
 ) -> Vec<ToolbarHit>
 where
     S: holonomy_text::SegmentSink,
@@ -1071,6 +1077,7 @@ where
         history_open,
         false,
         false,
+        display_percent,
     )
 }
 
@@ -1084,6 +1091,7 @@ fn render_toolbar_with<S, R>(
     history_open: bool,
     overflow_open: bool,
     reduced_motion: bool,
+    display_percent: u16,
 ) -> Vec<ToolbarHit>
 where
     S: holonomy_text::SegmentSink,
@@ -1159,6 +1167,7 @@ where
         "Light"
     };
     let motion_label = if reduced_motion { "Still" } else { "Anim" };
+    let scale_label = format!("Scale {display_percent}%");
 
     let dot_w = 24;
     let hist_w = 42;
@@ -1313,6 +1322,13 @@ where
             true,
         ),
         (
+            ToolbarAction::CycleUiScale,
+            scale_label.as_str(),
+            ButtonHighlight::Off,
+            false,
+            true,
+        ),
+        (
             ToolbarAction::ToggleTheme,
             theme_label,
             if is_dark_theme(&theme) {
@@ -1355,7 +1371,11 @@ where
             y,
             label,
             hl,
-            read_only_history && !matches!(action, ToolbarAction::ZoomIn | ToolbarAction::ZoomOut),
+            read_only_history
+                && !matches!(
+                    action,
+                    ToolbarAction::ZoomIn | ToolbarAction::ZoomOut | ToolbarAction::CycleUiScale
+                ),
             &theme,
             bar,
         );
@@ -1445,6 +1465,11 @@ where
         let items_to_show = if collapsed.is_empty() {
             vec![
                 (
+                    ToolbarAction::CycleUiScale,
+                    scale_label.as_str(),
+                    ButtonHighlight::Off,
+                ),
+                (
                     ToolbarAction::ToggleTheme,
                     theme_label,
                     if is_dark_theme(&theme) {
@@ -1497,6 +1522,7 @@ where
                         action,
                         ToolbarAction::ZoomIn
                             | ToolbarAction::ZoomOut
+                            | ToolbarAction::CycleUiScale
                             | ToolbarAction::ToggleTheme
                             | ToolbarAction::ToggleReducedMotion
                     ),
@@ -2257,7 +2283,8 @@ where
             app.surface_mut().set_theme(next);
             app.mark_dirty();
         }
-        ToolbarAction::OpenLinkDialog
+        ToolbarAction::CycleUiScale
+        | ToolbarAction::OpenLinkDialog
         | ToolbarAction::ToggleOverflow
         | ToolbarAction::ToggleReducedMotion
         | ToolbarAction::ToggleHistory
@@ -2750,6 +2777,40 @@ pub enum DesktopEnd {
     WipeUnconfirmed(GuiWipeUnconfirmed, usize),
 }
 
+/// Steps the whole-window display scale, persists the choice, and reports it in the status strip.
+fn apply_display_scale(win: &mut ScaledWindow, steps: i32, status_msg: &mut String) {
+    let next = if steps == 0 {
+        UiScale::DEFAULT
+    } else {
+        win.scale().step(steps)
+    };
+    if win.set_scale(next) {
+        save_ui_scale(next);
+    }
+    *status_msg = format!("display scale {}%", win.scale().percent());
+}
+
+/// Reflows editor and read-only history viewports to a new logical client size. Used by both
+/// native resize events and a display-scale change so the first frame after a scale step already
+/// has the correct framebuffer dimensions.
+fn resize_editor_viewport(
+    app: &mut App<store::DocumentSink, store::DocumentSource, FontSet, PixelSurface>,
+    history_drawer: &mut Option<HistoryDrawerState>,
+    width: u16,
+    height: u16,
+) {
+    let view = app.editor().view();
+    app.surface_mut().set_viewport(view, width, height);
+    let (lw, lh) = app.surface().logical_editor_extent();
+    let _ = app.resize(lw, lh);
+    if let Some(ref mut h) = history_drawer {
+        if let Some(ref mut hed) = h.history_editor {
+            hed.set_view(view);
+            hed.resize(lw, lh);
+        }
+    }
+}
+
 /// Runs the native desktop window for Holonomy (`X11` on Linux, `Cocoa`/`X11` on macOS,
 /// `Win32` on Windows): `quiet-md` layout, live `ToolbarState`, embedded `Inter`/`JetBrains Mono`
 /// A8 rasterization, clipboard, security dot/panel, Block 8 timeline scrubber, autosave, and
@@ -2767,7 +2828,11 @@ pub fn run_desktop(
         None => "Holonomy".to_owned(),
     };
     let win = open_desktop_window(&title, 1_120, 780)?;
-    run_desktop_with_window(win, initial_path, deadman)
+    run_desktop_with_window(
+        ScaledWindow::new(win, load_ui_scale()),
+        initial_path,
+        deadman,
+    )
 }
 
 /// Runs the pure-`libc` X11 desktop window for Holonomy (`quiet-md` layout, live `ToolbarState`,
@@ -2787,17 +2852,22 @@ pub fn run_x11_desktop(
         None => "Holonomy".to_owned(),
     };
     let x11 = crate::x11::X11Window::open(None, &title, 1_120, 780)?;
-    run_desktop_with_window(Box::new(x11), initial_path, deadman)
+    run_desktop_with_window(
+        ScaledWindow::new(Box::new(x11), load_ui_scale()),
+        initial_path,
+        deadman,
+    )
 }
 
 fn run_desktop_with_window(
-    mut x11: Box<dyn DesktopWindow>,
+    mut x11: ScaledWindow,
     initial_path: Option<&Path>,
     deadman: Option<Duration>,
 ) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
     let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px)?;
 
-    let Some((doc_path, document)) = prompt_gui_document(x11.as_mut(), &fonts, initial_path)?
+    let Some((doc_path, document)) =
+        prompt_gui_document(x11.as_window_mut(), &fonts, initial_path)?
     else {
         return Ok(DesktopEnd::Cancelled);
     };
@@ -2872,7 +2942,7 @@ fn run_desktop_with_window(
                 &document,
                 &arenas,
                 reaper,
-                x11.as_mut(),
+                x11.as_window_mut(),
             ));
         }
 
@@ -2906,6 +2976,7 @@ fn run_desktop_with_window(
                 read_only,
                 overflow_open,
                 reduced_motion,
+                x11.scale().percent(),
             );
             recovery_dismiss_rect = if history_drawer.is_none() {
                 render_recovery_banner(
@@ -3036,7 +3107,7 @@ fn run_desktop_with_window(
                 &document,
                 &arenas,
                 reaper,
-                x11.as_mut(),
+                x11.as_window_mut(),
             ));
         }
         if events.is_empty() {
@@ -3074,7 +3145,7 @@ fn run_desktop_with_window(
                 &document,
                 &arenas,
                 reaper,
-                x11.as_mut(),
+                x11.as_window_mut(),
             ));
         }
 
@@ -3092,7 +3163,7 @@ fn run_desktop_with_window(
                         &document,
                         &arenas,
                         reaper,
-                        x11.as_mut(),
+                        x11.as_window_mut(),
                     ));
                 }
                 DesktopEvent::Preedit(mut text) => {
@@ -3154,16 +3225,7 @@ fn run_desktop_with_window(
                 }
                 DesktopEvent::Resize { width, height } => {
                     idle_chrome_visible = true;
-                    let cur_view = app.editor().view();
-                    app.surface_mut().set_viewport(cur_view, width, height);
-                    let (lw, lh) = app.surface().logical_editor_extent();
-                    let _ = app.resize(lw, lh);
-                    if let Some(ref mut h) = history_drawer {
-                        if let Some(ref mut hed) = h.history_editor {
-                            hed.set_view(cur_view);
-                            hed.resize(lw, lh);
-                        }
-                    }
+                    resize_editor_viewport(&mut app, &mut history_drawer, width, height);
                     pending_paint = true;
                 }
                 DesktopEvent::Scroll { delta_lines } => {
@@ -3200,6 +3262,12 @@ fn run_desktop_with_window(
                         .copied()
                     {
                         match hit.action {
+                            ToolbarAction::CycleUiScale => {
+                                overflow_open = false;
+                                apply_display_scale(&mut x11, 1, &mut status_msg);
+                                let (w, h) = x11.size();
+                                resize_editor_viewport(&mut app, &mut history_drawer, w, h);
+                            }
                             ToolbarAction::ToggleOverflow => {
                                 overflow_open = !overflow_open;
                             }
@@ -3381,6 +3449,21 @@ fn run_desktop_with_window(
                 }
                 DesktopEvent::Key { key, modifiers } => {
                     idle_chrome_visible = true;
+                    if modifiers.control && modifiers.alt {
+                        let steps = match key {
+                            Key::Character('=' | '+') => Some(1),
+                            Key::Character('-') => Some(-1),
+                            Key::Character('0') => Some(0),
+                            _ => None,
+                        };
+                        if let Some(steps) = steps {
+                            apply_display_scale(&mut x11, steps, &mut status_msg);
+                            let (w, h) = x11.size();
+                            resize_editor_viewport(&mut app, &mut history_drawer, w, h);
+                            pending_paint = true;
+                            continue;
+                        }
+                    }
                     if modifiers.control && !modifiers.alt {
                         match key {
                             Key::Character('q') => {
@@ -3394,7 +3477,7 @@ fn run_desktop_with_window(
                                     &document,
                                     &arenas,
                                     reaper,
-                                    x11.as_mut(),
+                                    x11.as_window_mut(),
                                 ));
                             }
                             Key::Character('s') => {
@@ -4313,7 +4396,7 @@ mod tests {
 
         assert!(app.draw().expect("draw selection"));
         assert!(app.surface().painted_selections() > 0);
-        let hits = render_toolbar(&mut app, SecurityDotState::Protected, false, false);
+        let hits = render_toolbar(&mut app, SecurityDotState::Protected, false, false, 100);
         assert!(
             hits.iter().any(|h| h.action == ToolbarAction::ToggleBold),
             "bold button hit-box must exist"
@@ -4385,7 +4468,7 @@ mod tests {
             .any(|e| matches!(e, Effect::Saved)));
 
         assert!(app.draw().expect("draw"));
-        let hits = render_toolbar(&mut app, SecurityDotState::Unprotected, false, false);
+        let hits = render_toolbar(&mut app, SecurityDotState::Unprotected, false, false, 100);
         assert!(
             !hits.iter().any(|h| h.action == ToolbarAction::ZoomIn),
             "narrow width (< 720 px) must collapse overflow controls cleanly"
@@ -4402,6 +4485,7 @@ mod tests {
             false,
             true,
             false,
+            100,
         );
         let has_zoom = overflow_hits
             .iter()
@@ -4416,6 +4500,12 @@ mod tests {
         assert!(
             has_theme,
             "overflow popup must expose light/dark theme toggle"
+        );
+        assert!(
+            overflow_hits
+                .iter()
+                .any(|h| h.action == ToolbarAction::CycleUiScale),
+            "overflow popup must expose whole-window display scale control"
         );
 
         let facts = Facts::gather_with(app.residency(), &doc, LockCapability::None, None);
