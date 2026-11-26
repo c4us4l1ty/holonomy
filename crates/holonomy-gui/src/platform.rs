@@ -705,8 +705,10 @@ mod tests {
     #[test]
     fn integer_scale_repeats_pixels_without_blurring() {
         let (mut win, presented) = window(UiScale::from_percent(200));
-        win.present_argb(&[0x00ff_0000, 0x0000_00ff], 2, 1).expect("present");
-        let (pixels, size) = presented.borrow();
+        win.present_argb(&[0x00ff_0000, 0x0000_00ff], 2, 1)
+            .expect("present");
+        let presented = presented.borrow();
+        let (pixels, size) = &*presented;
         assert_eq!(*size, (1_120, 780));
         assert_eq!(pixels[0], 0x00ff_0000);
         assert_eq!(pixels[1], 0x00ff_0000);
@@ -717,7 +719,8 @@ mod tests {
     fn fractional_scale_presents_at_the_physical_size() {
         let (mut win, presented) = window(UiScale::from_percent(133));
         win.present_argb(&[0x00ff_0000; 4], 2, 2).expect("present");
-        let (pixels, size) = presented.borrow();
+        let presented = presented.borrow();
+        let (pixels, size) = &*presented;
         assert_eq!(*size, (1_120, 780));
         assert_eq!(pixels.len(), 1_120 * 780);
     }
