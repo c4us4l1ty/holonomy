@@ -2511,17 +2511,30 @@ fn validate_manifest_against_lengths(
                 "manifest style run is empty, out of bounds, or overlapping",
             ));
         }
+        // The decoder in `holonomy_text::DocStyle::from_wire` is the authority for these wire
+        // values, and it refuses a run as a whole when any one of them is out of range. This
+        // crate cannot depend on the text crate, so the rules are repeated here — and they must
+        // repeat *all* of them. Accepting a combination the decoder refuses is not harmless: the
+        // reader drops the entire run, so an authenticated manifest reopens with less formatting
+        // than it committed (D-99).
+        let valid_list = match run.list_kind {
+            0 => run.list_depth == 0 && run.list_start == 0,
+            1 => (1..=8).contains(&run.list_depth) && run.list_start == 0,
+            2 => (1..=8).contains(&run.list_depth) && run.list_start >= 1,
+            _ => false,
+        };
+        // Links are 1-based. `0` means no link; `links.len() + 1` names nothing and would be
+        // silently dropped by `StyleMap::normalize`, so it must be refused here too.
+        let valid_link = run.link_id == 0
+            || usize::try_from(run.link_id).is_ok_and(|id| id <= manifest.links.len());
         if (run.flags & !0x3F) != 0
             || run.family > 2
             || run.heading > 4
             || run.alignment > 3
-            || run.list_kind > 2
-            || run.list_depth > 8
             || run.blockquote > 8
             || run.size_milli == 0
-            || (run.link_id as usize) > manifest.links.len()
-            || (run.list_kind == 0 && (run.list_depth != 0 || run.list_start != 0))
-            || (run.list_kind == 2 && run.list_start == 0)
+            || !valid_list
+            || !valid_link
         {
             return Err(LineError::InvalidManifest(
                 "manifest style run carries invalid attribute values",

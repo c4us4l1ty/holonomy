@@ -1682,6 +1682,80 @@ fn invalid_manifests_are_refused_without_poisoning_or_writing() {
 }
 
 #[test]
+fn manifest_validation_matches_the_style_decoder() {
+    // D-99: the commit path accepted wire values the text-layer decoder refuses as a whole. Such
+    // a manifest reopens with the entire run missing — authenticated bytes, less formatting — so
+    // validation and decoding must agree before the witness is written.
+    fn style_run(list_kind: u8, list_depth: u8, list_start: u32, link_id: u32) -> LineStyleRun {
+        LineStyleRun {
+            start: 0,
+            end: 5,
+            flags: 1,
+            family: 0,
+            heading: 0,
+            alignment: 0,
+            list_kind,
+            list_depth,
+            blockquote: 0,
+            size_milli: 1_000,
+            list_start,
+            link_id,
+        }
+    }
+
+    let path = temp_path("manifest-style-validation");
+    let salt = [0x57; 64];
+    let (_keys, capsule, dem) = test_material(b"manifest style validation", salt);
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), dem.duplicate()).unwrap();
+    line.append_segments(&[&b"hello"[..]]).unwrap();
+
+    let mut manifest = LineManifest {
+        slabs: vec![LineSlab {
+            segment: 0,
+            start: 0,
+            len: 5,
+        }],
+        styles: vec![style_run(1, 1, 0, 0)],
+        links: Vec::new(),
+    };
+    line.commit_full_manifest(&manifest)
+        .expect("a bullet at depth 1 is valid");
+    manifest.styles = vec![style_run(2, 8, 3, 0)];
+    line.commit_full_manifest(&manifest)
+        .expect("an ordered item at depth 8 starting at 3 is valid");
+
+    for bad in [
+        style_run(1, 0, 0, 0), // bullet with no depth
+        style_run(1, 1, 1, 0), // bullet carrying an ordinal
+        style_run(2, 0, 1, 0), // ordered item with no depth
+        style_run(0, 0, 1, 0), // plain text carrying an ordinal
+        style_run(0, 0, 0, 1), // link id with an empty link table
+    ] {
+        manifest.styles = vec![bad];
+        assert!(
+            matches!(
+                line.commit_full_manifest(&manifest),
+                Err(LineError::InvalidManifest(_))
+            ),
+            "a wire value the decoder refuses must not be committed"
+        );
+    }
+
+    // Links are 1-based: with one target, 1 is valid and 2 is one past the end.
+    manifest.links = vec!["https://example.invalid/a".to_owned()];
+    manifest.styles = vec![style_run(0, 0, 0, 1)];
+    line.commit_full_manifest(&manifest)
+        .expect("the first link target is valid");
+    manifest.styles = vec![style_run(0, 0, 0, 2)];
+    assert!(matches!(
+        line.commit_full_manifest(&manifest),
+        Err(LineError::InvalidManifest(_))
+    ));
+
+    assert_eq!(line.verify().unwrap().segments_verified, 1);
+}
+
+#[test]
 fn compact_active_to_erases_deleted_bytes_and_resets_manifest() {
     let source = temp_path("compact-active-source");
     let destination = temp_path("compact-active-destination");
