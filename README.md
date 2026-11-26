@@ -62,6 +62,14 @@ passphrase. Then: printable text types, arrows and Home/End/PageUp/PageDown move
 dismisses overlays, and `Ctrl+Q` or `Ctrl+C` quits after sealing what is open — if that last save
 is refused, the window says so and exits non-zero rather than claiming success (D-49).
 
+The **display scale** control (`Scale 100%` in the toolbar, or `⋯` when the window is narrow)
+cycles the entire desktop view through `100 / 125 / 133 / 150 / 175 / 200%` — the paper, toolbar,
+status strip, history drawer, dialogs, and click targets all scale together. `Ctrl+Alt+=` /
+`Ctrl+Alt+-` step the same presets and `Ctrl+Alt+0` resets to `100%`. The choice is remembered in
+`~/.config/holonomy/display-scale.txt` (`%APPDATA%\holonomy\display-scale.txt` on Windows); set
+`HOLONOMY_UI_SCALE=150` to override it at startup. This is window/display scaling, distinct from
+the document zoom buttons (`-` / `+`).
+
 A wipe is reported by its own evidence, on that same policy (D-89). The window keeps the reaper's
 measured outcome instead of discarding it: **confirmed** prints the bytes, arenas, canaries and
 microseconds it actually scrubbed and exits 0; an outcome that is absent, that scrubbed no arena,

@@ -2,6 +2,7 @@
 //! Windows (`win32`) GUI backends (`zero` external GUI crate dependencies under `--locked`).
 
 use std::error::Error;
+use std::path::PathBuf;
 
 use zeroize::Zeroizing;
 
@@ -9,6 +10,138 @@ use crate::{Key, Modifiers};
 
 /// Maximum clipboard UTF-8 payload accepted into the editor in a single paste (`4 KiB`).
 pub const MAX_CLIPBOARD_BYTES: usize = 4_096;
+
+/// Whole-desktop display scale, applied at the native-window boundary to *every* windowed view
+/// (unlock prompt, editor chrome, paper, overlays, history drawer) in one transform.
+///
+/// The logical layout keeps the existing 96-dpi pixel geometry; the window presents it at
+/// `percent / 100` physical size and divides pointer coordinates by the same number. That keeps
+/// rendering and hit-testing on a single shared coordinate space instead of scaling some widgets
+/// twice and others not at all. Document zoom (`View`) stays a separate, intentional setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UiScale(u16);
+
+impl UiScale {
+    /// The supported presets, including the common 133% HiDPI step.
+    pub const PRESETS: [u16; 6] = [100, 125, 133, 150, 175, 200];
+
+    /// Unscaled layout (`100%`).
+    pub const DEFAULT: Self = Self(100);
+
+    /// Scale in percent (`100` = unscaled).
+    #[must_use]
+    pub const fn percent(self) -> u16 {
+        self.0
+    }
+
+    /// Scale in thousandths (`1_000` = unscaled).
+    #[must_use]
+    pub const fn milli(self) -> i32 {
+        i32::from(self.0) * 10
+    }
+
+    /// Nearest supported preset for a requested percentage. Out-of-range values clamp to the
+    /// closest preset instead of producing a scale the renderer was never qualified at.
+    #[must_use]
+    pub fn from_percent(percent: u16) -> Self {
+        Self(
+            Self::PRESETS
+                .iter()
+                .copied()
+                .min_by_key(|p| (i32::from(*p) - i32::from(percent)).abs())
+                .unwrap_or(100),
+        )
+    }
+
+    /// Parses `150`, `150%`, or `1.5` style values; `None` leaves the current scale untouched.
+    #[must_use]
+    pub fn parse(input: &str) -> Option<Self> {
+        let text = input.trim();
+        let text = text.strip_suffix('%').unwrap_or(text).trim();
+        if text == "2" || text == "2.0" {
+            return Some(Self(200));
+        }
+        if let Ok(percent) = text.parse::<u16>() {
+            return (50..=300).contains(&percent).then(|| Self::from_percent(percent));
+        }
+        let fraction = text.strip_prefix("1.")?;
+        if fraction.is_empty()
+            || fraction.len() > 2
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        let hundredths = fraction
+            .bytes()
+            .fold(0u16, |acc, b| acc * 10 + u16::from(b - b'0'));
+        if fraction.len() == 1 {
+            Some(Self::from_percent(100 + hundredths * 10))
+        } else {
+            Some(Self::from_percent(100 + hundredths))
+        }
+    }
+
+    /// Next preset, wrapping from `200%` back to `100%`.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self.0 {
+            100 => Self(125),
+            125 => Self(133),
+            133 => Self(150),
+            150 => Self(175),
+            175 => Self(200),
+            _ => Self(100),
+        }
+    }
+
+    /// Previous preset, wrapping from `100%` back to `200%`.
+    #[must_use]
+    pub const fn previous(self) -> Self {
+        match self.0 {
+            200 => Self(175),
+            175 => Self(150),
+            150 => Self(133),
+            133 => Self(125),
+            125 => Self(100),
+            _ => Self(200),
+        }
+    }
+
+    /// Moves `steps` presets; negative steps scale down.
+    #[must_use]
+    pub fn step(self, steps: i32) -> Self {
+        match steps {
+            0.. => (0..steps).fold(self, |s, _| s.next()),
+            _ => (0..-steps).fold(self, |s, _| s.previous()),
+        }
+    }
+
+    /// Physical pixels to logical pixels for one window axis, preserving the surface's minimum
+    /// framebuffer dimensions so a very small window still has a paintable client area.
+    #[must_use]
+    fn logical_axis(self, physical: u16, minimum: u16) -> u16 {
+        let scaled = (i32::from(physical) * 1_000 + self.milli() / 2) / self.milli();
+        scaled
+            .clamp(i32::from(minimum), i32::from(u16::MAX))
+            .try_into()
+            .unwrap_or(u16::MAX)
+    }
+
+    /// Logical pixel size of a physical client area at this scale.
+    #[must_use]
+    pub fn logical_size(self, physical: (u16, u16)) -> (u16, u16) {
+        (
+            self.logical_axis(physical.0, 320),
+            self.logical_axis(physical.1, 240),
+        )
+    }
+}
+
+impl Default for UiScale {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 /// OS-level window screen-capture exclusion status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +288,244 @@ pub trait DesktopWindow {
     }
 }
 
+fn ui_scale_config_path() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(dir).join("holonomy").join("display-scale.txt"));
+    }
+    std::env::var_os("HOME")
+        .filter(|s| !s.is_empty())
+        .map(|h| {
+            PathBuf::from(h)
+                .join(".config")
+                .join("holonomy")
+                .join("display-scale.txt")
+        })
+        .or_else(|| {
+            std::env::var_os("APPDATA")
+                .filter(|s| !s.is_empty())
+                .map(|a| PathBuf::from(a).join("holonomy").join("display-scale.txt"))
+        })
+}
+
+/// Resolves the startup display scale: `HOLONOMY_UI_SCALE` overrides the persisted preference.
+#[must_use]
+pub fn load_ui_scale() -> UiScale {
+    if let Some(value) = std::env::var("HOLONOMY_UI_SCALE")
+        .ok()
+        .and_then(|s| UiScale::parse(&s))
+    {
+        return value;
+    }
+    let Some(path) = ui_scale_config_path() else {
+        return UiScale::DEFAULT;
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| UiScale::parse(&s))
+        .unwrap_or_default()
+}
+
+/// Persists a display-scale choice so it applies to every subsequently opened window.
+pub fn save_ui_scale(scale: UiScale) {
+    let Some(path) = ui_scale_config_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, format!("{}\n", scale.percent()));
+}
+
+/// Applies [`UiScale`] to an entire native window: the renderer sees a smaller logical viewport,
+/// pointer events are divided down into that viewport, and the finished framebuffer is resampled
+/// back to the physical client area. Every consumer of [`DesktopWindow`] therefore shares one
+/// coordinate system, including the in-window unlock prompt and runtime scale changes.
+pub struct ScaledWindow {
+    inner: Box<dyn DesktopWindow>,
+    scale: UiScale,
+    logical: (u16, u16),
+    pending_resize: Option<(u16, u16)>,
+    scratch: Vec<u32>,
+}
+
+impl ScaledWindow {
+    /// Wraps a native window at `scale`. The native window keeps its physical client size.
+    #[must_use]
+    pub fn new(inner: Box<dyn DesktopWindow>, scale: UiScale) -> Self {
+        let logical = scale.logical_size(inner.size());
+        Self {
+            inner,
+            scale,
+            logical,
+            pending_resize: None,
+            scratch: Vec::new(),
+        }
+    }
+
+    /// Currently applied display scale.
+    #[must_use]
+    pub const fn scale(&self) -> UiScale {
+        self.scale
+    }
+
+    /// Changes the scale for this window and every frame it presents. A synthetic `Resize` is
+    /// delivered on the next poll so the editor reflows to the new logical viewport.
+    pub fn set_scale(&mut self, scale: UiScale) -> bool {
+        if scale == self.scale {
+            return false;
+        }
+        self.scale = scale;
+        self.logical = scale.logical_size(self.inner.size());
+        self.pending_resize = Some(self.logical);
+        true
+    }
+
+    /// Access to the underlying native window for operations that are scale-independent.
+    pub fn as_window_mut(&mut self) -> &mut dyn DesktopWindow {
+        &mut *self.inner
+    }
+
+    fn device_to_logical(&self, device: i16) -> i16 {
+        if self.scale.milli() == 1_000 {
+            return device;
+        }
+        let milli = self.scale.milli();
+        let value = i32::from(device) * 1_000;
+        let logical = if value >= 0 {
+            (value + milli / 2) / milli
+        } else {
+            (value - milli / 2) / milli
+        };
+        logical
+            .clamp(i32::from(i16::MIN), i32::from(i16::MAX))
+            .try_into()
+            .unwrap_or(i16::MAX)
+    }
+}
+
+impl DesktopWindow for ScaledWindow {
+    fn size(&self) -> (u16, u16) {
+        self.logical
+    }
+
+    fn dpi(&self) -> i64 {
+        self.inner.dpi()
+    }
+
+    fn present_argb(
+        &mut self,
+        pixels: &[u32],
+        width: u16,
+        height: u16,
+    ) -> Result<(), Box<dyn Error>> {
+        let (physical_w, physical_h) = self.inner.size();
+        let milli = self.scale.milli();
+        if milli == 1_000 && width == physical_w && height == physical_h {
+            return self.inner.present_argb(pixels, width, height);
+        }
+        if width == 0 || height == 0 || physical_w == 0 || physical_h == 0 {
+            return Ok(());
+        }
+        let src_w = usize::from(width);
+        let src_h = usize::from(height);
+        if pixels.len() < src_w * src_h {
+            return Err("framebuffer smaller than the logical viewport".into());
+        }
+        self.scratch
+            .resize(usize::from(physical_w) * usize::from(physical_h), 0);
+
+        if milli % 1_000 == 0 {
+            // Integer scales repeat each logical pixel exactly: text stays crisp at 200%.
+            let factor = usize::try_from(milli / 1_000).unwrap_or(1).max(1);
+            for y in 0..usize::from(physical_h) {
+                let sy = (y / factor).min(src_h - 1) * src_w;
+                let dy = y * usize::from(physical_w);
+                for x in 0..usize::from(physical_w) {
+                    self.scratch[dy + x] = pixels[sy + (x / factor).min(src_w - 1)];
+                }
+            }
+        } else {
+            // Non-integer steps use bilinear sampling so glyph edges do not acquire hard,
+            // uneven pixel widths at 125/133/150/175%.
+            let max_x = (src_w - 1) as f64;
+            let max_y = (src_h - 1) as f64;
+            for y in 0..usize::from(physical_h) {
+                let fy = ((f64::from(y as u32) + 0.5) * 1_000.0 / f64::from(milli) - 0.5)
+                    .clamp(0.0, max_y);
+                let y0 = fy as usize;
+                let y1 = (y0 + 1).min(src_h - 1);
+                let wy = fy - y0 as f64;
+                let dy = y * usize::from(physical_w);
+                for x in 0..usize::from(physical_w) {
+                    let fx = ((f64::from(x as u32) + 0.5) * 1_000.0 / f64::from(milli) - 0.5)
+                        .clamp(0.0, max_x);
+                    let x0 = fx as usize;
+                    let x1 = (x0 + 1).min(src_w - 1);
+                    let wx = fx - x0 as f64;
+                    let p00 = pixels[y0 * src_w + x0];
+                    let p10 = pixels[y0 * src_w + x1];
+                    let p01 = pixels[y1 * src_w + x0];
+                    let p11 = pixels[y1 * src_w + x1];
+                    let mut out = 0u32;
+                    for shift in [16, 8, 0] {
+                        let top = f64::from((p00 >> shift) & 0xff) * (1.0 - wx)
+                            + f64::from((p10 >> shift) & 0xff) * wx;
+                        let bottom = f64::from((p01 >> shift) & 0xff) * (1.0 - wx)
+                            + f64::from((p11 >> shift) & 0xff) * wx;
+                        let value = (top * (1.0 - wy) + bottom * wy).round() as u32;
+                        out |= (value & 0xff) << shift;
+                    }
+                    self.scratch[dy + x] = out;
+                }
+            }
+        }
+        self.inner.present_argb(&self.scratch, physical_w, physical_h)
+    }
+
+    fn poll_events(&mut self, timeout_ms: i32) -> Result<Vec<DesktopEvent>, Box<dyn Error>> {
+        let mut events = self.inner.poll_events(timeout_ms)?;
+        for event in &mut events {
+            match event {
+                DesktopEvent::MouseDown { x, y, .. } | DesktopEvent::MouseDrag { x, y } => {
+                    *x = self.device_to_logical(*x);
+                    *y = self.device_to_logical(*y);
+                }
+                DesktopEvent::Resize { width, height } => {
+                    let (w, h) = self.scale.logical_size((*width, *height));
+                    self.logical = (w, h);
+                    *width = w;
+                    *height = h;
+                }
+                _ => {}
+            }
+        }
+        if let Some((w, h)) = self.pending_resize.take() {
+            if !events.iter().any(
+                |event| matches!(event, DesktopEvent::Resize { width, height } if *width == w && *height == h),
+            ) {
+                events.push(DesktopEvent::Resize { width: w, height: h });
+            }
+        }
+        Ok(events)
+    }
+
+    fn set_clipboard(&mut self, utf8: &[u8]) -> Result<(), Box<dyn Error>> {
+        self.inner.set_clipboard(utf8)
+    }
+
+    fn request_clipboard(&mut self) -> Result<(), Box<dyn Error>> {
+        self.inner.request_clipboard()
+    }
+
+    fn clear_clipboard(&mut self) {
+        self.inner.clear_clipboard();
+    }
+
+    fn security_info(&self) -> WindowSecurityInfo {
+        self.inner.security_info()
+    }
+}
+
 /// Opens the native desktop window for the current OS (`Win32` on Windows, `Cocoa`/`X11` on
 /// macOS, pure-`libc` `X11` on Linux/Unix).
 ///
@@ -188,5 +559,155 @@ pub fn open_desktop_window(
         Ok(Box::new(crate::x11::X11Window::open(
             None, title, width, height,
         )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct MockWindow {
+        size: (u16, u16),
+        events: VecDeque<DesktopEvent>,
+        presented: Vec<u32>,
+        presented_size: (u16, u16),
+    }
+
+    impl DesktopWindow for MockWindow {
+        fn size(&self) -> (u16, u16) {
+            self.size
+        }
+
+        fn dpi(&self) -> i64 {
+            96
+        }
+
+        fn present_argb(
+            &mut self,
+            pixels: &[u32],
+            width: u16,
+            height: u16,
+        ) -> Result<(), Box<dyn Error>> {
+            self.presented = pixels.to_vec();
+            self.presented_size = (width, height);
+            Ok(())
+        }
+
+        fn poll_events(&mut self, _timeout_ms: i32) -> Result<Vec<DesktopEvent>, Box<dyn Error>> {
+            Ok(self.events.drain(..).collect())
+        }
+
+        fn set_clipboard(&mut self, _utf8: &[u8]) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+
+        fn request_clipboard(&mut self) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+
+        fn clear_clipboard(&mut self) {}
+    }
+
+    fn window(scale: UiScale) -> ScaledWindow {
+        let mut inner = MockWindow::default();
+        inner.size = (1_120, 780);
+        ScaledWindow::new(Box::new(inner), scale)
+    }
+
+    #[test]
+    fn presets_cover_the_requested_range_and_cycle() {
+        assert_eq!(UiScale::PRESETS, [100, 125, 133, 150, 175, 200]);
+        assert_eq!(UiScale::parse("150%"), Some(UiScale::from_percent(150)));
+        assert_eq!(UiScale::parse("1.33"), Some(UiScale::from_percent(133)));
+        assert_eq!(UiScale::parse("2.0"), Some(UiScale::from_percent(200)));
+        let mut scale = UiScale::DEFAULT;
+        for &preset in &UiScale::PRESETS {
+            assert_eq!(scale.percent(), preset);
+            scale = scale.next();
+        }
+        assert_eq!(scale, UiScale::DEFAULT);
+        assert_eq!(UiScale::DEFAULT.previous().percent(), 200);
+        assert_eq!(UiScale::from_percent(140).step(-1).percent(), 125);
+    }
+
+    #[test]
+    fn logical_viewport_matches_each_preset() {
+        let physical = (1_120, 780);
+        let expected = [
+            (1_120, 780),
+            (896, 624),
+            (842, 586),
+            (747, 520),
+            (640, 446),
+            (560, 390),
+        ];
+        for (preset, size) in UiScale::PRESETS.iter().zip(expected) {
+            assert_eq!(UiScale::from_percent(*preset).logical_size(physical), size);
+        }
+    }
+
+    #[test]
+    fn pointer_and_resize_events_use_the_logical_coordinate_space() {
+        let mut inner = MockWindow::default();
+        inner.events.push_back(DesktopEvent::MouseDown {
+            x: 150,
+            y: 90,
+            modifiers: Modifiers::none(),
+        });
+        inner.events.push_back(DesktopEvent::MouseDrag { x: 30, y: 60 });
+        inner.events.push_back(DesktopEvent::Resize {
+            width: 1_200,
+            height: 900,
+        });
+        // Replace the wrapper's inner window with this event source for the assertion.
+        let mut win = ScaledWindow::new(Box::new(inner), UiScale::from_percent(150));
+        assert_eq!(win.size(), (747, 520));
+        let events = win.poll_events(0).expect("poll");
+        assert!(matches!(
+            events.first(),
+            Some(DesktopEvent::MouseDown { x: 100, y: 60, .. })
+        ));
+        assert!(matches!(
+            events.get(1),
+            Some(DesktopEvent::MouseDrag { x: 20, y: 40 })
+        ));
+        assert!(matches!(
+            events.get(2),
+            Some(DesktopEvent::Resize {
+                width: 800,
+                height: 600
+            })
+        ));
+        assert!(win.set_scale(UiScale::from_percent(200)));
+        let events = win.poll_events(0).expect("poll");
+        assert!(matches!(
+            events.last(),
+            Some(DesktopEvent::Resize {
+                width: 560,
+                height: 390
+            })
+        ));
+    }
+
+    #[test]
+    fn integer_scale_repeats_pixels_without_blurring() {
+        let mut win = window(UiScale::from_percent(200));
+        win.present_argb(&[0x00ff_0000, 0x0000_00ff], 2, 1)
+            .expect("present");
+        assert_eq!(win.presented_size, (1_120, 780));
+        assert_eq!(win.presented[0], 0x00ff_0000);
+        assert_eq!(win.presented[1], 0x00ff_0000);
+        assert_eq!(win.presented[2], 0x0000_00ff);
+    }
+
+    #[test]
+    fn fractional_scale_presents_at_the_physical_size() {
+        let mut win = window(UiScale::from_percent(133));
+        win.present_argb(&[0x00ff_0000; 4], 2, 2)
+            .expect("present");
+        assert_eq!(win.presented_size, (1_120, 780));
+        assert_eq!(win.presented.len(), 1_120 * 780);
     }
 }
