@@ -1106,6 +1106,9 @@ impl LayoutTable {
         if depth >= MAX_RECURSE_DEPTH {
             return false;
         }
+        if depth == 0 {
+            state.written = CovMask::empty();
+        }
         let Some(lookup) = self.lookups.get(usize::from(lookup_idx)) else {
             return false;
         };

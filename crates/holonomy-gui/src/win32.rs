@@ -248,6 +248,7 @@ struct WinQueue {
     events: VecDeque<DesktopEvent>,
     left_down: bool,
     owns_clipboard: bool,
+    ime_result_committed: bool,
     pending_surrogate: Option<u16>,
     width: u16,
     height: u16,
@@ -444,19 +445,25 @@ unsafe extern "system" fn wnd_proc(
                     q.owns_clipboard = false;
                 }
                 WM_IME_STARTCOMPOSITION => {
+                    q.ime_result_committed = false;
                     q.events.push_back(DesktopEvent::Preedit(String::new()));
                 }
                 WM_IME_COMPOSITION => {
                     let flags = l_param as u32;
+                    if flags == 0 {
+                        q.ime_result_committed = false;
+                        q.events.push_back(DesktopEvent::Preedit(String::new()));
+                    }
                     if (flags & GCS_RESULTSTR) != 0 {
                         if let Some(res) = read_imm_string(hwnd, GCS_RESULTSTR) {
                             q.events.push_back(DesktopEvent::Preedit(String::new()));
                             if !res.is_empty() {
                                 q.events.push_back(DesktopEvent::CommitText(res));
                             }
+                            q.ime_result_committed = true;
                             // Suppress GCS_RESULTSTR in DefWindowProcW so Windows does not re-emit
                             // duplicate WM_CHAR / WM_IME_CHAR messages for the committed string.
-                            def_l_param = (flags & !GCS_RESULTSTR) as isize;
+                            def_l_param = l_param & !(GCS_RESULTSTR as isize);
                         }
                     }
                     if (flags & GCS_COMPSTR) != 0 {
@@ -465,10 +472,13 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 WM_IME_ENDCOMPOSITION => {
+                    q.ime_result_committed = false;
                     q.events.push_back(DesktopEvent::Preedit(String::new()));
                 }
                 WM_IME_CHAR => {
-                    handled_close = true;
+                    if std::mem::take(&mut q.ime_result_committed) {
+                        handled_close = true;
+                    }
                 }
                 WM_SIZE => {
                     let w = ((l_param as usize) & 0xFFFF) as u16;
@@ -508,6 +518,7 @@ unsafe extern "system" fn wnd_proc(
                         .push_back(DesktopEvent::Scroll { delta_lines: lines });
                 }
                 WM_KEYDOWN => {
+                    q.ime_result_committed = false;
                     let mods = current_modifiers();
                     let vk = (w_param & 0xFFFF) as u16;
                     if let Some(key) = translate_virtual_key(vk, mods) {
@@ -645,6 +656,7 @@ impl Win32Window {
             events: VecDeque::with_capacity(32),
             left_down: false,
             owns_clipboard: false,
+            ime_result_committed: false,
             pending_surrogate: None,
             width: cw,
             height: ch,
@@ -919,5 +931,9 @@ mod tests {
             .collect();
         assert_eq!(utf16_le_bytes_to_string(&ime_utf16), "日本語🦀");
         ime_utf16.zeroize();
+
+        // Stripping GCS_RESULTSTR from LPARAM preserves upper bits on 64-bit targets.
+        let sample_lp: isize = GCS_COMPSTR as isize | GCS_RESULTSTR as isize;
+        assert_eq!(sample_lp & !(GCS_RESULTSTR as isize), GCS_COMPSTR as isize);
     }
 }

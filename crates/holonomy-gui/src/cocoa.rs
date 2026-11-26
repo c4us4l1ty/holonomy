@@ -55,11 +55,13 @@ const NS_NOT_FOUND: usize = usize::MAX;
 #[link(name = "objc")]
 extern "C" {
     fn objc_getClass(name: *const c_char) -> Class;
+    fn objc_getProtocol(name: *const c_char) -> *mut c_void;
     fn sel_registerName(name: *const c_char) -> Sel;
     fn objc_msgSend();
     fn objc_allocateClassPair(superclass: Class, name: *const c_char, extra_bytes: usize) -> Class;
     fn objc_registerClassPair(cls: Class);
     fn class_addMethod(cls: Class, name: Sel, imp: *const c_void, types: *const c_char) -> Bool;
+    fn class_addProtocol(cls: Class, protocol: *mut c_void) -> Bool;
     fn class_addIvar(
         cls: Class,
         name: *const c_char,
@@ -423,6 +425,7 @@ extern "C" fn view_unmark_text(this: Id, _cmd: Sel) {
         let mut q = q_ref.borrow_mut();
         if q.marked_len > 0 {
             q.marked_len = 0;
+            q.ime_consumed = true;
             q.events.push_back(DesktopEvent::Preedit(String::new()));
         }
     }
@@ -467,11 +470,25 @@ extern "C" fn view_character_index_for_point(_this: Id, _cmd: Sel, _point: NsPoi
 }
 
 extern "C" fn view_first_rect_for_character_range(
-    _this: Id,
+    this: Id,
     _cmd: Sel,
     _range: NsRange,
     _actual_range: *mut NsRange,
 ) -> NsRect {
+    let win: Id = msg!(this, sel(b"window\0") => Id);
+    if !win.is_null() {
+        let frame: NsRect = msg!(win, sel(b"frame\0") => NsRect);
+        return NsRect {
+            origin: NsPoint {
+                x: frame.origin.x + 120.0,
+                y: frame.origin.y + (frame.size.height - 160.0).max(40.0),
+            },
+            size: NsSize {
+                width: 1.0,
+                height: 18.0,
+            },
+        };
+    }
     NsRect {
         origin: NsPoint { x: 140.0, y: 140.0 },
         size: NsSize {
@@ -727,6 +744,10 @@ fn ensure_objc_classes() -> (Class, Class) {
                 view_first_rect_for_character_range as *const c_void,
                 c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}".as_ptr(),
             );
+            let ime_proto = objc_getProtocol(c"NSTextInputClient".as_ptr());
+            if !ime_proto.is_null() {
+                let _ = class_addProtocol(view_cls, ime_proto);
+            }
             objc_registerClassPair(view_cls);
         }
 
@@ -1040,8 +1061,13 @@ impl DesktopWindow for CocoaWindow {
 
     fn poll_events(&mut self, timeout_ms: i32) -> Result<Vec<DesktopEvent>, Box<dyn Error>> {
         let _pool = AutoreleasePool::new();
-        let secs = f64::from(timeout_ms.max(0)) / 1000.0;
-        let date: Id = if timeout_ms > 0 {
+        let wait_ms = if self.queue.borrow().events.is_empty() {
+            timeout_ms.max(0)
+        } else {
+            0
+        };
+        let secs = f64::from(wait_ms) / 1000.0;
+        let date: Id = if wait_ms > 0 {
             msg!(cls(b"NSDate\0"), sel(b"dateWithTimeIntervalSinceNow:\0"), secs => f64 => Id)
         } else {
             msg!(cls(b"NSDate\0"), sel(b"distantPast\0") => Id)

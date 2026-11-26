@@ -740,6 +740,46 @@ where
         Ok(effects)
     }
 
+    /// Commits a multi-codepoint string from platform IME or dead-key composition, coalescing
+    /// into the active typing burst for undo just like [`Self::press`].
+    ///
+    /// # Errors
+    ///
+    /// [`GuiError`] when the editor refuses the edit.
+    pub fn press_text(&mut self, text: &str) -> Result<Vec<Effect>, GuiError> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.typing {
+            self.editor.mark();
+        }
+        self.typing = true;
+        let mut effects = self.editor.apply(Intent::Type(text.to_owned()))?;
+        if !effects.is_empty() {
+            if let Ok(revealed) = self.editor.apply(Intent::RevealCaret) {
+                if !revealed.is_empty() && !effects.contains(&Effect::Redraw) {
+                    effects.push(Effect::Redraw);
+                }
+            }
+            self.dirty = true;
+        }
+        Ok(effects)
+    }
+
+    /// Inserts pasted text as its own undo step and ends any active typing burst.
+    ///
+    /// # Errors
+    ///
+    /// [`GuiError`] when the editor refuses the edit.
+    pub fn paste_text(&mut self, text: &str) -> Result<(), GuiError> {
+        self.typing = false;
+        self.editor.mark();
+        self.editor.apply(Intent::Type(text.to_owned()))?;
+        let _ = self.editor.apply(Intent::RevealCaret);
+        self.dirty = true;
+        Ok(())
+    }
+
     /// The window changed size.
     ///
     /// # Errors

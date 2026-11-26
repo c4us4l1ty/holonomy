@@ -442,7 +442,7 @@ impl PixelSurface {
         }
         let bar_x = self.canvas_clip.x + self.canvas_clip.w - 8;
         let track_top = self.canvas_clip.y + 4;
-        let track_h = (self.canvas_clip.h - 8).max(20);
+        let track_h = (self.canvas_clip.h - 8).max(24);
         let thumb_h =
             ((i64::from(track_h) * view_h) / total_h).clamp(24, i64::from(track_h)) as i32;
         let max_scroll = (total_h - view_h).max(1);
@@ -479,11 +479,9 @@ impl PixelSurface {
         }
         let box_w = (text_w + 8).max(16);
         let max_x = (self.canvas_clip.x + self.canvas_clip.w - box_w).max(self.canvas_clip.x);
+        let max_y = (self.canvas_clip.y + self.canvas_clip.h - h).max(self.canvas_clip.y);
         let bx = cx.clamp(self.canvas_clip.x, max_x);
-        let by = cy.clamp(
-            self.canvas_clip.y,
-            self.canvas_clip.y + self.canvas_clip.h - h,
-        );
+        let by = cy.clamp(self.canvas_clip.y, max_y);
         let box_rect = Rect::new(bx, by, box_w, h);
         self.fb
             .fill_rect_clipped(box_rect, self.theme.code_bg, self.canvas_clip);
@@ -2867,6 +2865,8 @@ fn run_desktop_with_window(
 
     loop {
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            ime_preedit.zeroize();
+            ime_preedit.clear();
             return Ok(finish_gui_wipe(
                 &mut app,
                 &document,
@@ -3029,6 +3029,8 @@ fn run_desktop_with_window(
         });
         let events = x11.poll_events(poll_ms)?;
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            ime_preedit.zeroize();
+            ime_preedit.clear();
             return Ok(finish_gui_wipe(
                 &mut app,
                 &document,
@@ -3065,6 +3067,8 @@ fn run_desktop_with_window(
         last_activity = Instant::now();
         tripwire.beat();
         if reaper.has_tripped() || tripwire.evaluate().is_some() {
+            ime_preedit.zeroize();
+            ime_preedit.clear();
             return Ok(finish_gui_wipe(
                 &mut app,
                 &document,
@@ -3091,13 +3095,14 @@ fn run_desktop_with_window(
                         x11.as_mut(),
                     ));
                 }
-                DesktopEvent::Preedit(text) => {
+                DesktopEvent::Preedit(mut text) => {
                     ime_preedit.zeroize();
                     ime_preedit.clear();
                     ime_preedit.push_str(&text);
+                    text.zeroize();
                     pending_paint = true;
                 }
-                DesktopEvent::CommitText(text) => {
+                DesktopEvent::CommitText(mut text) => {
                     idle_chrome_visible = true;
                     ime_preedit.zeroize();
                     ime_preedit.clear();
@@ -3131,10 +3136,11 @@ fn run_desktop_with_window(
                         }
                     } else {
                         status_msg.clear();
-                        if app.press_paste_text(&text).is_err() {
+                        if app.press_text(&text).is_err() {
                             status_msg = "last edit refused".to_owned();
                         }
                     }
+                    text.zeroize();
                     pending_paint = true;
                 }
                 DesktopEvent::FocusOut => {
@@ -3610,11 +3616,7 @@ where
     T: Surface,
 {
     fn press_paste_text(&mut self, text: &str) -> Result<(), crate::GuiError> {
-        self.editor().mark();
-        self.editor().apply(Intent::Type(text.to_owned()))?;
-        let _ = self.editor().apply(Intent::RevealCaret);
-        self.mark_dirty();
-        Ok(())
+        self.paste_text(text)
     }
 }
 
@@ -4679,8 +4681,25 @@ mod tests {
         let before_preedit = app.surface().pixels().to_vec();
         app.surface_mut().render_ime_preedit("日本´");
         assert_ne!(app.surface().pixels(), before_preedit.as_slice());
-        app.press_paste_text("é").expect("paste / commit text");
-        assert!(app.frame_text().expect("frame").contains('é'));
+
+        // Committed IME / dead-key text coalesces into the active typing burst for single undo.
+        app.press(Key::Character('c'), Modifiers::none())
+            .expect("type c");
+        app.press(Key::Character('a'), Modifiers::none())
+            .expect("type a");
+        app.press(Key::Character('f'), Modifiers::none())
+            .expect("type f");
+        app.press_text("é").expect("commit accented e");
+        assert!(app.frame_text().expect("frame").contains("café"));
+        app.press(Key::Character('z'), Modifiers::control())
+            .expect("single undo across café burst");
+        assert!(!app.frame_text().expect("frame").contains("café"));
+
+        // Tiny canvas_clip height must not panic when clamping IME preedit or scrollbar.
+        app.surface_mut().canvas_clip = Rect::new(0, 0, 120, 4);
+        app.surface_mut().render_ime_preedit("あ");
+        app.surface_mut().render_scrollbar(metrics);
+
         let bar_y = i32::from(QUIET_MD_THEME.toolbar_height_px);
         let dismiss = render_recovery_banner(app.surface_mut(), 42, bar_y);
         assert!(dismiss.is_some());

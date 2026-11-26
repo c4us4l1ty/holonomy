@@ -969,8 +969,9 @@ impl DeadComposeState {
 
     /// Processes a translated raw `(keysym, state)` event into zero or more [`DesktopEvent`]s.
     pub fn feed(&mut self, keysym: u32, state: u16, out: &mut Vec<DesktopEvent>) {
-        // Ignore pure modifier keysyms so Shift/ISO_Level3_Shift don't cancel compose.
-        if matches!(keysym, 0xffe1..=0xffee | 0xfe03) {
+        // Ignore pure modifier/level/lock keysyms so Shift, AltGr, Mode_switch, or Num_Lock
+        // don't cancel compose.
+        if matches!(keysym, 0xffe1..=0xffee | 0xfe01..=0xfe12 | 0xff7e..=0xff7f) {
             return;
         }
         let control = (state & 0x04) != 0;
@@ -2683,6 +2684,22 @@ mod tests {
                 DesktopEvent::Preedit("´".to_owned()),
                 DesktopEvent::Preedit(String::new()),
                 DesktopEvent::CommitText("´q".to_owned()),
+            ]
+        );
+
+        // Dead acute + ISO_Level3_Shift + Mode_switch + Num_Lock + 'e' still composes 'é'
+        evs.clear();
+        compose.feed(0xfe51, 0, &mut evs);
+        compose.feed(0xfe03, 0, &mut evs);
+        compose.feed(0xff7e, 0, &mut evs);
+        compose.feed(0xff7f, 0, &mut evs);
+        compose.feed(b'e' as u32, 0, &mut evs);
+        assert_eq!(
+            evs,
+            vec![
+                DesktopEvent::Preedit("´".to_owned()),
+                DesktopEvent::Preedit(String::new()),
+                DesktopEvent::CommitText("é".to_owned()),
             ]
         );
 
