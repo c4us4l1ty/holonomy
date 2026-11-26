@@ -68,6 +68,22 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-26 — D-98 — Bug hunt: interrupted UTF-8 no longer swallows a keystroke, and a shrunk
+  terminal no longer positions the caret outside its grid.**
+  - `holonomy_gui::term::Decoder` used to accept *any* byte as the continuation of a partial UTF-8
+    character. A lead byte without its continuation — a paste cut mid-character, a serial line
+    that dropped a byte — therefore absorbed the next real key until `expect` was reached and
+    reported `Ignored`: Ctrl+S never saved, Enter never confirmed, a letter never typed. D-56 had
+    already fixed the special case where that byte was `ESC`; the general case is now fixed too by
+    accepting only `0x80..=0xbf` as continuation bytes and handling any other byte as a fresh
+    token. Regression tests cover a control byte, printable ASCII, Enter, an intact multi-byte
+    character and a character split across two reads.
+  - `screen_with` checked the caret's row before emitting an ANSI cursor-position escape but not
+    its column. After `CellSurface::resize` shrank the window, a caret left outside the new grid
+    was clamped by the terminal into the wrong cell. The renderer now omits an off-grid caret;
+    the next frame that can show it positions it. Both defects were found by reading the input and
+    rendering paths, not by a failing CI job, and both are pinned by tests in `term.rs`.
+
 - **2026-11-26 — D-97 — Binary-level SIGKILL recovery evidence, and the last doc contradictions
   reconciled.**
   - `scripts/drive-pty.py` gained an explicit, recorded `SIGKILL` (`--kill-after`, `--expect-kill`)
