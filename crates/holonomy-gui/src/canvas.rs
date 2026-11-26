@@ -4314,6 +4314,7 @@ fn run_document_session(
                         match hit.action {
                             ToolbarAction::GoHome => {
                                 home_requested = true;
+                                quit = true;
                                 pending_paint = true;
                                 continue;
                             }
@@ -4551,6 +4552,7 @@ fn run_document_session(
                             }
                             Key::Character('h' | 'H') if modifiers.shift => {
                                 home_requested = true;
+                                quit = true;
                                 pending_paint = true;
                                 continue;
                             }
@@ -4743,8 +4745,11 @@ fn run_document_session(
 
     x11.clear_clipboard();
     if home_requested {
-        let _ = save_gui(&mut app);
-        return Ok(DesktopEnd::GoHome);
+        return Ok(if !app.has_pending() || save_gui(&mut app) {
+            DesktopEnd::GoHome
+        } else {
+            DesktopEnd::SaveFailed
+        });
     }
     Ok(if !app.has_pending() {
         DesktopEnd::NothingToWrite
@@ -5474,6 +5479,10 @@ mod tests {
             hits.iter()
                 .any(|h| h.action == ToolbarAction::ToggleSecurity),
             "security dot hit-box must exist"
+        );
+        assert!(
+            hits.iter().any(|h| h.action == ToolbarAction::GoHome),
+            "Home button hit-box must exist"
         );
 
         // Clicking ToggleBold on a mixed selection promotes all bytes to Bold (Uniform(true)).
