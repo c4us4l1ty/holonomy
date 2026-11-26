@@ -310,32 +310,35 @@ The full VISION budget table: **now generated, not written.** `BUDGETS` in
 measures each row, `xtask gates` renders it into `GATES.md`, and `gates --check` fails the build if
 the two disagree. Block 9's `L-7` wipe row is now measured on every push by
 `holonomy-text/tests/wipe_gate.rs` (`< 1 ms` trip-to-verified across a 4 MiB `ResidentSet`, live
-`DEMKey`, and 32 zeroize canaries with `ghosts = 0` and `0` allocations; `D-79`), leaving only one
-row — `L-9`'s cross-machine portability — read **"nothing yet"**; as of 2026-11-24 (D-92) its
-measured column names `scripts/qualify-l9-portability.sh`, which proves the process half of the law
-on one host and says `L-9=partial` in its own output, with the second-machine half owned by Block
-10's release matrix. No remaining M7 item is unaddressed: each one either prints its numbers green
-or moved to `AUDIT.md` with an owner and a reason.
+`DEMKey`, and 32 zeroize canaries with `ghosts = 0` and `0` allocations; `D-79`), and `L-9`'s
+cross-machine portability is now gated (D-96): `scripts/qualify-l9-portability.sh` covers the
+zero-state process half, and the `l9-cross-os` job opens a Linux-authored `.wavefunction` on macOS
+`aarch64` and Windows `x86_64` with the passphrase alone and byte-identical plaintext export. No
+remaining M7 item is unaddressed: each one either prints its numbers green or moved to `AUDIT.md`
+with an owner and a reason.
 
 ### M8 — Packaging
 
-**Partially done (2026-11-21, extended 2026-11-24).** The parts that need one Linux machine and no
-distribution are built; the parts that need signing, a second platform or a signing identity still
-are not — but there is now a pipeline, and it publishes nothing it has not first run.
+**Done for unsigned archives on three OSes; not done for signing or an installer (last updated
+2026-11-26, D-95/D-96).** Every part that needs CI runners and no signing identity is built; the
+parts that need a signing identity or an OS package manager are not — and the pipeline publishes
+nothing it has not first run.
 
 **Done — the release pipeline (D-90).** `.github/workflows/release.yml` builds the binary from the
 pinned toolchain and the committed lockfile, **runs `scripts/smoke-install.sh` against the artefact
-before packaging it**, and only then assembles
-`holonomy-<version>-x86_64-unknown-linux-gnu.tar.gz`: `bin/holonomy`, the licences and
-`THIRD_PARTY.md`, a `README-RELEASE.txt` that states in its first line that the build is unsigned,
-experimental and for one platform, a `.sha256`, and a `.provenance.txt` recording the commit, ref,
-target and the fact that no signature exists. Publishing is reachable **only** by pushing a `v*`
-tag — there is no manual path that can name a release after a branch — and the artefact is attached
-to a GitHub release whose body says what it is. A `workflow_dispatch` run builds and attests
-without publishing. Two consequences are deliberate: a tarball whose binary failed the smoke test is
-never uploaded, and "there is no packaged release" is no longer true, so the README's row says
-*unsigned, one platform, no installer* instead. **L-9 does not move:** its bound is the same file
-opened on a second machine, and a tarball is the prerequisite for that drill rather than the drill.
+before packaging it**, and only then assembles archives for Linux `x86_64`, macOS `aarch64` and
+Windows `x86_64`: `bin/holonomy`, `bin/holonomy-gui`, the licences and `THIRD_PARTY.md`, a
+`README-RELEASE.txt` that states in its first line that the build is unsigned and experimental, a
+`.sha256`, and a `.provenance.txt` recording the commit, ref, target and the fact that no signature
+exists. The macOS and Windows jobs run the GUI crate's tests and build both binaries before
+packaging; only the Linux job drives a packaged binary through the pty smoke test. Publishing is
+reachable **only** by pushing a `v*` tag — there is no manual path that can name a release after a
+branch — and the artefacts are attached to a GitHub release whose body says what they are. A
+`workflow_dispatch` run builds and attests without publishing. Two consequences are deliberate: an
+artefact whose binary failed its checks is never uploaded, and "there is no packaged release" is no
+longer true, so the README's row says *unsigned archives for three OSes, no installer* instead.
+The `l9-cross-os` job then uses those bundles for the actual second-machine drill, which is what
+promoted `L-9` to `gated` (D-96) — the tarball itself was only its prerequisite.
 
 **Done — the smoke test (D-72, D-73, D-74).** `scripts/smoke-install.sh` builds the release binary
 and drives it through a real pty, giving it a passphrase, a sentence and `Ctrl+Q`. It asserts that
@@ -348,23 +351,18 @@ from `scripts/drive-pty.py` because `script(1)` hangs (D-73).
 
 **Not done — and each needs something this environment does not have:**
 
-- **A release artefact per platform.** Linux x86_64 now exists (D-90). macOS and Windows still need
-  runner time, a second toolchain and code signing, and nothing is signed on any platform: the
-  artefact carries a `.sha256` and a `.provenance.txt` and says in its own README that there is no
-  signature to check.
-- **An install line that works.** `cargo install --path crates/holonomy-gui` would work for someone
-  with the toolchain; a user without one has no path, and the README says so.
-- **L-9's portability claim.** It needs the same file opened on a second machine, which is the only
-  way the whole law can be measured. **The half a single host can carry is now measured (D-92):**
-  `scripts/qualify-l9-portability.sh` and the `portability` CI job author a document, copy *only
-  the file* into a delivered tree, and import it in a second process under `env -i` with every
-  `HOME`/`XDG_*`/`TMPDIR` pointed at a directory that must be empty before the import and empty
-  after it — so nothing could have been carried in, and nothing was left behind. It prints
-  `HOLONOMY_PORTABILITY L-9=partial same_kernel=yes same_libc=yes second_machine=no`. That rules
-  out an account, a token, a device, a keyring entry and a config file; it cannot rule out a
-  different kernel, libc, filesystem or architecture, which is what the release tarball on a second
-  machine is for. L-9 stays `spec` in `GATES.md`, but its measured column now names this drill
-  instead of reading **nothing yet**.
+- **Signing and notarization.** Unsigned archives exist for Linux `x86_64`, macOS `aarch64` and
+  Windows `x86_64` (D-90/D-95), but none is signed or notarized: every artefact carries a
+  `.sha256` and a `.provenance.txt` and says in its own README that there is no signature to
+  check. That needs a signing identity and platform enrolment, not another CI job.
+- **An install line that works without a toolchain.** `cargo install --path crates/holonomy-gui`
+  works for someone with Rust; a user without one has to unpack an archive by hand, and the README
+  says so.
+- **The hardware and external-environment gates.** `L-3`..`L-7` and `L-10` stay `spec` in
+  `docs/GATES.md`: consumer-hardware reference benchmarks, physical power loss, a live verified
+  50 ms wipe with out-of-process editor supervision, and sync clients other than the one measured
+  rsync configuration. `L-9` is no longer on this list: the zero-state drill plus the
+  `l9-cross-os` Linux → macOS/Windows hand-off gated it (D-92, D-96).
 
 ## What could derail this, and the fallback
 

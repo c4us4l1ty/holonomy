@@ -68,6 +68,25 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-26 — D-97 — Binary-level SIGKILL recovery evidence, and the last doc contradictions
+  reconciled.**
+  - `scripts/drive-pty.py` gained an explicit, recorded `SIGKILL` (`--kill-after`, `--expect-kill`)
+    distinct from its deadline kill, so a crash a test asked for cannot be confused with a hung
+    child. `scripts/qualify-crash-recovery.sh` drives the shipped binary through a real pty, types
+    a distinctive sentence, commits it with `Ctrl+S`, kills the process with `SIGKILL` at three
+    different points after the commit, reopens the same file, asserts the sentence is on screen and
+    runs `holonomy verify`. The `smoke` CI job runs it against the same release binary it already
+    smoke-tests and posts `HOLONOMY_CRASH_RECOVERY` beside the smoke evidence. This is process-death
+    evidence for committed witnesses only: it does not emulate a power cut, controller caches, a
+    torn sector or an arbitrary kill in the *unsaved* window, and **L-6 stays `spec`**.
+  - `docs/TO-APP.md` said M8 had only a Linux artefact and that `L-9` still needed a second machine,
+    while `release.yml`, `GATES.md` and AUDIT D-95/D-96 had already moved on. M7/M8 now describe
+    unsigned three-OS archives, the `l9-cross-os` hand-off that gated `L-9`, and the real residual
+    (no signing identity, no installer, hardware/external gates). `docs/BOUNDED_SEARCH_AND_WIPE.md`
+    described dense replace-all as a plausible design even though `stream_replace_chunks` and its
+    30 M-word measurement already exist; it now states the implemented two-path behaviour and
+    leaves total-process-memory qualification open.
+
 - **2026-11-26 — D-96 — Platform IME & OS suspend tripwires across all OSes, Block 6–10 gates,
   Block 10 handbook/whitepaper/self-hosting/24-year lifecycle drill, and 3-OS `L-9` hand-off
   promotion (`4/10` laws `gated`).**

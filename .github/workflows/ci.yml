@@ -486,13 +486,22 @@ jobs:
           HOLONOMY_BINARY="$(pwd)/target/release/holonomy" \
             scripts/smoke-install.sh 2>&1 | tee "$RUNNER_TEMP/smoke.log"
           grep 'HOLONOMY_SMOKE' "$RUNNER_TEMP/smoke.log"
+      - name: Kill the shipped binary after a commit and recover the committed text
+        # SIGKILL after a witnessed save, three delays. This is process-death evidence only:
+        # it is not the physical power-cut qualification that keeps L-6 `spec`.
+        run: |
+          set -o pipefail
+          HOLONOMY_BINARY="$(pwd)/target/release/holonomy" \
+            scripts/qualify-crash-recovery.sh 2>&1 | tee "$RUNNER_TEMP/crash.log"
+          grep 'HOLONOMY_CRASH_RECOVERY' "$RUNNER_TEMP/crash.log"
       - name: Record the smoke evidence in the audit issue
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           { echo '### M8 smoke — the shipped binary through a real terminal'; echo '```text'; \
-            grep -E 'HOLONOMY_SMOKE|^smoke: ' "$RUNNER_TEMP/smoke.log"; echo '```'; } \
+            grep -E 'HOLONOMY_SMOKE|^smoke: ' "$RUNNER_TEMP/smoke.log"; \
+            grep -E 'HOLONOMY_CRASH_RECOVERY|^crash: ' "$RUNNER_TEMP/crash.log"; echo '```'; } \
             > "$RUNNER_TEMP/smoke-comment.md"
           gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/smoke-comment.md" --silent || echo "::warning::issue 51 comment failed"
 
