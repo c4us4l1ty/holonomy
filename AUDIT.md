@@ -3154,6 +3154,41 @@ Listed so they stay dead.
   hide the next real one. If it recurs, the next step is to capture the script's own output
   through the diagnostics bridge rather than to loosen an assertion.
 
+- **2026-11-27** — **Re-audit after the DPI fix: six GUI defects.** Each fix carries a test where
+  the behaviour is observable.
+
+  1. **The `⋯` overflow menu silently dropped actions.** It estimated a row count from the item
+     count, sized the popup from the estimate, and `break`-ed when the estimate ran out, so in a
+     short window the trailing actions vanished — no scroll, no hint. The popup is the only route
+     to the collapsed controls at narrow widths, so whole features became unreachable. The first
+     fix (one action per fixed-height row) *also* overflowed a 240 px window, which the new
+     regression test caught; rows now wrap into columns so the popup is always as tall as the
+     window permits.
+  2. **`HomeHit::Back` left the Favorites tab set.** Leaving a folder opened from Favorites landed
+     on a top-level view filtered to favourites, which reads as an empty library because the tab
+     is not in view.
+  3. **Navigation clicks kept a stale search query.** Clicks clear `search_focused`, so a
+     one-character query kept filtering the folder with no cursor and no way to edit or see it.
+  4. **Preference files were world-readable.** The recent-documents list is built from paths the
+     user typed, which routinely name accounts or private projects. `fs::write` created it with the
+     process umask (commonly 0644) in a `~/.config` that is often 0755, so the filenames of a
+     user's documents were readable by every local user while the documents themselves are created
+     `0600`. The display-scale preference used the same call. Both now go through one
+     `platform::write_owner_only`, which creates the file with an explicit `0600`, so it never
+     exists with wider access. This is the one finding here with a confidentiality dimension.
+  5. **The prompt fields were not clickable.** Only `Tab` moved between the path and passphrase
+     boxes; a click did nothing and keystrokes went to whichever field was last focused —
+     including into the passphrase, which is masked, so the user got no feedback at all.
+  6. **The shortcut sheet listed shortcuts that do nothing.** It advertised `Ctrl H` and `Ctrl M`;
+     `H`/`M` are bare keys in the writing view, and `Ctrl Shift H`/`Ctrl Shift M` are Return Home
+     and reduced motion, the latter missing from the sheet. A test pins every listed combination
+     to the table.
+
+  Also: `x11::drain_incoming` read until `WouldBlock`, so `rbuf` growth depended on the peer — a
+  server with a large backlog never yields `WouldBlock`, and the buffer grew for as long as the
+  burst lasted. Bounded to 64 reads per call; nothing is dropped, the remainder stays queued in
+  the socket. Full CI green before and after merge.
+
 - **2026-11-27** — **Blurry rendering on scaled Windows displays: the process was DPI-unaware.**
   Reported symptom: every glyph, icon and hairline in the native window looked soft while other
   applications on the same screen were crisp. Measured from a screenshot, a one-pixel icon stem
