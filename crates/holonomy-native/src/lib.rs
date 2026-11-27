@@ -340,120 +340,6 @@ pub fn fixed(value: f32) -> Fixed {
     )
 }
 
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    struct Fixture(PathBuf);
-    impl Fixture {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!(
-                "holonomy-native-{}-{}.wavefunction",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            )))
-        }
-        fn session(&self) -> Session {
-            Session::from_document(
-                &self.0,
-                Document::create_with(&self.0, b"native fixture passphrase", store::test_params())
-                    .unwrap(),
-            )
-            .unwrap()
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    #[test]
-    fn encrypted_roundtrip_undo_search_history_and_vector_paint_share_one_core() {
-        let fixture = Fixture::new();
-        let mut session = fixture.session();
-        session
-            .apply(Intent::Type("Hello café — office\nsecond line".into()))
-            .unwrap();
-        assert!(session.dirty());
-        let frame = session.frame(2.).unwrap();
-        assert!(!frame.glyphs.is_empty());
-        assert!(frame
-            .glyphs
-            .iter()
-            .flat_map(|g| &g.contours)
-            .flatten()
-            .all(|&(x, y)| x.is_finite() && y.is_finite()));
-        session.save().unwrap();
-        assert!(!session.dirty());
-        session.apply(Intent::Type("!".into())).unwrap();
-        session.apply(Intent::Undo).unwrap();
-        assert_eq!(
-            session.editor.frame().unwrap().text(),
-            "Hello café — office\nsecond line"
-        );
-        assert_eq!(session.find("café", 0).unwrap(), 1);
-        assert_eq!(&**session.selected_text().unwrap(), "café");
-        session.save().unwrap();
-        let sequence = session.witnesses()[0];
-        session.show_witness(sequence).unwrap();
-        assert!(session
-            .apply(Intent::Type("must not persist".into()))
-            .is_err());
-        assert!(session.in_history());
-        session.show_current();
-        assert!(!session.in_history());
-        session.prepare_close().unwrap();
-        drop(session);
-        let mut reopened = Session::open(&fixture.0, b"native fixture passphrase").unwrap();
-        assert_eq!(
-            reopened.editor.frame().unwrap().text(),
-            "Hello café — office\nsecond line"
-        );
-        reopened.verify().unwrap();
-        assert!(reopened.wipe());
-    }
-
-    #[test]
-    fn refused_open_or_create_never_overwrites_an_existing_document() {
-        let fixture = Fixture::new();
-        {
-            let mut session = fixture.session();
-            session.apply(Intent::Type("keep me".into())).unwrap();
-            session.save().unwrap();
-        }
-        let before = std::fs::read(&fixture.0).unwrap();
-        assert!(Session::open(&fixture.0, b"wrong passphrase").is_err());
-        assert!(Session::create(&fixture.0, b"different passphrase").is_err());
-        assert_eq!(std::fs::read(&fixture.0).unwrap(), before);
-    }
-
-    #[test]
-    fn device_scale_changes_outline_detail_not_logical_layout_or_caret() {
-        let fixture = Fixture::new();
-        let mut session = fixture.session();
-        session.apply(Intent::Type("office W café".into())).unwrap();
-        let at_one = session.frame(1.).unwrap();
-        let at_two = session.frame(2.).unwrap();
-        assert_eq!(at_one.glyphs.len(), at_two.glyphs.len());
-        assert_eq!(at_one.caret.unwrap().x, at_two.caret.unwrap().x);
-        assert_eq!(at_one.caret.unwrap().y, at_two.caret.unwrap().y);
-        for scale in [0., f32::NAN, f32::INFINITY, 1.25, 1.5, 1.75, 4.] {
-            let output = session.frame(scale).unwrap();
-            assert_eq!(at_one.glyphs.len(), output.glyphs.len());
-        }
-    }
-
-    #[test]
-    fn fixed_point_conversion_rejects_nonfinite_input() {
-        assert_eq!(fixed(f32::NAN), Fixed::ZERO);
-        assert_eq!(fixed(f32::INFINITY), Fixed::ZERO);
-        assert_eq!(fixed(1.5), Fixed::from_64ths(96));
-        assert_eq!(fixed(-1.5), Fixed::from_64ths(-96));
-    }
-}
 
 /// Produces vector geometry for a bounded sensitive input field without using GPUI text caches.
 pub fn vector_text(fonts: &FontSet, text: &str, width: f32, device_scale: f32) -> Result<VectorFrame> {
@@ -598,6 +484,131 @@ pub fn utf16_range_bytes(text: &str, range: std::ops::Range<usize>) -> Option<st
     Some(boundary(text,range.start)?..boundary(text,range.end)?)
 }
 
+
+
+fn require_durability() -> Result<()> {
+    if cfg!(unix) { Ok(()) } else {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+            "Encrypted editing is unavailable: this platform has no qualified durable storage backend. No file was created or modified.").into())
+    }
+}
+
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "holonomy-native-{}-{}.wavefunction",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )))
+        }
+        fn session(&self) -> Session {
+            Session::from_document(
+                &self.0,
+                Document::create_with(&self.0, b"native fixture passphrase", store::test_params())
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn encrypted_roundtrip_undo_search_history_and_vector_paint_share_one_core() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session
+            .apply(Intent::Type("Hello café — office\nsecond line".into()))
+            .unwrap();
+        assert!(session.dirty());
+        let frame = session.frame(2.).unwrap();
+        assert!(!frame.glyphs.is_empty());
+        assert!(frame
+            .glyphs
+            .iter()
+            .flat_map(|g| &g.contours)
+            .flatten()
+            .all(|&(x, y)| x.is_finite() && y.is_finite()));
+        session.save().unwrap();
+        assert!(!session.dirty());
+        session.apply(Intent::Type("!".into())).unwrap();
+        session.apply(Intent::Undo).unwrap();
+        assert_eq!(
+            session.editor.frame().unwrap().text(),
+            "Hello café — office\nsecond line"
+        );
+        assert_eq!(session.find("café", 0).unwrap(), 1);
+        assert_eq!(&**session.selected_text().unwrap(), "café");
+        session.save().unwrap();
+        let sequence = session.witnesses()[0];
+        session.show_witness(sequence).unwrap();
+        assert!(session
+            .apply(Intent::Type("must not persist".into()))
+            .is_err());
+        assert!(session.in_history());
+        session.show_current();
+        assert!(!session.in_history());
+        session.prepare_close().unwrap();
+        drop(session);
+        let mut reopened = Session::open(&fixture.0, b"native fixture passphrase").unwrap();
+        assert_eq!(
+            reopened.editor.frame().unwrap().text(),
+            "Hello café — office\nsecond line"
+        );
+        reopened.verify().unwrap();
+        assert!(reopened.wipe());
+    }
+
+    #[test]
+    fn refused_open_or_create_never_overwrites_an_existing_document() {
+        let fixture = Fixture::new();
+        {
+            let mut session = fixture.session();
+            session.apply(Intent::Type("keep me".into())).unwrap();
+            session.save().unwrap();
+        }
+        let before = std::fs::read(&fixture.0).unwrap();
+        assert!(Session::open(&fixture.0, b"wrong passphrase").is_err());
+        assert!(Session::create(&fixture.0, b"different passphrase").is_err());
+        assert_eq!(std::fs::read(&fixture.0).unwrap(), before);
+    }
+
+    #[test]
+    fn device_scale_changes_outline_detail_not_logical_layout_or_caret() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session.apply(Intent::Type("office W café".into())).unwrap();
+        let at_one = session.frame(1.).unwrap();
+        let at_two = session.frame(2.).unwrap();
+        assert_eq!(at_one.glyphs.len(), at_two.glyphs.len());
+        assert_eq!(at_one.caret.unwrap().x, at_two.caret.unwrap().x);
+        assert_eq!(at_one.caret.unwrap().y, at_two.caret.unwrap().y);
+        for scale in [0., f32::NAN, f32::INFINITY, 1.25, 1.5, 1.75, 4.] {
+            let output = session.frame(scale).unwrap();
+            assert_eq!(at_one.glyphs.len(), output.glyphs.len());
+        }
+    }
+
+    #[test]
+    fn fixed_point_conversion_rejects_nonfinite_input() {
+        assert_eq!(fixed(f32::NAN), Fixed::ZERO);
+        assert_eq!(fixed(f32::INFINITY), Fixed::ZERO);
+        assert_eq!(fixed(1.5), Fixed::from_64ths(96));
+        assert_eq!(fixed(-1.5), Fixed::from_64ths(-96));
+    }
+}
+
 #[cfg(test)]
 mod input_tests {
     use super::*;
@@ -644,13 +655,6 @@ mod ui_smoke_fixture {
         let mut session=Session::open(&path,b"native smoke passphrase").unwrap();
         assert_eq!(session.editor.frame().unwrap().text(),"Saved by native UI smoke test");
         session.verify().unwrap();
-    }
-}
-
-fn require_durability() -> Result<()> {
-    if cfg!(unix) { Ok(()) } else {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
-            "Encrypted editing is unavailable: this platform has no qualified durable storage backend. No file was created or modified.").into())
     }
 }
 

@@ -77,6 +77,8 @@ jobs:
             native-check.log
             native-format.patch
             native-smoke.png
+            native-failure.png
+            crates/holonomy-native/src/lib.rs
   bridge:
     needs: qualify
     if: always() && github.event_name == 'push'

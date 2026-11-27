@@ -89,8 +89,9 @@ impl NativeHome {
 
     fn apply(&mut self, intent: Intent) {
         if let Some(session) = self.session.as_mut() {
+            let navigation = matches!(intent, Intent::RevealCaret);
             let result = session.apply(intent);
-            self.report(result, "");
+            if !navigation || result.is_err() { self.report(result, ""); }
         }
     }
 
@@ -268,6 +269,12 @@ impl NativeHome {
         } else if self.screen == Screen::Editor {
             if command {
                 match key {
+                    "left" => self.apply(Intent::Move { to: Move::WordLeft, extend: mods.shift }),
+                    "right" => self.apply(Intent::Move { to: Move::WordRight, extend: mods.shift }),
+                    "home" => self.apply(Intent::Move { to: Move::DocumentStart, extend: mods.shift }),
+                    "end" => self.apply(Intent::Move { to: Move::DocumentEnd, extend: mods.shift }),
+                    "backspace" => self.apply(Intent::DeleteWordBefore),
+                    "delete" => self.apply(Intent::DeleteWordAfter),
                     "s" => {
                         self.save();
                     }
@@ -669,7 +676,7 @@ impl Render for NativeHome {
                             }),
                         )
                         .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                            if this.dragging {
+                            if this.dragging && event.dragging() {
                                 this.pointer(event.position, true);
                                 cx.notify();
                             }
