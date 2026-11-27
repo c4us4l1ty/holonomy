@@ -1114,6 +1114,19 @@ enum ButtonHighlight {
     Mixed,
 }
 
+/// Which surface a button sits on. quiet.md's document header is bare glyphs and text with no
+/// resting pill, but that rule is *about the header*: inside a popup, a drawer or a banner the
+/// fill is what tells the user the words are pressable. `D-102` removed the resting pill globally
+/// and made the drawer's `Live` / `PinBase` / `DiffPrev` and the recovery banner's `Dismiss` read
+/// as body copy — this distinction is the correction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonSurface {
+    /// Header / toolbar: unfilled at rest, so the bar reads as a row of glyphs.
+    Bare,
+    /// Popup, drawer or banner: a quiet chip at rest, so the control is discoverable.
+    Chipped,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_toolbar_button(
     fb: &mut FrameBuffer,
@@ -1125,6 +1138,7 @@ fn draw_toolbar_button(
     disabled: bool,
     theme: &PageTheme,
     clip: Rect,
+    surface: ButtonSurface,
 ) -> (Rect, i32) {
     let style = Style::at(880);
     let label_w = fonts.advance(label, style).sixtyfourths() >> 6;
@@ -1134,7 +1148,9 @@ fn draw_toolbar_button(
     // `D-102`: quiet.md's header is bare glyphs on the page — no resting pill. Drawing a filled,
     // outlined box under every toolbar item made the writing view read as a wall of grey chips,
     // which is what diverged most from the reference. Only *on* marks are filled now, and the
-    // fills are quiet (`muted`-weight washes), matching quiet.md's 8 pt control radius.
+    // fills are quiet (`muted`-weight washes), matching quiet.md's 8 pt control radius. Surfaces
+    // where the fill carries the affordance (popup rows, drawer actions, the banner's `Dismiss`)
+    // opt back in through `ButtonSurface::Chipped`.
     if !disabled {
         match highlight {
             ButtonHighlight::Active => {
@@ -1150,6 +1166,9 @@ fn draw_toolbar_button(
                 fb.stroke_rounded_rect(rect, 8, border, clip);
             }
             ButtonHighlight::Mixed => {
+                fb.fill_rounded_rect(rect, 8, soft_fill_for(theme), clip);
+            }
+            ButtonHighlight::Off if surface == ButtonSurface::Chipped => {
                 fb.fill_rounded_rect(rect, 8, soft_fill_for(theme), clip);
             }
             ButtonHighlight::Off => {}
@@ -1507,6 +1526,7 @@ where
                 ),
             &theme,
             bar,
+            ButtonSurface::Bare,
         );
         hits.push(ToolbarHit { rect, action });
         x = next_x + if end_group { gap } else { 0 };
@@ -1528,6 +1548,7 @@ where
             false,
             &theme,
             bar,
+            ButtonSurface::Bare,
         );
         hits.push(ToolbarHit {
             rect: ov_rect,
@@ -1567,6 +1588,7 @@ where
         false,
         &theme,
         bar,
+        ButtonSurface::Bare,
     );
     hits.push(ToolbarHit {
         rect: hist_rect,
@@ -1658,6 +1680,7 @@ where
                     ),
                 &theme,
                 menu,
+                ButtonSurface::Chipped,
             );
             hits.push(ToolbarHit { rect, action });
             mx = nx;
@@ -1709,6 +1732,7 @@ fn render_recovery_banner(
         false,
         &theme,
         bar,
+        ButtonSurface::Chipped,
     );
     Some(dismiss_rect)
 }
@@ -1963,6 +1987,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((bm_rect, HistoryButton::StartBookmark));
     let (sr_rect, nx2) = draw_toolbar_button(
@@ -1979,6 +2004,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((sr_rect, HistoryButton::StartSearch));
     let (rs_rect, nx3) = draw_toolbar_button(
@@ -1991,6 +2017,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((rs_rect, HistoryButton::RestoreSelected));
     let (lv_rect, _) = draw_toolbar_button(
@@ -2003,6 +2030,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((lv_rect, HistoryButton::CloseLive));
     y += 28;
@@ -2018,6 +2046,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((sb_rect, HistoryButton::SetDiffBase));
     let (dp_rect, dx2) = draw_toolbar_button(
@@ -2030,6 +2059,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((dp_rect, HistoryButton::DiffPrev));
     if !state.search_hits.is_empty() {
@@ -2043,6 +2073,7 @@ fn render_history_drawer(
             false,
             &theme,
             drawer,
+            ButtonSurface::Chipped,
         );
         hits.push((nh_rect, HistoryButton::NextSearchHit));
     }
@@ -2128,6 +2159,7 @@ fn render_history_drawer(
                 false,
                 &theme,
                 drawer,
+                ButtonSurface::Chipped,
             );
             hits.push((bm_hit, HistoryButton::SelectBookmark(bm.witness_sequence)));
             bx = nx_bm + 4;
@@ -2748,10 +2780,16 @@ fn render_document_breadcrumb(
     ));
     x += home_w + 12;
 
+    // Space the crumbs may use: everything left of the `Find` control, with a margin. Each crumb
+    // was previously bounded only by its own 180 pt cap, so a long folder name ran the crumbs
+    // (and their `›` separators) underneath that button on a narrow window (`D-102`).
+    let crumb_room = |x: i32| (rect.x + rect.w - 124 - x).max(0);
     if let Some(folder) = &data.folder_label {
+        let room = crumb_room(x);
         draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
         x += 14;
-        let folder_shown = home_fit_text(fonts, folder, 840, 180);
+        let folder_w = room.min(180).saturating_sub(14).max(24);
+        let folder_shown = home_fit_text(fonts, folder, 840, folder_w);
         draw_home_text(
             fb,
             fonts,
@@ -2765,9 +2803,11 @@ fn render_document_breadcrumb(
         );
         x += home_text_width(fonts, &folder_shown, 840) + 12;
     }
-    draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
-    x += 14;
-    let space = (rect.x + rect.w - 108 - x).max(0);
+    if crumb_room(x) > 20 {
+        draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
+        x += 14;
+    }
+    let space = crumb_room(x);
     draw_home_text(
         fb,
         fonts,
@@ -3037,7 +3077,7 @@ struct HomeState {
     query: String,
     search_focused: bool,
     favorites: bool,
-    manual_order: bool,
+    reverse_order: bool,
     list_view: bool,
     settings_open: bool,
 }
@@ -3058,7 +3098,7 @@ impl HomeState {
             query: String::new(),
             search_focused: false,
             favorites: false,
-            manual_order: false,
+            reverse_order: false,
             list_view: false,
             settings_open: false,
         }
@@ -3076,14 +3116,12 @@ impl HomeState {
                 }
                 // A stale index (the folder list shrank while it was selected) must not panic
                 // the paint path: `get` degrades to "no folder filter" instead.
-                if let Some(name) = self
+                let folder_filter = self
                     .active_folder
                     .and_then(|idx| self.folders.get(idx))
-                    .map(|folder| folder.name.as_str())
-                {
-                    if entry.folder != name {
-                        return false;
-                    }
+                    .map(|folder| folder.name.as_str());
+                if folder_filter.is_some_and(|name| entry.folder != name) {
+                    return false;
                 }
                 needle.is_empty()
                     || entry.name.to_lowercase().contains(&needle)
@@ -3091,7 +3129,7 @@ impl HomeState {
             })
             .map(|(idx, _)| idx)
             .collect();
-        if self.manual_order {
+        if self.reverse_order {
             hits.reverse();
         }
         hits
@@ -3493,7 +3531,10 @@ fn render_home(
         cx += w + 22;
     }
 
-    let sort_label = if state.manual_order { "Manual" } else { "Name" };
+    // The flag reverses the catalogue's name order; there is no stored manual order to honour, so
+    // it is labelled for what it does. Calling it "Manual" promised a drag-reorder the app does
+    // not have, and `reverse_order` is the name that stops the label drifting again (`D-102`).
+    let sort_label = if state.reverse_order { "Z\u{2013}A" } else { "A\u{2013}Z" };
     let sort_w = home_text_width(fonts, sort_label, 800);
     let sort_rect = Rect::new(content.x + content.w - 24 - sort_w, controls_y, sort_w, 28);
     draw_home_text(
@@ -3507,7 +3548,7 @@ fn render_home(
         sort_rect,
         false,
     );
-    hits.push((sort_rect, HomeHit::ManualOrder));
+    hits.push((sort_rect, HomeHit::ReverseOrder));
 
     if state.active_folder.is_some() {
         let back = Rect::new(header_x, controls_y + 32, 52, 26);
@@ -3542,6 +3583,11 @@ fn render_home(
         );
         fb.fill_rounded_rect(overlay, 14, HOME_SURFACE, full);
         fb.stroke_rounded_rect(overlay, 14, HOME_FAINT, full);
+        // The sheet is modal to the pointer: a click anywhere on it must not fall through to the
+        // card (or folder row) painted underneath and open a document behind the overlay. Pushing
+        // a swallow target *first* keeps it behind the close button, which is pushed last and so
+        // still wins the reverse-order lookup (`D-102`).
+        hits.push((overlay, HomeHit::CloseOverlay));
         draw_home_text(
             fb,
             fonts,
@@ -3563,11 +3609,16 @@ fn render_home(
         .iter()
         .enumerate()
         {
+            // Skip rows the clamped sheet cannot hold, rather than painting them past its edge.
+            let baseline = overlay.y + 78 + row as i32 * 30;
+            if baseline + 6 > overlay.y + overlay.h {
+                break;
+            }
             draw_home_text(
                 fb,
                 fonts,
                 overlay.x + 22,
-                overlay.y + 78 + row as i32 * 30,
+                baseline,
                 line,
                 820,
                 HOME_MUTED,
@@ -3668,7 +3719,7 @@ fn render_home_cards(
     if let Some(idx) = state.active_folder {
         if let Some(folder) = state.folders.get(idx) {
             let mut visible: Vec<usize> = folder.entries.clone();
-            if state.manual_order {
+            if state.reverse_order {
                 visible.reverse();
             }
             return render_home_document_cards(fb, fonts, state, &visible, top, content);
@@ -3682,8 +3733,12 @@ fn render_home_cards(
     // A floor keeps the card's insides from inverting on a very narrow pane; the row breaks
     // below instead of painting a degenerate card.
     let card_w = ((available - gap * (cols - 1)) / cols).max(120);
-    let body_h = (card_w * 6) / 5;
     let label_h = 52;
+    // A 5:6 body can be taller than the pane on a short window, and the loop below breaks on the
+    // first card that does not fit — which left the pane completely empty at the 480x360 minimum
+    // window (a 378 pt card starting at y=110). Cap the body so at least one row always paints.
+    let room = (content.h - top - label_h - gap).max(72);
+    let body_h = ((card_w * 6) / 5).min(room);
     let card_h = body_h + label_h;
     for (i, folder) in state.folders.iter().enumerate() {
         let col = i % cols as usize;
@@ -3701,13 +3756,17 @@ fn render_home_cards(
         // the preview strokes from the folder's *name and entry count* — never from document
         // bytes, so painting a card cannot touch plaintext (law `L-2`).
         let seed = folder.name.len() + folder.entries.len();
+        // Papers end where the pocket begins; sizing each from `body_h` independently let a
+        // capped (short-pane) body push the stack through the pocket and out of the card.
+        let paper_h = (pocket_top - body.y - 22).max(24);
         for layer in 0..3i32 {
             let w = (card_w - 34 - (2 - layer) * 14).max(24);
+            let lift = 14 + layer * 7;
             let paper = Rect::new(
                 x + (card_w - w) / 2,
-                body.y + 22 + layer * 7,
+                body.y + 22,
                 w,
-                (body_h * 55) / 100,
+                (paper_h - lift).max(20),
             );
             fb.fill_rounded_rect(paper, 10, HOME_SURFACE, card);
             fb.stroke_rounded_rect(paper, 10, HOME_FAINT, card);
@@ -3716,10 +3775,14 @@ fn render_home_cards(
                 for line in 0..3i32 {
                     let pct = 46 + ((seed + line as usize * 7) % 5) as i32 * 9;
                     let lw = ((paper.w - 28).min((paper.w - 28) * pct / 100)).max(4);
+                    let ly = paper.y + 30 + line * 12;
+                    if ly + 5 > paper.y + paper.h {
+                        break;
+                    }
                     fb.fill_rounded_rect(
                         Rect::new(
                             paper.x + 14,
-                            paper.y + 30 + line * 12,
+                            ly,
                             lw,
                             if line == 0 { 5 } else { 3 },
                         ),
@@ -3740,12 +3803,16 @@ fn render_home_cards(
         fb.fill_rounded_rect(pocket, 14, HOME_POCKET, card);
         fb.stroke_rounded_rect(pocket, 14, HOME_FAINT, card);
 
-        let label = home_fit_text(fonts, &folder.name, 940, card_w - 4);
+        // Label and count sit in the space below the pocket, clamped to it: the previous inset of
+        // `card_w - 4` let a long folder name paint over the neighbouring card (`D-102`).
+        let label_w = (card_w - 8).max(24);
+        let label = home_fit_text(fonts, &folder.name, 940, label_w);
+        let label_base = (y + body_h + 24).min(y + card_h - 30);
         draw_home_text(
             fb,
             fonts,
-            x + 2,
-            y + body_h + 24,
+            x + 4,
+            label_base,
             &label,
             940,
             HOME_INK,
@@ -3760,8 +3827,8 @@ fn render_home_cards(
         draw_home_text(
             fb,
             fonts,
-            x + 2,
-            y + body_h + 44,
+            x + 4,
+            label_base + 20,
             &count,
             820,
             HOME_MUTED,
@@ -3852,7 +3919,8 @@ fn render_home_document_cards(
     let gap = HOME_GAP;
     let cols = ((available + gap) / (HOME_CARD_MIN_W + gap)).clamp(1, 4);
     let card_w = ((available - gap * (cols - 1)) / cols).max(120);
-    let card_h = (card_w * 6) / 5;
+    // Same short-pane cap as the folder grid: a 5:6 sheet must not push the only row off-screen.
+    let card_h = ((card_w * 6) / 5).min((content.h - top - gap).max(96));
     for (i, &idx) in entries.iter().enumerate().take(12) {
         let col = i % cols as usize;
         let row = i / cols as usize;
@@ -3973,7 +4041,7 @@ fn show_home(
                                 state.active_folder = None;
                             }
                             HomeHit::Search => state.search_focused = true,
-                            HomeHit::ManualOrder => state.manual_order = !state.manual_order,
+                            HomeHit::ReverseOrder => state.reverse_order = !state.reverse_order,
                             HomeHit::ListView => state.list_view = !state.list_view,
                             HomeHit::Settings => state.settings_open = true,
                             HomeHit::CloseOverlay => state.settings_open = false,
@@ -4018,7 +4086,10 @@ fn show_home(
                         Key::Backspace if state.search_focused => {
                             state.query.pop();
                         }
-                        Key::Enter if state.search_focused => {
+                        // An empty query matches *every* entry, so Enter on a freshly focused
+                        // search box used to open whichever document sorted first and drop the
+                        // user out of Home without them choosing anything. Require a query.
+                        Key::Enter if state.search_focused && !state.query.trim().is_empty() => {
                             if let Some(&idx) = state.matching_entries().first() {
                                 let path = state.entries[idx].path.clone();
                                 if let Some(chosen) = prompt_gui_document(
@@ -6836,7 +6907,7 @@ mod tests {
             query: String::new(),
             search_focused: false,
             favorites: false,
-            manual_order: false,
+            reverse_order: false,
             list_view: false,
             settings_open: false,
         };
@@ -6966,7 +7037,7 @@ mod tests {
             query: String::new(),
             search_focused: false,
             favorites: false,
-            manual_order: false,
+            reverse_order: false,
             list_view: false,
             settings_open: false,
         };
@@ -6982,6 +7053,200 @@ mod tests {
             .find(|(rect, _)| rect.contains(plus.x + plus.w / 2, plus.y + plus.h / 2))
             .map(|(_, hit)| *hit);
         assert_eq!(resolved, Some(HomeHit::NewDocument));
+    }
+
+    /// A populated library at a given size, for the geometry tests below.
+    fn home_state_with_two_folders() -> HomeState {
+        let entries = vec![
+            HomeEntry {
+                name: "Board".to_owned(),
+                folder: "Blue".to_owned(),
+                path: PathBuf::from("Blue/Board.wavefunction"),
+            },
+            HomeEntry {
+                name: "Snow".to_owned(),
+                folder: "Maps".to_owned(),
+                path: PathBuf::from("Maps/Snow.wavefunction"),
+            },
+        ];
+        let folders = group_home_folders(&entries);
+        HomeState {
+            entries,
+            folders,
+            active_folder: None,
+            query: String::new(),
+            search_focused: false,
+            favorites: false,
+            reverse_order: false,
+            list_view: false,
+            settings_open: false,
+        }
+    }
+
+    /// `D-102`: a 5:6 card body can exceed a short pane, and the grid loop breaks on the first
+    /// card that does not fit — which painted *nothing* at the 480x360 window minimum.
+    #[test]
+    fn home_grid_paints_a_folder_card_at_the_window_minimum() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+        let state = home_state_with_two_folders();
+        for (w, h) in [(480u16, 360u16), (500, 400), (760, 520), (1_120, 780)] {
+            let mut fb = FrameBuffer::new(w, h, HOME_CANVAS_BG);
+            let hits = render_home(&mut fb, &fonts, &state, 100);
+            let painted: Vec<Rect> = hits
+                .iter()
+                .filter(|(_, hit)| matches!(hit, HomeHit::Folder(_)))
+                .map(|(rect, _)| *rect)
+                .collect();
+            assert!(
+                !painted.is_empty(),
+                "{w}x{h} must paint at least one folder card"
+            );
+            for card in painted {
+                assert!(
+                    card.y + card.h <= i32::from(h),
+                    "{w}x{h}: card bottom {} exceeds the window",
+                    card.y + card.h
+                );
+                // The card must actually be painted, not merely present as a hit rect. Card and
+                // page are both white, so count the ink (pocket, strokes, labels) inside.
+                let bg = rgba_to_xrgb(HOME_CANVAS_BG);
+                let mut ink = 0usize;
+                for y in card.y.max(0)..(card.y + card.h).min(i32::from(fb.height)) {
+                    for x in card.x.max(0)..(card.x + card.w).min(i32::from(fb.width)) {
+                        let idx = y as usize * usize::from(fb.width) + x as usize;
+                        if fb.pixels[idx] != bg {
+                            ink += 1;
+                        }
+                    }
+                }
+                assert!(
+                    ink > 400,
+                    "{w}x{h}: folder card painted almost nothing ({ink} px)"
+                );
+            }
+        }
+    }
+
+    /// `D-102`: the settings sheet paints over the cards, so it must also swallow the pointer.
+    /// Without a hit entry covering it, a click on the sheet fell through and opened the document
+    /// underneath.
+    #[test]
+    fn home_settings_sheet_swallows_clicks_instead_of_opening_cards() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+        let mut state = home_state_with_two_folders();
+        state.settings_open = true;
+        let (w, h) = (1_120u16, 780u16);
+        let mut fb = FrameBuffer::new(w, h, HOME_CANVAS_BG);
+        let hits = render_home(&mut fb, &fonts, &state, 100);
+
+        // The swallow target is the overlay itself, pushed before the close button.
+        let sheet = hits
+            .iter()
+            .find(|(_, hit)| *hit == HomeHit::CloseOverlay)
+            .map(|(rect, _)| *rect)
+            .expect("sheet swallow target");
+        // Find a folder card the sheet actually covers, then probe the middle of the overlap.
+        let probe = hits
+            .iter()
+            .filter(|(_, hit)| matches!(hit, HomeHit::Folder(_)))
+            .map(|(rect, _)| *rect)
+            .find_map(|card| {
+                let x0 = card.x.max(sheet.x);
+                let y0 = card.y.max(sheet.y);
+                let x1 = (card.x + card.w).min(sheet.x + sheet.w);
+                let y1 = (card.y + card.h).min(sheet.y + sheet.h);
+                (x1 - x0 > 8 && y1 - y0 > 8).then(|| ((x0 + x1) / 2, (y0 + y1) / 2))
+            })
+            .expect("the sheet must overlap at least one folder card at 1120x780");
+        let resolved = hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(probe.0, probe.1))
+            .map(|(_, hit)| *hit);
+        assert_eq!(
+            resolved,
+            Some(HomeHit::CloseOverlay),
+            "the sheet must take the click, not the folder card behind it"
+        );
+        // The close button is pushed last, so it must still win inside its own rect.
+        let close = hits.last().map(|(rect, _)| *rect).expect("a last hit");
+        assert!(
+            close.w <= 40 && close.h <= 40,
+            "the last-pushed target must be the small close button, not the sheet"
+        );
+        let decided = hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(close.x + close.w / 2, close.y + close.h / 2))
+            .map(|(rect, _)| *rect);
+        assert_eq!(decided, Some(close), "the close button must take its own click");
+    }
+
+    /// `D-102`: the popup / drawer / banner surfaces keep their resting chip, because there the
+    /// fill is the only thing marking the words as pressable. The bare header rule is *about the
+    /// header*; applying it everywhere made the recovery banner's `Dismiss` read as body text.
+    #[test]
+    fn chipped_surfaces_keep_a_resting_fill_and_the_header_does_not() {
+        let theme = QUIET_MD_THEME;
+        let fonts = FontSet::embedded(theme.body_size_px).expect("fonts");
+        let (w, h) = (420u16, 120u16);
+        let mut bare_fb = FrameBuffer::new(w, h, theme.bg_body);
+        let (bare, _) = draw_toolbar_button(
+            &mut bare_fb,
+            &fonts,
+            10,
+            10,
+            "Undo",
+            ButtonHighlight::Off,
+            false,
+            &theme,
+            Rect::new(0, 0, i32::from(w), i32::from(h)),
+            ButtonSurface::Bare,
+        );
+        let mid = |fb: &FrameBuffer, rect: Rect| {
+            let x = (rect.x + rect.w / 2) as usize;
+            let y = (rect.y + rect.h - 2) as usize;
+            fb.pixels[y * usize::from(fb.width) + x]
+        };
+        assert_eq!(
+            mid(&bare_fb, bare),
+            rgba_to_xrgb(theme.bg_body),
+            "the header must not paint a resting pill"
+        );
+
+        let mut chipped_fb = FrameBuffer::new(w, h, theme.bg_body);
+        let (chip, _) = draw_toolbar_button(
+            &mut chipped_fb,
+            &fonts,
+            10,
+            10,
+            "Undo",
+            ButtonHighlight::Off,
+            false,
+            &theme,
+            Rect::new(0, 0, i32::from(w), i32::from(h)),
+            ButtonSurface::Chipped,
+        );
+        assert_ne!(
+            mid(&chipped_fb, chip),
+            rgba_to_xrgb(theme.bg_body),
+            "a popup/drawer/banner control needs a visible chip at rest"
+        );
+    }
+
+    /// `D-102`: an out-of-range `active_folder` used to index `folders` on the paint path. It must
+    /// degrade to "no filter" for both the cover list and the paint.
+    #[test]
+    fn stale_active_folder_does_not_panic_the_paint_path() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+        let mut state = home_state_with_two_folders();
+        state.active_folder = Some(99);
+        assert_eq!(state.matching_entries().len(), 2);
+        let mut fb = FrameBuffer::new(1_120, 780, HOME_CANVAS_BG);
+        let hits = render_home(&mut fb, &fonts, &state, 100);
+        assert!(hits
+            .iter()
+            .any(|(_, hit)| matches!(hit, HomeHit::Folder(_))));
     }
 
     /// WCAG relative-luminance contrast ratio, used only by these regression tests.
