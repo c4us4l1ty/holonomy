@@ -1642,30 +1642,51 @@ where
         } else {
             collapsed
         };
-        let menu_w = 240.min(i32::from(win_w) - 24);
+        // One action per row where it fits, laid out in columns when the window is too short.
+        // The old code guessed a row count from the item count, sized the popup from that guess and
+        // then `break`-ed when the guess ran out, so trailing actions silently vanished from the
+        // only route to the collapsed controls. Measuring from the real item list cannot truncate.
+        const ROW_H: i32 = 28;
+        const PAD: i32 = 6;
+        const COL_MIN: i32 = 120;
+        const COL_MAX: i32 = 240;
+        let want_rows = items_to_show.len() as i32;
+        let avail_h = (i32::from(win_h) - 2 - 2 * PAD).max(ROW_H);
+        let max_rows = (avail_h / ROW_H).max(1);
+        let cols = if want_rows > max_rows {
+            ((want_rows + max_rows - 1) / max_rows).max(1)
+        } else {
+            1
+        };
+        let rows = (want_rows + cols - 1) / cols;
+        let avail_w = (i32::from(win_w) - 24).max(COL_MIN);
+        let col_w = (avail_w / cols).clamp(COL_MIN, COL_MAX);
+        let menu_w = cols * col_w + 2 * PAD;
+        let menu_h = rows * ROW_H + 2 * PAD;
         let anchor_x = overflow_anchor.map_or(12, |r| r.x);
-        let menu_x = anchor_x.min(i32::from(win_w) - menu_w - 12).max(12);
-        let mut mx = menu_x + 8;
-        let mut my = bar_h + 10;
-        let rows_est = ((items_to_show.len() as i32) * 52 / (menu_w - 16).max(40)) + 2;
-        let menu_h = (rows_est * 32 + 12).min(i32::from(win_h) - bar_h - 40);
-        let menu = Rect::new(menu_x, bar_h + 2, menu_w, menu_h.max(44));
+        // Keep the popup on screen: no further right than the far margin, never left of the near
+        // one (a popup wider than the window wins over the margin rather than going off-screen).
+        let far_x = (i32::from(win_w) - menu_w - 12).max(12);
+        let menu_x = anchor_x.clamp(12, far_x);
+        // Prefer to hang below the header; if the window is too short, sit as low as it fits.
+        let below = bar_h + 2;
+        let menu_y = if below + menu_h <= i32::from(win_h) - 8 {
+            below
+        } else {
+            (i32::from(win_h) - 8 - menu_h).max(2)
+        };
+        let menu = Rect::new(menu_x, menu_y, menu_w, menu_h);
         fb.fill_rect_clipped(menu, theme.bg_body, menu);
         fb.stroke_rect(menu, theme.line_border, menu);
-        for (action, label, hl) in items_to_show {
-            let est = (fonts.advance(label, Style::at(880)).sixtyfourths() >> 6) as i32 + 20;
-            if mx + est > menu.x + menu.w - 8 {
-                mx = menu.x + 8;
-                my += 30;
-            }
-            if my + 26 > menu.y + menu.h - 4 {
-                break;
-            }
-            let (rect, nx) = draw_toolbar_button(
+        for (idx, (action, label, hl)) in items_to_show.into_iter().enumerate() {
+            let idx = idx as i32;
+            let (col, row) = (idx / rows.max(1), idx % rows.max(1));
+            let (bx, by) = (menu_x + PAD + col * col_w, menu_y + PAD + row * ROW_H);
+            let (rect, _next) = draw_toolbar_button(
                 fb,
                 &fonts,
-                mx,
-                my,
+                bx,
+                by,
                 label,
                 hl,
                 read_only_history
@@ -1683,7 +1704,6 @@ where
                 ButtonSurface::Chipped,
             );
             hits.push(ToolbarHit { rect, action });
-            mx = nx;
         }
     }
 
@@ -2851,18 +2871,23 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
     let muted = muted_ink_for(&theme);
     let accent = accent_ink_for(&theme);
 
-    let rows: [(&str, &str); 14] = [
+    // Every row here must match a real binding in the key loop. `H` and `M` are bare keys in the
+    // writing view (history drawer, bookmark) and `Ctrl Shift H`/`Ctrl Shift M` are Home and
+    // reduced motion, so the old "Ctrl H" / "Ctrl M" rows described shortcuts that did nothing.
+    let rows: [(&str, &str); 16] = [
         ("Ctrl Z / Y", "Undo / redo"),
         ("Ctrl A", "Select all"),
         ("Ctrl F", "Find and replace"),
         ("Ctrl K", "Edit link"),
+        ("Ctrl J", "Focus search"),
         ("Ctrl S", "Save and witness"),
-        ("Ctrl H", "Witness history"),
-        ("Ctrl M", "Bookmark witness"),
+        ("H", "Witness history"),
+        ("M", "Bookmark witness"),
         ("Ctrl G", "Security panel"),
         ("Ctrl L", "Emergency wipe"),
         ("Ctrl Shift D", "Light / dark paper"),
         ("Ctrl Shift H", "Return Home"),
+        ("Ctrl Shift M", "Reduced motion"),
         ("Ctrl Alt + / -", "Display scale"),
         ("Ctrl /", "This sheet"),
         ("Ctrl Q", "Save and quit"),
@@ -3237,6 +3262,47 @@ fn draw_home_gear_icon(fb: &mut FrameBuffer, x: i32, y: i32, color: Rgba8, clip:
 /// Draws the Home shell into a logical-pixel framebuffer and returns its click targets. Every
 /// surface paired with [`crate::platform::DesktopWindow`] pointer coordinates, so scaling stays
 /// consistent with the editor.
+/// Applies one Home click that only changes navigation state.
+///
+/// Split out of the event loop so the state transitions are testable without a window: every
+/// branch here is reachable by a click, and the two that used to leave stale state behind —
+/// `Back` keeping the Favorites tab and a navigation click keeping a search query the user could
+/// no longer see or edit — are pinned by `back_and_folder_navigation_clear_the_favorites_tab_and_stale_query`.
+fn apply_home_hit(state: &mut HomeState, hit: HomeHit) {
+    match hit {
+        HomeHit::Folder(idx) => {
+            state.active_folder = Some(idx);
+            state.favorites = false;
+            // The click already cleared `search_focused`, so a retained query would keep
+            // filtering this folder with no way to edit or even see it.
+            state.query.clear();
+        }
+        HomeHit::Home | HomeHit::MyDocuments => {
+            state.active_folder = None;
+            state.favorites = false;
+            state.query.clear();
+        }
+        HomeHit::Back => {
+            state.active_folder = None;
+            // Back returns to the tab the breadcrumb came from; leaving `favorites` set opened a
+            // top-level view filtered to favourites, which reads as an empty library.
+            state.favorites = false;
+            state.query.clear();
+        }
+        HomeHit::Favorites => {
+            state.favorites = true;
+            state.active_folder = None;
+        }
+        HomeHit::Search => state.search_focused = true,
+        HomeHit::ReverseOrder => state.reverse_order = !state.reverse_order,
+        HomeHit::ListView => state.list_view = !state.list_view,
+        HomeHit::Settings => state.settings_open = true,
+        HomeHit::CloseOverlay => state.settings_open = false,
+        // Handled by the caller: both need to open a document, which needs the window.
+        HomeHit::NewDocument | HomeHit::Document(_) => {}
+    }
+}
+
 fn render_home(
     fb: &mut FrameBuffer,
     fonts: &FontSet,
@@ -4022,25 +4088,7 @@ fn show_home(
                                     }
                                 }
                             }
-                            HomeHit::Folder(idx) => {
-                                state.active_folder = Some(idx);
-                                state.favorites = false;
-                            }
-                            HomeHit::Home | HomeHit::MyDocuments => {
-                                state.active_folder = None;
-                                state.favorites = false;
-                                state.query.clear();
-                            }
-                            HomeHit::Back => state.active_folder = None,
-                            HomeHit::Favorites => {
-                                state.favorites = true;
-                                state.active_folder = None;
-                            }
-                            HomeHit::Search => state.search_focused = true,
-                            HomeHit::ReverseOrder => state.reverse_order = !state.reverse_order,
-                            HomeHit::ListView => state.list_view = !state.list_view,
-                            HomeHit::Settings => state.settings_open = true,
-                            HomeHit::CloseOverlay => state.settings_open = false,
+                            other => apply_home_hit(&mut state, other),
                         }
                     }
                     dirty = true;
@@ -4184,12 +4232,9 @@ fn sync_recent_paths(target: &Path, remember: bool) {
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(file, format!("{}\n", entries.join("\n")));
+    crate::platform::write_owner_only(&file, format!("{}\n", entries.join("\n")).as_bytes());
 }
 
-/// Interactive graphical passphrase / file-path prompt rendered right inside the window when
-/// `holonomy-gui` is launched without a pre-supplied stdin passphrase (`UI-SPEC.md` §5.1–§5.2).
-#[allow(clippy::too_many_lines)]
 fn prompt_gui_document(
     x11: &mut dyn DesktopWindow,
     fonts: &FontSet,
@@ -4207,6 +4252,9 @@ fn prompt_gui_document(
     let mut dirty = true;
     let mut recent_hits: Vec<(Rect, String)> = Vec::new();
     let mut remember_box = Rect::new(0, 0, 0, 0);
+    // The two focusable fields, kept outside the paint block so a click can focus them.
+    let mut path_box = Rect::new(0, 0, 0, 0);
+    let mut pass_box = Rect::new(0, 0, 0, 0);
 
     loop {
         if dirty {
@@ -4256,7 +4304,7 @@ fn prompt_gui_document(
                 HOME_MUTED,
                 card,
             );
-            let path_box = Rect::new(cx + 24, cy + 70, card_w - 48, 30);
+            path_box = Rect::new(cx + 24, cy + 70, card_w - 48, 30);
             fb.fill_rounded_rect(
                 path_box,
                 8,
@@ -4298,7 +4346,7 @@ fn prompt_gui_document(
                 HOME_MUTED,
                 card,
             );
-            let pass_box = Rect::new(cx + 24, cy + 132, card_w - 48, 32);
+            pass_box = Rect::new(cx + 24, cy + 132, card_w - 48, 32);
             fb.fill_rounded_rect(pass_box, 8, HOME_SURFACE, card);
             fb.stroke_rounded_rect(
                 pass_box,
@@ -4464,6 +4512,21 @@ fn prompt_gui_document(
                                 let _ = std::fs::remove_file(f);
                             }
                         }
+                        dirty = true;
+                        continue;
+                    }
+                    // Only Tab moved the caret between fields, so clicking a field did nothing:
+                    // the keystroke went to whichever field was last focused, which reads as the
+                    // click having been ignored. Focus follows the pointer instead.
+                    if pass_box.contains(px, py) {
+                        editing_path = false;
+                        error_msg.clear();
+                        dirty = true;
+                        continue;
+                    }
+                    if path_box.contains(px, py) {
+                        editing_path = true;
+                        error_msg.clear();
                         dirty = true;
                         continue;
                     }
@@ -6493,6 +6556,116 @@ mod tests {
         assert_eq!(
             landed.byte, 7,
             "clicking rendered caret at zoom 1.25 / 144 DPI must resolve back to byte 7"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overflow_reveals_every_collapsed_action_even_in_a_short_window() {
+        // The popup used to estimate a row count and then `break` when the estimate ran out, so a
+        // short window silently lost trailing actions: no scroll, no hint, no way to reach them.
+        let (_tmp, doc) = temp_doc("overflow-short");
+        for height in [240u16, 300, 360, 480] {
+            let mut app = open_gui_app(&doc, View::IDENTITY, 560, height);
+            assert!(app.draw().expect("draw"));
+            let hits = render_toolbar_with(
+                &mut app,
+                SecurityDotState::Unprotected,
+                false,
+                false,
+                true,
+                false,
+                100,
+            );
+            for action in [
+                ToolbarAction::ZoomIn,
+                ToolbarAction::ZoomOut,
+                ToolbarAction::CycleUiScale,
+                ToolbarAction::ToggleTheme,
+                ToolbarAction::ToggleReducedMotion,
+            ] {
+                assert!(
+                    hits.iter().any(|h| h.action == action),
+                    "{action:?} must stay reachable in the overflow at height {height}"
+                );
+            }
+            // Every revealed row must sit inside the client area, or its label would be painted
+            // off-screen by the popup's own clip rect.
+            let limit = i32::from(height);
+            assert!(
+                hits.iter()
+                    .filter(|h| h.action != ToolbarAction::ToggleOverflow)
+                    .all(|h| h.rect.y >= 0 && h.rect.y + h.rect.h <= limit),
+                "every action row must be inside the window at height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn shortcut_sheet_only_lists_bindings_the_key_loop_implements() {
+        // The sheet used to advertise "Ctrl H" and "Ctrl M", which no branch handles: `H` and `M`
+        // are bare keys in the writing view and `Ctrl Shift H`/`M` are Home and reduced motion. A
+        // help sheet that lists shortcuts which do nothing is worse than no sheet, so the rows are
+        // pinned to the combinations the loop actually matches.
+        let source = include_str!("canvas.rs");
+        for label in [
+            "Ctrl Z / Y",
+            "Ctrl A",
+            "Ctrl F",
+            "Ctrl K",
+            "Ctrl J",
+            "Ctrl S",
+            "H",
+            "M",
+            "Ctrl G",
+            "Ctrl L",
+            "Ctrl Shift D",
+            "Ctrl Shift H",
+            "Ctrl Shift M",
+            "Ctrl Alt + / -",
+            "Ctrl /",
+            "Ctrl Q",
+        ] {
+            assert!(
+                source.contains(&format!("\"{label}\"")),
+                "{label} must exist in the shortcut table"
+            );
+        }
+        // The two rows that described nothing must be gone. They would appear only as a labelled
+        // pair, so match the label text itself.
+        assert!(
+            !source.contains("(\"Ctrl H\", \"Witness history\")"),
+            "the sheet must not claim a Ctrl H binding"
+        );
+        assert!(
+            !source.contains("(\"Ctrl M\", \"Bookmark witness\")"),
+            "the sheet must not claim a Ctrl M binding"
+        );
+    }
+
+    #[test]
+    fn back_and_folder_navigation_clear_the_favorites_tab_and_stale_query() {
+        // `apply_home_hit` is the single place Home's navigation state changes, so it is what the
+        // click handler runs; testing it directly covers every entry point.
+        let mut state = HomeState::with_folder(None);
+        state.query = "zzz-no-such-document".to_owned();
+        state.search_focused = true;
+        state.favorites = true;
+        state.active_folder = Some(0);
+
+        // Back out of a folder while Favorites is showing must land on the unfiltered library.
+        apply_home_hit(&mut state, HomeHit::Back);
+        assert!(!state.favorites, "Back must leave the Favorites tab");
+        assert!(state.active_folder.is_none());
+        assert!(state.query.is_empty(), "Back must drop the stale query");
+
+        state.favorites = true;
+        state.query = "zzz-no-such-document".to_owned();
+        apply_home_hit(&mut state, HomeHit::Folder(0));
+        assert!(!state.favorites, "picking a folder must leave Favorites");
+        assert!(
+            state.query.is_empty(),
+            "picking a folder must drop the query"
         );
     }
 
