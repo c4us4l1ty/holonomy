@@ -55,7 +55,7 @@ The file is created if it does not exist and opened if it does; either way it as
 passphrase. When launched without a file, the desktop app opens a **Home** library instead: a
 sidebar of folders containing `*.wavefunction` documents, a searchable card grid, and `+` to create
 a new encrypted document. Set `HOLONOMY_NOTES_DIR` to point the library at another folder; by
-default it scans the working directory. `Ctrl+J` focuses search, `Ctrl+Q` closes the window, and the Home button or `Ctrl+Shift+H` saves
+default it scans the working directory. The Home grid and the writing view share quiet.md-style chrome — a frosted folder rail, stacked folder cards, and a breadcrumb row — painted from file and folder names only, never from document plaintext (`docs/UI-SPEC.md` §10). `Ctrl+J` focuses search, `Ctrl+Q` closes the window, and the Home button, the rail, or `Ctrl+Shift+H` saves
 and returns to the library from a document. Display-scale shortcuts work in Home too, and the
 Settings panel shows the active scale.
 
@@ -65,8 +65,8 @@ Then: printable text types, arrows and Home/End/PageUp/PageDown move the caret
 `Ctrl+A` selects all, `Ctrl+S` writes through, `Ctrl+F` opens find (Tab switches to replace-all),
 `Ctrl+K` edits hyperlinks (GUI), `Ctrl+R` (TUI) / `Ctrl+H` (GUI) opens witness history,
 `Ctrl+Shift+D` toggles dark paper (`#1A1A19`), `Ctrl+L` requests a cooperative emergency wipe,
-`Ctrl+G` shows what the process can claim about its own memory and OS window protections, `Esc`
-dismisses overlays, and `Ctrl+Q` or `Ctrl+C` quits after sealing what is open — if that last save
+`Ctrl+G` shows what the process can claim about its own memory and OS window protections,
+`Ctrl+/` opens the static shortcut sheet, `Esc` dismisses overlays, and `Ctrl+Q` or `Ctrl+C` quits after sealing what is open — if that last save
 is refused, the window says so and exits non-zero rather than claiming success (D-49).
 
 The **display scale** control (`Scale 100%` in the toolbar, or `⋯` when the window is narrow)

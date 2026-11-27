@@ -68,6 +68,42 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-27 — D-100 — quiet.md chrome parity in both views, with the laws kept load-bearing.**
+  The user asked for the UI of [`s1dashu/quiet-md`](https://github.com/s1dashu/quiet-md) across
+  the writing view *and* Home, and asked explicitly that security and resource usage not be
+  traded away. `docs/UI-SPEC.md` §8 already made quiet.md's page tokens canon and OQ-13 already
+  decided that its code is source, not a dependency; this pass extends the quoted look to the
+  chrome without importing any of its machinery.
+  - **Built:** a 216 px frosted folder rail and a 40 px breadcrumb in the writing view; Home's
+    rail, stacked folder cards and library breadcrumb; quiet.md ink/accent tokens shared with
+    the drift-guarded `QUIET_MD_THEME`; a static `Ctrl+/` shortcut sheet (quiet.md's `⌘ /`).
+    Clicking a folder in the rail returns to Home with that folder selected, then leaves the
+    document session — no second file is open at once.
+  - **Attacked and answered.** *Can chrome widen the plaintext set?* No: `DocumentChromeData`
+    has no `Document`, `Spine`, `SegmentSource` or text buffer and is built only from file and
+    folder names, so the rail cannot read a sealed segment. *Can chrome move the caret away from
+    the glyph?* No: `PixelSurface::recompute_geometry` reserves rail and breadcrumb before
+    deriving `page_origin`/`canvas_clip`, and the existing L-8 caret-click test still passes.
+    *Can chrome add idle work?* No: all of it paints inside the existing `pending_paint ||
+    app.dirty()` branch, with no timer and no per-keystroke work. *Does it add a dependency,
+    network call, telemetry or desktop capture?* No: the frosted wash is interpolated in the
+    existing framebuffer; no wallpaper pixels are read. The security dot, status strip,
+    witness-history and wipe affordances remain visible rather than being hidden for a closer
+    screenshot.
+  - **Refused, with the reason recorded in `docs/UI-SPEC.md` §10:** multi-document tabs or an
+    in-session world-line switcher (one document per window), whole-document outlines or note
+    snippets (L-2), a second `Editor`/`Document`, whiteboard/images/tables/math, CSS themes or
+    downloaded fonts, telemetry, per-keystroke Markdown auto-formatting (L-2's allocation-free
+    keystroke gate), and extra style packs (one pinned token table). These are quiet.md features;
+    Holonomy's law wins where they conflict.
+  - **Evidence and its limit:** 47 `holonomy-gui` library tests pass locally, including four new
+    guards for token drift, hit-test origin, metadata-only painting inside the rail's rect and
+    the Home sidebar `+` hit order (which the map of the Home shell found was swallowed by the
+    library row); `cargo clippy -p holonomy-gui --all-targets -- -D warnings` is clean. A local
+    framebuffer render was inspected at 1280×800 for both screens. That is inspection, not the
+    screenshot-diff acceptance check §8 requires for a Block 6 gate, and no gate status changes
+    here: L-4/L-5 remain `spec`, and no law was promoted by editing prose.
+
 - **2026-11-26 — D-99 — Bug hunt: a committed style manifest could reopen with its runs gone.**
   `WorldLine`'s `validate_manifest_against_lengths` accepted list wire values that
   `holonomy_text::DocStyle::from_wire` rejects as a whole: a bullet or ordered run with `depth = 0`,
