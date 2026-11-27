@@ -3130,6 +3130,41 @@ Listed so they stay dead.
   failure behavior. `metadata_digest` uses variable-output BLAKE2b-256 rather than truncating
   BLAKE2b-512; its reference-vector regression test passed in workspace CI.
 
+- **2026-11-27** — **`D-102` bug hunt (post-design audit, before merge).** Seven defects found
+  and fixed, each with a regression test where the behaviour is observable:
+
+  1. **The bare-header rule leaked into popups, the drawer and the banner.** Removing the resting
+     pill globally made the history drawer's `Live` / `PinBase` / `DiffPrev` and the recovery
+     banner's `Dismiss` render as unstyled body copy — the fill was the only thing telling the
+     user those words were pressable. `draw_toolbar_button` now takes a `ButtonSurface`: `Bare`
+     for header controls, `Chipped` for popup rows, drawer actions and the banner.
+  2. **Home painted an empty pane at the window minimum.** A 5:6 card body is 378 pt tall from
+     `y = 110`, and the grid loop breaks on the first card that does not fit, so at 480×360 the
+     library showed nothing at all. Bodies are capped to the available pane, and the paper stack
+     is derived from the pocket position rather than from `body_h` independently.
+  3. **The settings sheet was not modal to the pointer.** It painted over the cards without a hit
+     entry covering itself, so a click on the sheet fell through to the card underneath and opened
+     a document behind the overlay.
+  4. **`Enter` in an empty search box opened a document.** An empty query matches every entry, so
+     pressing Enter on a freshly focused field opened whichever document sorted first and dropped
+     the user out of Home without a choice.
+  5. **A sort control that lied.** `manual_order` was labelled "Manual order" but only reverses
+     the catalogue's name order; there is no stored manual order. Renamed `reverse_order`, labelled
+     `A–Z` / `Z–A`.
+  6. **Text painted outside its container** in two places: folder-card labels used a `card_w − 4`
+     inset (over the neighbouring card) and breadcrumb crumbs were bounded only by their own 180 pt
+     cap, so long names ran under the `Find` button.
+  7. **`Favorites` claimed "No documents yet"** in an empty state where no document list exists.
+
+  Also hardened while auditing: an out-of-range `active_folder` no longer indexes `folders` on the
+  paint path (`is_some_and` guard), and the settings sheet skips rows the clamped height cannot
+  hold instead of painting past its edge.
+
+  Process note: the Actions log hosts were unreachable from the fixing sandbox for these runs and
+  the diagnostics bridge (`gates`-gated on eleven jobs) did not fire, so the formatter's patch was
+  recovered by temporarily emitting it as `::error::FMTDIFF…` workflow annotations — readable
+  through the API — then reverting that probe. The workflow file is byte-identical to `7e554a1`.
+
 - **2026-11-26** — **`D-102`: design convergence to quiet.md, Holonomy first.** The Home shell
   was rebuilt on the reference's own geometry — 30 px rail rows at radius 9 with a 14 px inset and
   only the *active* row filled (the previous build washed every row, which read as a column of
