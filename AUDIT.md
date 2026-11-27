@@ -3346,3 +3346,16 @@ Listed so they stay dead.
   the first unit-test version measured nothing and CI caught it; the same honesty rule
   applies to every future gate; (b) the diagnostics bridge (issue #51) remains in CI,
   dormant unless a step fails.
+
+
+### 2026-11-26 — Native follow-up composition routing audit
+
+- Found that command shortcuts and mouse callbacks could switch a pending IME composition
+  to another input field, history view, or insertion point. A later platform commit could
+  consequently insert text into the wrong destination. Save/close guards alone were insufficient.
+- Added a shared non-destructive composition guard to command shortcuts, editor intents,
+  clipboard actions, field switching, Find/Bookmark and history navigation. Explicit Cancel
+  clears both passphrase and preedit, rather than leaving the composition alive on Home.
+- Added a regression asserting rejection preserves the composed Unicode text and reports why.
+  Emergency wipe remains available during composition. Platform IME integration and actual
+  user-display visual qualification remain release blockers; this does not switch the default UI.
