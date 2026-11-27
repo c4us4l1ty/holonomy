@@ -409,6 +409,7 @@ fn paint_frame(bounds: Bounds<Pixels>, frame: VectorFrame, ink: u32, window: &mu
 
 impl Render for NativeHome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_window_title(&self.session.as_ref().map_or_else(|| "Holonomy Native".to_string(), |session| format!("Holonomy Native — {}", session.path().file_name().unwrap_or_default().to_string_lossy())));
         let (bg, panel, ink, muted) = if self.dark {
             (0x191b1e, 0x222529, 0xeeeeec, 0xa8acae)
         } else {

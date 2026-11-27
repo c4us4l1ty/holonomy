@@ -6,6 +6,7 @@ on:
       - "crates/holonomy-native/**"
       - "crates/holonomy-eye/**"
       - "vendor/xattr/**"
+      - "scripts/qualify-native-ui.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/native-ui.yml"
@@ -28,7 +29,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev
+          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev xvfb xdotool imagemagick mesa-vulkan-drivers
       - name: Resolve, format and compile preview
         shell: bash
         run: |
@@ -47,6 +48,15 @@ jobs:
         run: |
           cargo build --locked -p holonomy-native --features native-ui
           cargo build --locked -p holonomy-gui --bin holonomy-gui
+      - name: Exercise actual native input, encrypted save and reopen under Xvfb
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          HOLONOMY_NATIVE_SMOKE_PATH: ${{ runner.temp }}/native-smoke.wavefunction
+          GPUI_X11_SCALE_FACTOR: "2"
+        run: |
+          xvfb-run -a -s "-screen 0 2560x1800x24" scripts/qualify-native-ui.sh 2>&1 | tee -a native-check.log
+          exit "${PIPESTATUS[0]}"
       - name: Upload runnable preview
         uses: actions/upload-artifact@v4
         with:
@@ -66,6 +76,7 @@ jobs:
             crates/holonomy-native/src/main.rs
             native-check.log
             native-format.patch
+            native-smoke.png
   bridge:
     needs: qualify
     if: always() && github.event_name == 'push'

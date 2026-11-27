@@ -89,11 +89,13 @@ fn core(
 impl Session {
     /// Opens an existing document; never falls back to creating one after an open failure.
     pub fn open(path: &Path, passphrase: &[u8]) -> Result<Self> {
+        require_durability()?;
         Self::from_document(path, Document::open(path, passphrase)?)
     }
 
     /// Creates a new document, refusing an existing destination.
     pub fn create(path: &Path, passphrase: &[u8]) -> Result<Self> {
+        require_durability()?;
         Self::from_document(path, Document::create(path, passphrase)?)
     }
 
@@ -338,7 +340,7 @@ pub fn fixed(value: f32) -> Fixed {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -620,5 +622,47 @@ mod input_tests {
         assert_eq!(utf16_range_bytes("",0..0),Some(0..0));
         let start=3; let end=1;
         assert_eq!(utf16_range_bytes("test",start..end),None);
+    }
+}
+
+#[cfg(test)]
+mod ui_smoke_fixture {
+    use super::*;
+    #[test]
+    #[ignore = "fixture for the Xvfb native UI qualification job"]
+    fn create() {
+        let path=PathBuf::from(std::env::var_os("HOLONOMY_NATIVE_SMOKE_PATH").expect("explicit fixture path"));
+        let document=Document::create_with(&path,b"native smoke passphrase",store::test_params()).unwrap();
+        let mut session=Session::from_document(&path,document).unwrap();
+        session.apply(Intent::Type("Native vector glyph specimen: office café 0123456789".into())).unwrap();
+        session.save().unwrap();
+    }
+    #[test]
+    #[ignore = "checks the file saved by the Xvfb native UI qualification job"]
+    fn verify() {
+        let path=PathBuf::from(std::env::var_os("HOLONOMY_NATIVE_SMOKE_PATH").expect("explicit fixture path"));
+        let mut session=Session::open(&path,b"native smoke passphrase").unwrap();
+        assert_eq!(session.editor.frame().unwrap().text(),"Saved by native UI smoke test");
+        session.verify().unwrap();
+    }
+}
+
+fn require_durability() -> Result<()> {
+    if cfg!(unix) { Ok(()) } else {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+            "Encrypted editing is unavailable: this platform has no qualified durable storage backend. No file was created or modified.").into())
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod unsupported_storage_tests {
+    use super::*;
+    #[test]
+    fn unsupported_storage_is_refused_before_kdf_or_file_creation() {
+        let path=std::env::temp_dir().join(format!("holonomy-native-unsupported-{}.wavefunction",std::process::id()));
+        assert!(!path.exists());
+        assert!(Session::create(&path,b"test passphrase").is_err());
+        assert!(Session::open(&path,b"test passphrase").is_err());
+        assert!(!path.exists());
     }
 }

@@ -104,13 +104,11 @@ impl std::error::Error for StoreError {}
 fn map_open(error: LineError) -> StoreError {
     match error {
         LineError::Io(error) => StoreError::Io(error),
-        other => {
-            debug_assert!(
-                !matches!(other, LineError::UnsupportedDurability),
-                "a world-line needs a file system with working barriers"
-            );
-            StoreError::Refused
-        }
+        LineError::UnsupportedDurability => StoreError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this platform has no qualified durable document storage backend",
+        )),
+        _ => StoreError::Refused,
     }
 }
 
