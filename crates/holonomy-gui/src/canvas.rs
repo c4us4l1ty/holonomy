@@ -2871,18 +2871,23 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
     let muted = muted_ink_for(&theme);
     let accent = accent_ink_for(&theme);
 
-    let rows: [(&str, &str); 14] = [
+    // Every row here must match a real binding in the key loop. `H` and `M` are bare keys in the
+    // writing view (history drawer, bookmark) and `Ctrl Shift H`/`Ctrl Shift M` are Home and
+    // reduced motion, so the old "Ctrl H" / "Ctrl M" rows described shortcuts that did nothing.
+    let rows: [(&str, &str); 16] = [
         ("Ctrl Z / Y", "Undo / redo"),
         ("Ctrl A", "Select all"),
         ("Ctrl F", "Find and replace"),
         ("Ctrl K", "Edit link"),
+        ("Ctrl J", "Focus search"),
         ("Ctrl S", "Save and witness"),
-        ("Ctrl H", "Witness history"),
-        ("Ctrl M", "Bookmark witness"),
+        ("H", "Witness history"),
+        ("M", "Bookmark witness"),
         ("Ctrl G", "Security panel"),
         ("Ctrl L", "Emergency wipe"),
         ("Ctrl Shift D", "Light / dark paper"),
         ("Ctrl Shift H", "Return Home"),
+        ("Ctrl Shift M", "Reduced motion"),
         ("Ctrl Alt + / -", "Display scale"),
         ("Ctrl /", "This sheet"),
         ("Ctrl Q", "Save and quit"),
@@ -4247,6 +4252,9 @@ fn prompt_gui_document(
     let mut dirty = true;
     let mut recent_hits: Vec<(Rect, String)> = Vec::new();
     let mut remember_box = Rect::new(0, 0, 0, 0);
+    // The two focusable fields, kept outside the paint block so a click can focus them.
+    let mut path_box = Rect::new(0, 0, 0, 0);
+    let mut pass_box = Rect::new(0, 0, 0, 0);
 
     loop {
         if dirty {
@@ -4296,7 +4304,7 @@ fn prompt_gui_document(
                 HOME_MUTED,
                 card,
             );
-            let path_box = Rect::new(cx + 24, cy + 70, card_w - 48, 30);
+            path_box = Rect::new(cx + 24, cy + 70, card_w - 48, 30);
             fb.fill_rounded_rect(
                 path_box,
                 8,
@@ -4338,7 +4346,7 @@ fn prompt_gui_document(
                 HOME_MUTED,
                 card,
             );
-            let pass_box = Rect::new(cx + 24, cy + 132, card_w - 48, 32);
+            pass_box = Rect::new(cx + 24, cy + 132, card_w - 48, 32);
             fb.fill_rounded_rect(pass_box, 8, HOME_SURFACE, card);
             fb.stroke_rounded_rect(
                 pass_box,
@@ -4504,6 +4512,21 @@ fn prompt_gui_document(
                                 let _ = std::fs::remove_file(f);
                             }
                         }
+                        dirty = true;
+                        continue;
+                    }
+                    // Only Tab moved the caret between fields, so clicking a field did nothing:
+                    // the keystroke went to whichever field was last focused, which reads as the
+                    // click having been ignored. Focus follows the pointer instead.
+                    if pass_box.contains(px, py) {
+                        editing_path = false;
+                        error_msg.clear();
+                        dirty = true;
+                        continue;
+                    }
+                    if path_box.contains(px, py) {
+                        editing_path = true;
+                        error_msg.clear();
                         dirty = true;
                         continue;
                     }
@@ -6576,6 +6599,48 @@ mod tests {
                 "every action row must be inside the window at height {height}"
             );
         }
+    }
+
+    #[test]
+    fn shortcut_sheet_only_lists_bindings_the_key_loop_implements() {
+        // The sheet used to advertise "Ctrl H" and "Ctrl M", which no branch handles: `H` and `M`
+        // are bare keys in the writing view and `Ctrl Shift H`/`M` are Home and reduced motion. A
+        // help sheet that lists shortcuts which do nothing is worse than no sheet, so the rows are
+        // pinned to the combinations the loop actually matches.
+        let source = include_str!("canvas.rs");
+        for label in [
+            "Ctrl Z / Y",
+            "Ctrl A",
+            "Ctrl F",
+            "Ctrl K",
+            "Ctrl J",
+            "Ctrl S",
+            "H",
+            "M",
+            "Ctrl G",
+            "Ctrl L",
+            "Ctrl Shift D",
+            "Ctrl Shift H",
+            "Ctrl Shift M",
+            "Ctrl Alt + / -",
+            "Ctrl /",
+            "Ctrl Q",
+        ] {
+            assert!(
+                source.contains(&format!("\"{label}\"")),
+                "{label} must exist in the shortcut table"
+            );
+        }
+        // The two rows that described nothing must be gone. They would appear only as a labelled
+        // pair, so match the label text itself.
+        assert!(
+            !source.contains("(\"Ctrl H\", \"Witness history\")"),
+            "the sheet must not claim a Ctrl H binding"
+        );
+        assert!(
+            !source.contains("(\"Ctrl M\", \"Bookmark witness\")"),
+            "the sheet must not claim a Ctrl M binding"
+        );
     }
 
     #[test]
