@@ -1,15 +1,21 @@
 name: Native UI preview
 on:
   push:
-    branches: ["arena/**"]
+    branches: ["main", "arena/**"]
     paths:
       - "crates/holonomy-native/**"
       - "crates/holonomy-eye/**"
+      - "crates/holonomy-gui/**"
+      - "crates/holonomy-shell/**"
+      - "crates/holonomy-text/**"
+      - "crates/holonomy-line/**"
+      - "crates/holonomy-seal/**"
       - "vendor/xattr/**"
       - "scripts/qualify-native-ui.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/native-ui.yml"
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
@@ -33,14 +39,18 @@ jobs:
       - name: Resolve, format and compile preview
         shell: bash
         run: |
-          cargo fmt --all
-          git diff > native-format.patch
-          cargo clippy --locked -p holonomy-native --features native-ui -- -D warnings 2>&1 | tee native-check.log
+          cargo fmt --all -- --check 2>&1 | tee native-check.log
+          cargo clippy --locked -p holonomy-native --features native-ui -- -D warnings 2>&1 | tee -a native-check.log
           exit "${PIPESTATUS[0]}"
       - name: Test native session boundary
         shell: bash
         run: |
           cargo test --locked -p holonomy-native --lib 2>&1 | tee -a native-check.log
+          exit "${PIPESTATUS[0]}"
+      - name: Test frontend composition guard
+        shell: bash
+        run: |
+          cargo test --locked -p holonomy-native --features native-ui --bin holonomy-native 2>&1 | tee -a native-check.log
           exit "${PIPESTATUS[0]}"
       - name: Build runnable preview and companion editor
         env:
@@ -55,8 +65,10 @@ jobs:
           HOLONOMY_NATIVE_SMOKE_PATH: ${{ runner.temp }}/native-smoke.wavefunction
           GPUI_X11_SCALE_FACTOR: "2"
         run: |
-          xvfb-run -a -s "-screen 0 2560x1800x24" scripts/qualify-native-ui.sh 2>&1 | tee -a native-check.log
-          exit "${PIPESTATUS[0]}"
+          for scale in 1 1.25 1.5 1.75 2; do
+            GPUI_X11_SCALE_FACTOR="$scale" xvfb-run -a -s "-screen 0 2560x1800x24" scripts/qualify-native-ui.sh 2>&1 | tee -a native-check.log
+            mv native-smoke.png "native-smoke-${scale}.png"
+          done
       - name: Upload runnable preview
         uses: actions/upload-artifact@v4
         with:
@@ -66,6 +78,12 @@ jobs:
             target/debug/holonomy-native.exe
             target/debug/holonomy-gui
             target/debug/holonomy-gui.exe
+      - name: Capture formatter patch without hiding a failed check
+        if: always()
+        shell: bash
+        run: |
+          cargo fmt --all
+          git diff > native-format.patch
       - name: Save compiler diagnostics and generated metadata
         if: always()
         uses: actions/upload-artifact@v4
@@ -76,7 +94,7 @@ jobs:
             crates/holonomy-native/src/main.rs
             native-check.log
             native-format.patch
-            native-smoke.png
+            native-smoke*.png
             native-failure.png
             native-unlock.png
             crates/holonomy-native/src/lib.rs

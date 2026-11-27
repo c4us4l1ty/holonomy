@@ -76,6 +76,7 @@ pub struct Session {
 // reaper latches the trip but waits for the UI thread to register quiescent allocations and join.
 struct Emergency {
     reaper: Option<ReaperGuard>,
+    wipe_verified: bool,
     _canaries: Arc<CanarySet>,
     arenas: Arc<SecretArenas>,
     tripwire: Arc<Tripwire>,
@@ -97,6 +98,7 @@ impl Emergency {
         );
         Self {
             reaper: Some(reaper),
+            wipe_verified: false,
             _canaries: canaries,
             arenas,
             tripwire,
@@ -171,8 +173,10 @@ impl Session {
 
     /// Applies the same intent as the existing frontend. History views cannot mutate storage.
     pub fn apply(&mut self, intent: Intent) -> Result<()> {
-        self.emergency.tripwire.beat();
-        self.check_live()?;
+        self.activity()?;
+        if matches!(intent, Intent::SetView(view) if view != holonomy_eye::View::IDENTITY) {
+            return Err("Native view transforms are not qualified; device scaling is handled by GPUI.".into());
+        }
         if let Some(history) = self.history.as_mut() {
             if !matches!(
                 intent,
@@ -195,8 +199,7 @@ impl Session {
 
     /// Commits through the existing authenticated manifest/witness path.
     pub fn save(&mut self) -> Result<()> {
-        self.emergency.tripwire.beat();
-        self.check_live()?;
+        self.activity()?;
         self.editor.flush()?;
         Ok(())
     }
@@ -221,7 +224,7 @@ impl Session {
 
     /// Finds and selects one streaming search result without collecting every match.
     pub fn find(&mut self, needle: &str, index: u64) -> Result<u64> {
-        self.check_live()?;
+        self.activity()?;
         let editor = self.history.as_mut().unwrap_or(&mut self.editor);
         let summary = editor.find_nth(needle, index)?;
         if let Some(hit) = summary.selected {
@@ -290,7 +293,7 @@ impl Session {
     /// discard the GPU scene and its own input buffers; this does not certify GPU memory erasure.
     pub fn wipe(&mut self) -> bool {
         let Some(reaper) = self.emergency.reaper.take() else {
-            return self.document.are_keys_zeroized();
+            return self.emergency.wipe_verified;
         };
         self.emergency.tripwire.fire(TripReason::Manual);
         let arenas = &self.emergency.arenas;
@@ -311,12 +314,14 @@ impl Session {
         if let Some(history) = &mut self.history {
             history.wipe_all_in_place();
         }
-        self.document.are_keys_zeroized()
+        let verified = self.document.are_keys_zeroized()
             && outcome.is_some_and(|result| {
                 result.canaries.ghost_canaries == 0
                     && result.wipe.bytes_wiped > 0
                     && result.wipe.arenas_wiped > 0
-            })
+            });
+        self.emergency.wipe_verified = verified;
+        verified
     }
 
     /// Enables the existing cooperative dead-man watcher. Call before exposing the session.
@@ -332,6 +337,13 @@ impl Session {
     /// Reports a permanently latched manual/dead-man trip without reading document plaintext.
     pub fn tripped(&self) -> bool {
         self.emergency.reaper.is_none() || self.emergency.tripwire.evaluate().is_some()
+    }
+
+    /// Records real user activity without reviving a deadline that has already expired.
+    /// Paint, timer polling and other background work must never call this method.
+    pub fn activity(&self) -> Result<()> {
+        self.emergency.tripwire.beat();
+        self.check_live()
     }
 
     fn check_live(&self) -> Result<()> {
@@ -350,7 +362,7 @@ impl Session {
     /// Copies the explicitly selected plaintext for an explicit clipboard operation only.
     /// The caller owns clipboard disclosure and cleanup policy.
     pub fn selected_text(&mut self) -> Result<zeroize::Zeroizing<String>> {
-        self.check_live()?;
+        self.activity()?;
         let editor = self.history.as_mut().unwrap_or(&mut self.editor);
         let (start, end) = editor.selection().normalised();
         if end.saturating_sub(start) > 1024 * 1024 {
@@ -682,6 +694,46 @@ mod tests {
     }
 
     #[test]
+    fn refused_close_preserves_pending_text_and_allows_retry() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session.apply(Intent::Type("keep the unsaved text".into())).unwrap();
+        let held = fixture.0.with_extension("held");
+        std::fs::rename(&fixture.0, &held).unwrap();
+        let refusal = session.prepare_close();
+        std::fs::rename(&held, &fixture.0).unwrap();
+        assert!(refusal.is_err());
+        assert!(session.dirty());
+        assert_eq!(session.editor.frame().unwrap().text(), "keep the unsaved text");
+        session.prepare_close().unwrap();
+        drop(session);
+        let mut reopened = Session::open(&fixture.0, b"native fixture passphrase").unwrap();
+        assert_eq!(reopened.editor.frame().unwrap().text(), "keep the unsaved text");
+    }
+
+    #[test]
+    fn repeated_wipe_preserves_the_entire_verification_result() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        assert!(session.wipe());
+        assert!(session.wipe());
+        // Inject a failed original receipt (e.g. a canary failure): erased keys alone must not
+        // upgrade that failure to success on a later idempotent call.
+        session.emergency.wipe_verified = false;
+        assert!(session.document.are_keys_zeroized());
+        assert!(!session.wipe());
+    }
+
+    #[test]
+    fn native_paint_cannot_accept_an_unapplied_hit_test_transform() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        assert!(session.apply(Intent::SetView(holonomy_eye::View::new(2_000, 96).unwrap())).is_err());
+        assert_eq!(session.editor.view(), holonomy_eye::View::IDENTITY);
+        assert!(session.apply(Intent::SetView(holonomy_eye::View::IDENTITY)).is_ok());
+    }
+
+    #[test]
     fn deadman_latches_before_further_access_and_cooperative_wipe_verifies_keys() {
         let fixture = Fixture::new();
         let mut session = fixture.session();
@@ -691,6 +743,7 @@ mod tests {
         session.set_deadman(Duration::from_millis(10)).unwrap();
         std::thread::sleep(Duration::from_millis(30));
         assert!(session.tripped());
+        assert!(session.activity().is_err());
         assert!(session.apply(Intent::Type("must refuse".into())).is_err());
         assert!(session.save().is_err());
         assert!(session.wipe());

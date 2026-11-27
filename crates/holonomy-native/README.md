@@ -21,7 +21,8 @@ The Native UI preview workflow publishes platform binaries as run artifacts.
 - Native text-input callbacks and bounded, zeroizing IME preedit. Document composition is
   committed as one text insertion rather than persisting each intermediate candidate.
 - Keyboard editing, mouse selection, drag, scroll, undo/redo, select-all and basic formatting.
-- Save and save-before-close/Home; a save refusal keeps the session open.
+- Save and save-before-close/Home; a save refusal keeps the session open. Uncommitted IME
+  composition blocks saving/closing until the platform commits or cancels it.
 - Streaming Find, read-only witness previews, bookmark creation and integrity verification.
 - Explicit bounded clipboard copy/cut/paste with plaintext-egress disclosure.
 - Cooperative canary-verified resident-buffer/key wipe and clipboard clearing; **not** a
@@ -40,8 +41,9 @@ A compiling Windows UI binary is not evidence of working Windows persistence.
 Do not remove that fence without implementing and qualifying a Windows storage backend.
 
 Linux/macOS exercise real encrypted round trips in session tests. Linux additionally
-runs an Xvfb smoke test at reported 2x scale: native input, unlock, editing, undo/redo,
-find, formatting, save, quit and independent encrypted reopen verification. CI
+runs Xvfb smoke tests at 1x, 1.25x, 1.5x, 1.75x and 2x: wrong-passphrase refusal,
+unlock, native input, editing, undo/redo, find, formatting, refused close with pending
+text, save retry, quit and independent encrypted reopen verification. CI
 screenshots are test specimens, not proof of quality on the user's actual monitor.
 
 Still outstanding before replacing the default:

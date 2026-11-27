@@ -68,6 +68,16 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-26** — **Pre-merge native UI recheck.** Found and corrected: closing/saving during
+  IME composition could discard uncommitted input; repeated wipe calls could report key erasure
+  as success even if the original full receipt failed; unimplemented view transforms could enter
+  hit testing without entering native paint; search/composition activity could fail to refresh
+  the dead-man heartbeat. Added focused regressions and a real refused-save/close/retry drill.
+  Native CI now covers main, pull requests and core dependency changes, enforces formatting on
+  the tested source, and exercises native input across integer and fractional display scales.
+  The frontend remains opt-in: these checks do not close its documented release blockers.
+
+
 - **2026-11-26** — **Native UI migration is not release-qualified.** The user's 200% blur
   report invalidated the claim that integer framebuffer repetition was sufficient. The opt-in
   `holonomy-native` frontend uses GPUI 0.2.2, but document strings stay out of its text layout

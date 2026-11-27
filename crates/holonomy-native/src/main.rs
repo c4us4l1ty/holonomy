@@ -115,6 +115,10 @@ impl NativeHome {
     }
 
     fn save(&mut self) -> bool {
+        if let Err(error) = ensure_no_composition(&self.preedit) {
+            self.status = error.to_string();
+            return false;
+        }
         let result = self
             .session
             .as_mut()
@@ -245,6 +249,12 @@ impl NativeHome {
         };
         if command && mods.shift && key == "escape" {
             self.wipe(cx);
+            cx.notify();
+            return;
+        }
+        if self.session.as_ref().is_some_and(|session| session.activity().is_err()) {
+            self.wipe(cx);
+            cx.stop_propagation();
             cx.notify();
             return;
         }
@@ -402,6 +412,12 @@ impl NativeHome {
     }
 
     fn commit_text(&mut self, text: &str) {
+        if let Some(session) = &self.session {
+            if let Err(error) = session.activity() {
+                self.status = error.to_string();
+                return;
+            }
+        }
         match self.screen {
             Screen::Unlock if self.editing_path => {
                 if self.path.len().saturating_add(text.len()) <= 4096 {
@@ -1025,4 +1041,26 @@ fn main() {
         .detach();
         cx.activate(true);
     });
+}
+
+// Saving cannot silently drop text that still belongs to the platform's composition. Refuse
+// until the IME commits/cancels rather than guessing at a commit and later inserting it twice.
+fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
+    if preedit.is_empty() { Ok(()) } else {
+        Err("Finish or cancel the current text composition before saving or closing.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pending_composition_refuses_save_without_consuming_text() {
+        let mut input = SecretInput::default();
+        input.push_str("किताब");
+        assert!(ensure_no_composition(&input).is_err());
+        assert_eq!(&*input, "किताब");
+        input.zeroize();
+        assert!(ensure_no_composition(&input).is_ok());
+    }
 }
