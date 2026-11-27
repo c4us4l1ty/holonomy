@@ -10,6 +10,7 @@ attribution trail.
 | origin | licence | version / commit | what was taken | files |
 | --- | --- | --- | --- | --- |
 | [s1dashu/quiet-md](https://github.com/s1dashu/quiet-md) | MIT, © 2026 s1dashu | v0.1.13, `main` read on 2026-11-17 | **Nothing yet.** Read as prior art for the Block 6 shell and the Block 7 ribbon: the quiet page, the paper feel, the ribbon menus. **OQ-13 in `AUDIT.md` records why it is not a dependency, and what that costs us.** | — |
+| [Stebalien/xattr](https://github.com/Stebalien/xattr) | MIT OR Apache-2.0 | `e42c1da499b72103a9c9ef5693ff31f998ad31e6` (0.2.3) | vendored source with Linux/Android ENODATA compatibility fix for the opt-in GPUI preview; see `HOLONOMY.md` | `vendor/xattr/` (original licenses retained) |
 | [Unicode Character Database](https://www.unicode.org/reports/tr29/) | Unicode License V3 (SPDX: Unicode-3.0), © 1991-2026 Unicode, Inc. | UCD 18.0.0 | the grapheme cluster break class, Extended_Pictographic, UAX #11 / emoji display-width assignments, and UAX #9 `Bidi_Class` + `Bidi_Paired_Bracket` assignments, as range and pair tables | `crates/holonomy-eye/src/cluster/tables.rs`, `crates/holonomy-eye/src/bidi/tables.rs`, `scripts/gen-bidi-tables.py`, `LICENSES/unicode-data.txt` |
 | [unicode-rs/unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation) | MIT OR Apache-2.0, © The Rust Project Developers | `master`, read 2026-11-19 | **the input, not the output**: `scripts/gen-cluster-tables.py` reads its generated `src/tables.rs` instead of the UCD files, so the extraction is that project's and the layout is ours. No code is copied | `scripts/gen-cluster-tables.py`, `LICENSES/unicode-segmentation-MIT.txt` |
 | [unicode-rs/unicode-width](https://github.com/unicode-rs/unicode-width) | MIT OR Apache-2.0, © The Rust Project Developers | `master` (UCD 18.0.0), read 2026-11-22 | **the input, not the output**: `scripts/gen-cluster-tables.py` decodes its generated `src/gen/tables.rs` to extract the two-column code-point ranges into our own disjoint range slice for OQ-25. No code is copied | `scripts/gen-cluster-tables.py`, `LICENSES/unicode-width-MIT.txt` |
@@ -36,3 +37,17 @@ plaintext. One dependency claim is enforced in CI rather than written here: the 
 graph across `argon2`, `chacha20`, `curve25519-dalek`, `digest`, `ml-kem`, `poly1305`, `sha3` and
 `sponge-cursor` is checked in the `test (stable)` job, so a dependency that quietly stops zeroizing
 fails the build rather than the audit.
+
+### Native UI preview exception
+
+The opt-in `holonomy-native` migration introduces GPUI 0.2.2 as a pinned registry
+dependency (Apache-2.0), not a dependency on the Quiet MD application. No Quiet MD
+code or assets are copied. Its source is reference material only.
+
+For this experimental frontend, rule 4 above has one explicit, temporary exception:
+`[patch.crates-io].xattr` points to the vendored 0.2.3 compatibility fix. GPUI's
+`zed-async-tar` dependency requires that old release, which otherwise does not
+compile against modern libc on Linux. The patch is inactive in ordinary frontend
+builds (which do not enable GPUI), leaves existing core dependency versions intact,
+and must be removed once GPUI no longer needs it. This exception does not authorize
+other framework forks or change the core crates' dependency boundaries.

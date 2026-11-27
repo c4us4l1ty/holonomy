@@ -1,0 +1,29 @@
+[package]
+name = "holonomy-native"
+description = "Opt-in device-scale GPUI frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+native-ui = ["dep:gpui"]
+
+[dependencies]
+holonomy-gui = { path = "../holonomy-gui" }
+holonomy-eye = { path = "../holonomy-eye" }
+holonomy-shell = { path = "../holonomy-shell" }
+holonomy-seal = { path = "../holonomy-seal" }
+holonomy-text = { path = "../holonomy-text" }
+zeroize.workspace = true
+gpui = { version = "=0.2.2", optional = true }
+
+[[bin]]
+name = "holonomy-native"
+path = "src/main.rs"
+required-features = ["native-ui"]
