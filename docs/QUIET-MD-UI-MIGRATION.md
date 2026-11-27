@@ -6,7 +6,11 @@ Source inspected locally from `https://github.com/s1dashu/quiet-md`, commit
 `eb741299a25e0a9d19c0ef52e27a5e00feab286a`.
 The checkout is `.reference-quiet-md/`, excluded locally using `.git/info/exclude`.
 It is reference material, not a new dependency or part of the shipped application.
-**No replacement frontend has been implemented or visually qualified yet.**
+**First slice implemented:** `crates/holonomy-native` is an opt-in GPUI 0.2.2
+Home/specimen shell with native-scale text, physical-pixel rules, theme switching
+and an explicit separate-process launcher for the existing editor. It does not
+load plaintext or passphrases. Native unlock/editor parity and visual qualification
+are not complete. See the crate README for build/run instructions.
 
 The user reports that the current application remains blurry at 200% after the
 Windows DPI-awareness change. That report supersedes the previous assertion that

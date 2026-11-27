@@ -31,10 +31,24 @@ jobs:
       - name: Resolve, format and compile preview
         shell: bash
         run: |
-          cargo metadata --format-version 1 > /dev/null
-          cargo fmt --all
-          cargo check -p holonomy-native --features native-ui 2>&1 | tee native-check.log
+          cargo fmt --all -- --check
+          cargo clippy --locked -p holonomy-native --features native-ui -- -D warnings 2>&1 | tee native-check.log
           exit "${PIPESTATUS[0]}"
+      - name: Build runnable preview and companion editor
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          cargo build --locked -p holonomy-native --features native-ui
+          cargo build --locked -p holonomy-gui --bin holonomy-gui
+      - name: Upload runnable preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: holonomy-native-preview-${{ matrix.os }}
+          path: |
+            target/debug/holonomy-native
+            target/debug/holonomy-native.exe
+            target/debug/holonomy-gui
+            target/debug/holonomy-gui.exe
       - name: Save compiler diagnostics and generated metadata
         if: always()
         uses: actions/upload-artifact@v4
