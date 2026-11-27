@@ -2604,6 +2604,12 @@ name = "holonomy-native"
 version = "6.0.0-block.5"
 dependencies = [
  "gpui",
+ "holonomy-eye",
+ "holonomy-gui",
+ "holonomy-seal",
+ "holonomy-shell",
+ "holonomy-text",
+ "zeroize",
 ]
 
 [[package]]

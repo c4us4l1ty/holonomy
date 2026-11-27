@@ -805,6 +805,46 @@ impl FontSet {
         out
     }
 
+    /// Extracts a glyph outline in logical coordinates for a native vector renderer.
+    ///
+    /// `device_scale` controls curve flattening accuracy only: layout advances and the returned
+    /// outline remain logical. This lets a GPU rasterize directly at the current monitor scale
+    /// without sending document strings into a framework's text cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FaceError`] if the embedded glyph outline cannot be decoded.
+    pub fn vector_glyph(
+        &self,
+        variant: FontVariant,
+        gid: u16,
+        style: Style,
+        device_scale: f32,
+    ) -> Result<Option<GlyphOutline>, FaceError> {
+        let font = self.font(variant);
+        let logical_px = style.size_milli() as f32 * f32::from(self.0.body_px) / 1_000.0;
+        let device_scale = if device_scale.is_finite() {
+            device_scale.clamp(0.5, 8.0)
+        } else {
+            1.0
+        };
+        let Some(mut outline) = font.outlines.outline(
+            gid,
+            font.face.units_per_em(),
+            logical_px * device_scale,
+        )? else {
+            return Ok(None);
+        };
+        let factor = logical_px / f32::from(font.face.units_per_em());
+        for contour in &mut outline.contours {
+            for (x, y) in contour {
+                *x *= factor;
+                *y *= factor;
+            }
+        }
+        Ok(Some(outline))
+    }
+
     /// Returns the cached or newly rasterized A8 bitmap for `ch` at `style` and device scale
     /// `(zoom_milli, dpi)`.
     #[must_use]

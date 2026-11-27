@@ -4,6 +4,7 @@ on:
     branches: ["arena/**"]
     paths:
       - "crates/holonomy-native/**"
+      - "crates/holonomy-eye/**"
       - "vendor/xattr/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -31,9 +32,12 @@ jobs:
       - name: Resolve, format and compile preview
         shell: bash
         run: |
-          cargo fmt --all -- --check
+          cargo fmt --all
+          git diff > native-format.patch
           cargo clippy --locked -p holonomy-native --features native-ui -- -D warnings 2>&1 | tee native-check.log
           exit "${PIPESTATUS[0]}"
+      - name: Test native session boundary
+        run: cargo test --locked -p holonomy-native --lib
       - name: Build runnable preview and companion editor
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -58,6 +62,7 @@ jobs:
             Cargo.lock
             crates/holonomy-native/src/main.rs
             native-check.log
+            native-format.patch
   bridge:
     needs: qualify
     if: always() && github.event_name == 'push'
