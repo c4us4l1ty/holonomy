@@ -60,6 +60,17 @@ impl NativeHome {
         } else {
             Screen::Unlock
         };
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                if this.update(cx, |this, cx| {
+                    if this.session.as_ref().is_some_and(Session::tripped) {
+                        this.wipe(cx);
+                        cx.notify();
+                    }
+                }).is_err() { break; }
+            }
+        }).detach();
         Self {
             focus: cx.focus_handle(),
             fonts: holonomy_eye::FontSet::embedded(17).expect("embedded fonts"),
@@ -133,7 +144,12 @@ impl NativeHome {
         self.preedit.zeroize();
         self.passphrase.zeroize();
         match result {
-            Ok(session) => {
+            Ok(mut session) => {
+                if let Some(ms) = std::env::var("HOLONOMY_DEADMAN_MS").ok().and_then(|value| value.parse::<u64>().ok()).filter(|&ms| ms > 0) {
+                    if let Err(error) = session.set_deadman(std::time::Duration::from_millis(ms)) {
+                        self.status=error.to_string(); return;
+                    }
+                }
                 self.session = Some(session);
                 self.screen = Screen::Editor;
                 self.status.clear();
@@ -487,7 +503,7 @@ impl Render for NativeHome {
                     .child(div().flex().gap_4()
                         .child(button("new", "New encrypted document").on_click(cx.listener(|this,_,_,cx| { this.create=true; this.path.clear(); this.passphrase.zeroize(); this.editing_path=true; this.screen=Screen::Unlock; this.status.clear(); cx.notify(); })))
                         .child(button("open", "Open encrypted document").on_click(cx.listener(|this,_,_,cx| { this.create=false; this.passphrase.zeroize(); this.editing_path=true; this.screen=Screen::Unlock; this.status.clear(); cx.notify(); }))))
-                    .child("Development frontend: IME, accessibility, automatic emergency reaper and GPU scene cleanup are not qualified. Use test documents only.")
+                    .child("Development frontend: IME, accessibility, suspend/USB integration and GPU scene cleanup are not qualified. Use test documents only.")
                     .child(div().text_size(px(12.)).child("12 px · Hamburgefontsiv 0123456789 Il1 O0"))
                     .child(div().text_size(px(24.)).child("24 px · Native-resolution text"));
             }

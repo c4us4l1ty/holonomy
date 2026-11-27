@@ -2,6 +2,9 @@
 //! document glyphs exported as vector geometry rather than framework-owned plaintext strings.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use holonomy_seal::{CanarySet, ReaperGuard, SecretArenas, TripReason, Tripwire};
 
 use holonomy_eye::{raster::FontSet, Fixed, Point, Shaper};
 use holonomy_gui::store::{self, Document, DocumentSink, DocumentSource};
@@ -66,6 +69,29 @@ pub struct Session {
     width: Fixed,
     height: Fixed,
     history: Option<Core>,
+    emergency: Emergency,
+}
+
+// No editor/key pointers are registered while the UI may mutate or reallocate them. A cooperative
+// reaper latches the trip but waits for the UI thread to register quiescent allocations and join.
+struct Emergency {
+    reaper: Option<ReaperGuard>,
+    _canaries: Arc<CanarySet>,
+    arenas: Arc<SecretArenas>,
+    tripwire: Arc<Tripwire>,
+}
+
+impl Emergency {
+    fn new(timeout: Option<Duration>) -> Self {
+        let arenas = SecretArenas::new();
+        let mut canaries = CanarySet::new(8, 256);
+        canaries.arm_all(&arenas);
+        let canaries = Arc::new(canaries);
+        let tripwire = Tripwire::new(timeout);
+        tripwire.beat();
+        let reaper = ReaperGuard::spawn_cooperative(Arc::clone(&arenas), Arc::clone(&canaries), Arc::clone(&tripwire), Duration::from_millis(50));
+        Self { reaper: Some(reaper), _canaries: canaries, arenas, tripwire }
+    }
 }
 
 fn core(
@@ -113,6 +139,7 @@ impl Session {
             width,
             height,
             history: None,
+            emergency: Emergency::new(None),
         })
     }
 
@@ -134,6 +161,8 @@ impl Session {
 
     /// Applies the same intent as the existing frontend. History views cannot mutate storage.
     pub fn apply(&mut self, intent: Intent) -> Result<()> {
+        self.check_live()?;
+        self.emergency.tripwire.beat();
         if let Some(history) = self.history.as_mut() {
             if !matches!(
                 intent,
@@ -156,6 +185,7 @@ impl Session {
 
     /// Commits through the existing authenticated manifest/witness path.
     pub fn save(&mut self) -> Result<()> {
+        self.check_live()?;
         self.editor.flush()?;
         Ok(())
     }
@@ -177,6 +207,7 @@ impl Session {
 
     /// Finds and selects one streaming search result without collecting every match.
     pub fn find(&mut self, needle: &str, index: u64) -> Result<u64> {
+        self.check_live()?;
         let editor = self.history.as_mut().unwrap_or(&mut self.editor);
         let summary = editor.find_nth(needle, index)?;
         if let Some(hit) = summary.selected {
@@ -236,6 +267,7 @@ impl Session {
 
     /// Authenticates the stored world-line without changing the current editor.
     pub fn verify(&self) -> Result<()> {
+        self.check_live()?;
         self.document.verify()?;
         Ok(())
     }
@@ -243,18 +275,40 @@ impl Session {
     /// Volatile-wipes resident editor buffers and unlocked storage keys. The caller must also
     /// discard the GPU scene and its own input buffers; this does not certify GPU memory erasure.
     pub fn wipe(&mut self) -> bool {
-        self.editor.wipe_all_in_place();
-        if let Some(history) = &mut self.history {
-            history.wipe_all_in_place();
-        }
-        let arenas = holonomy_seal::SecretArenas::new();
-        // SAFETY: the UI thread owns the session exclusively and performs the wipe synchronously,
-        // with no document/key operations between registration and completion.
+        let Some(reaper) = self.emergency.reaper.take() else { return self.document.are_keys_zeroized(); };
+        self.emergency.tripwire.fire(TripReason::Manual);
+        let arenas = &self.emergency.arenas;
+        // SAFETY: the UI holds exclusive access, no further document/editor work is performed
+        // until wait_outcome joins the cooperative reaper. Each registered allocation stays live.
         unsafe {
-            self.document.arm_reaper(&arenas);
+            self.document.arm_reaper(arenas);
+            self.editor.set_wipe_registry(Arc::new(holonomy_gui::SealWipeBridge(Arc::clone(arenas))));
+            if let Some(history) = &mut self.history {
+                history.set_wipe_registry(Arc::new(holonomy_gui::SealWipeBridge(Arc::clone(arenas))));
+            }
+            reaper.acknowledge_quiescence();
         }
-        arenas.wipe();
-        self.document.are_keys_zeroized()
+        let outcome = reaper.wait_outcome();
+        self.editor.wipe_all_in_place();
+        if let Some(history) = &mut self.history { history.wipe_all_in_place(); }
+        self.document.are_keys_zeroized() && outcome.is_some_and(|result| result.canaries.ghost_canaries == 0 && result.wipe.bytes_wiped > 0 && result.wipe.arenas_wiped > 0)
+    }
+
+    /// Enables the existing cooperative dead-man watcher. Call before exposing the session.
+    pub fn set_deadman(&mut self, timeout: Duration) -> Result<()> {
+        self.check_live()?;
+        if timeout.is_zero() { return Err("Dead-man timeout must be positive.".into()); }
+        self.emergency = Emergency::new(Some(timeout));
+        Ok(())
+    }
+
+    /// Reports a permanently latched manual/dead-man trip without reading document plaintext.
+    pub fn tripped(&self) -> bool {
+        self.emergency.reaper.is_none() || self.emergency.tripwire.evaluate().is_some()
+    }
+
+    fn check_live(&self) -> Result<()> {
+        if self.tripped() { Err("Session emergency trip is latched; wiping before further access.".into()) } else { Ok(()) }
     }
 
     /// Computes toolbar formatting from the core selection, never from a second document model.
@@ -265,6 +319,7 @@ impl Session {
     /// Copies the explicitly selected plaintext for an explicit clipboard operation only.
     /// The caller owns clipboard disclosure and cleanup policy.
     pub fn selected_text(&mut self) -> Result<zeroize::Zeroizing<String>> {
+        self.check_live()?;
         let editor = self.history.as_mut().unwrap_or(&mut self.editor);
         let (start, end) = editor.selection().normalised();
         if end.saturating_sub(start) > 1024 * 1024 {
@@ -277,6 +332,7 @@ impl Session {
 
     /// Paints positioned outlines directly, preserving the core's shaping/hit-test geometry.
     pub fn frame(&mut self, device_scale: f32) -> Result<VectorFrame> {
+        self.check_live()?;
         let editor = self.history.as_mut().unwrap_or(&mut self.editor);
         let frame = editor.frame()?;
         let picture = frame.picture();
@@ -592,6 +648,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    #[test]
+    fn deadman_latches_before_further_access_and_cooperative_wipe_verifies_keys() {
+        let fixture=Fixture::new();
+        let mut session=fixture.session();
+        session.apply(Intent::Type("uncommitted secret".into())).unwrap();
+        session.set_deadman(Duration::from_millis(10)).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(session.tripped());
+        assert!(session.apply(Intent::Type("must refuse".into())).is_err());
+        assert!(session.save().is_err());
+        assert!(session.wipe());
+        assert!(session.frame(2.).is_err());
     }
 
     #[test]
