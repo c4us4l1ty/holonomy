@@ -126,6 +126,12 @@ jobs:
         # (rustfmt, clippy); the dtolnay action honors that file.
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --all -- --check
+      - name: Report the formatter diff on failure
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff -- crates/ | head -400
+          git checkout -- .
 
   clippy:
     name: clippy
