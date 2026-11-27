@@ -3779,17 +3779,9 @@ fn render_home_cards(
                     if ly + 5 > paper.y + paper.h {
                         break;
                     }
-                    fb.fill_rounded_rect(
-                        Rect::new(
-                            paper.x + 14,
-                            ly,
-                            lw,
-                            if line == 0 { 5 } else { 3 },
-                        ),
-                        2,
-                        if line == 0 { HOME_TAB } else { HOME_FAINT },
-                        paper,
-                    );
+                    let ink = if line == 0 { HOME_TAB } else { HOME_FAINT };
+                    let stroke_h = if line == 0 { 5 } else { 3 };
+                    fb.fill_rounded_rect(Rect::new(paper.x + 14, ly, lw, stroke_h), 2, ink, paper);
                 }
             }
         }
@@ -7119,10 +7111,7 @@ mod tests {
                         }
                     }
                 }
-                assert!(
-                    ink > 400,
-                    "{w}x{h}: folder card painted almost nothing ({ink} px)"
-                );
+                assert!(ink > 400, "{w}x{h}: folder card painted almost nothing ({ink} px)");
             }
         }
     }
