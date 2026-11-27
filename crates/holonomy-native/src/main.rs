@@ -589,10 +589,10 @@ impl Render for NativeHome {
                             },
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.composition_ready() {
-                                    cx.notify();
-                                    return;
-                                }
+                            if !this.composition_ready() {
+                                cx.notify();
+                                return;
+                            }
                             this.editing_path = true;
                             cx.notify();
                         })),
@@ -611,10 +611,10 @@ impl Render for NativeHome {
                             ),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.composition_ready() {
-                                    cx.notify();
-                                    return;
-                                }
+                            if !this.composition_ready() {
+                                cx.notify();
+                                return;
+                            }
                             this.editing_path = false;
                             cx.notify();
                         })),
