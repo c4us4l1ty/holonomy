@@ -40,6 +40,7 @@ fn parse_gui_args(args: &[String]) -> Option<(Option<PathBuf>, Option<Duration>)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    holonomy_gui::platform::declare_dpi_awareness();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.as_slice(), [f] if f == "-h" || f == "--help") {
         println!("{USAGE}");
