@@ -352,6 +352,7 @@ pub struct ScaledWindow {
     logical: (u16, u16),
     pending_resize: Option<(u16, u16)>,
     scratch: Vec<u32>,
+    columns: Vec<(usize, usize, u32)>,
 }
 
 impl ScaledWindow {
@@ -365,6 +366,7 @@ impl ScaledWindow {
             logical,
             pending_resize: None,
             scratch: Vec::new(),
+            columns: Vec::new(),
         }
     }
 
@@ -443,45 +445,69 @@ impl DesktopWindow for ScaledWindow {
         if milli % 1_000 == 0 {
             // Integer scales repeat each logical pixel exactly: text stays crisp at 200%.
             let factor = usize::try_from(milli / 1_000).unwrap_or(1).max(1);
-            for y in 0..usize::from(physical_h) {
-                let sy = (y / factor).min(src_h - 1) * src_w;
-                let dy = y * usize::from(physical_w);
-                for x in 0..usize::from(physical_w) {
-                    self.scratch[dy + x] = pixels[sy + (x / factor).min(src_w - 1)];
+            let physical_stride = usize::from(physical_w);
+            if factor == 1 {
+                // `100%`: the logical framebuffer is already the physical one, so this is a plain
+                // row copy. Keeps the common case out of any per-pixel work at all.
+                let copy_w = physical_stride.min(src_w);
+                for y in 0..usize::from(physical_h) {
+                    let sy = y.min(src_h - 1) * src_w;
+                    let dy = y * physical_stride;
+                    let row = &mut self.scratch[dy..dy + physical_stride];
+                    row[..copy_w].copy_from_slice(&pixels[sy..sy + copy_w]);
+                }
+            } else {
+                for y in 0..usize::from(physical_h) {
+                    let sy = (y / factor).min(src_h - 1) * src_w;
+                    let dy = y * physical_stride;
+                    let row = &mut self.scratch[dy..dy + physical_stride];
+                    for (x, out) in row.iter_mut().enumerate() {
+                        *out = pixels[sy + (x / factor).min(src_w - 1)];
+                    }
                 }
             }
         } else {
             // Non-integer steps use bilinear sampling so glyph edges do not acquire hard,
-            // uneven pixel widths at 125/133/150/175%.
-            let max_x = (src_w - 1) as f64;
-            let max_y = (src_h - 1) as f64;
+            // uneven pixel widths at 125/133/150/175%. Weights are fixed-point (`1/256`) and the
+            // column mapping is computed once per frame, so a keystroke never pays for
+            // per-pixel floating point across the whole window.
+            let physical_stride = usize::from(physical_w);
+            self.columns.clear();
+            self.columns.reserve(physical_stride);
+            for x in 0..physical_stride {
+                let fx = ((x as f64 + 0.5) * 1_000.0 / f64::from(milli) - 0.5)
+                    .clamp(0.0, (src_w - 1) as f64);
+                let x0 = fx as usize;
+                let x1 = (x0 + 1).min(src_w - 1);
+                let weight = ((fx - x0 as f64) * 256.0).round() as u32;
+                self.columns.push((x0, x1, weight.min(256)));
+            }
             for y in 0..usize::from(physical_h) {
-                let fy = ((f64::from(y as u32) + 0.5) * 1_000.0 / f64::from(milli) - 0.5)
-                    .clamp(0.0, max_y);
+                let fy = ((y as f64 + 0.5) * 1_000.0 / f64::from(milli) - 0.5)
+                    .clamp(0.0, (src_h - 1) as f64);
                 let y0 = fy as usize;
                 let y1 = (y0 + 1).min(src_h - 1);
-                let wy = fy - y0 as f64;
-                let dy = y * usize::from(physical_w);
-                for x in 0..usize::from(physical_w) {
-                    let fx = ((f64::from(x as u32) + 0.5) * 1_000.0 / f64::from(milli) - 0.5)
-                        .clamp(0.0, max_x);
-                    let x0 = fx as usize;
-                    let x1 = (x0 + 1).min(src_w - 1);
-                    let wx = fx - x0 as f64;
-                    let p00 = pixels[y0 * src_w + x0];
-                    let p10 = pixels[y0 * src_w + x1];
-                    let p01 = pixels[y1 * src_w + x0];
-                    let p11 = pixels[y1 * src_w + x1];
-                    let mut out = 0u32;
+                let top_weight = 256 - ((fy - y0 as f64) * 256.0).round().min(256.0) as u32;
+                let top_row = &pixels[y0 * src_w..(y0 + 1) * src_w];
+                let bottom_row = &pixels[y1 * src_w..(y1 + 1) * src_w];
+                let dy = y * physical_stride;
+                let out_row = &mut self.scratch[dy..dy + physical_stride];
+                for (out, &(x0, x1, wx)) in out_row.iter_mut().zip(&self.columns) {
+                    let left_weight = 256 - wx;
+                    let p00 = top_row[x0];
+                    let p10 = top_row[x1];
+                    let p01 = bottom_row[x0];
+                    let p11 = bottom_row[x1];
+                    let mut value = 0u32;
                     for shift in [16, 8, 0] {
-                        let top = f64::from((p00 >> shift) & 0xff) * (1.0 - wx)
-                            + f64::from((p10 >> shift) & 0xff) * wx;
-                        let bottom = f64::from((p01 >> shift) & 0xff) * (1.0 - wx)
-                            + f64::from((p11 >> shift) & 0xff) * wx;
-                        let value = (top * (1.0 - wy) + bottom * wy).round() as u32;
-                        out |= (value & 0xff) << shift;
+                        let top = ((p00 >> shift) & 0xff) * left_weight
+                            + ((p10 >> shift) & 0xff) * wx;
+                        let bottom = ((p01 >> shift) & 0xff) * left_weight
+                            + ((p11 >> shift) & 0xff) * wx;
+                        let sample = (top * top_weight + bottom * (256 - top_weight)) >> 16;
+                        value |= (sample & 0xff) << shift;
                     }
-                    self.scratch[dy + x] = out;
+                    *out = value;
                 }
             }
         }
@@ -718,6 +744,35 @@ mod tests {
         assert_eq!(pixels[0], 0x00ff_0000);
         assert_eq!(pixels[1], 0x00ff_0000);
         assert_eq!(pixels[2], 0x0000_00ff);
+    }
+
+    #[test]
+    fn fractional_scale_keeps_flat_areas_exactly_flat() {
+        // Fixed-point weights must sum to exactly 256, otherwise a uniform page would gain
+        // visible banding or drift darker/lighter at 125/133/150/175%.
+        for preset in [125, 133, 150, 175] {
+            let (mut win, presented) = window(UiScale::from_percent(preset));
+            let page = 0x00f7_f8fa;
+            win.present_argb(&[page; 4], 2, 2).expect("present");
+            let presented = presented.borrow();
+            let (pixels, _) = &*presented;
+            assert!(pixels.iter().all(|&px| px == page), "{preset}% drifted");
+        }
+    }
+
+    #[test]
+    fn fractional_scale_keeps_edges_monotonic() {
+        // A black-to-white horizontal ramp must not overshoot or invert after resampling.
+        for preset in [125, 133, 150, 175] {
+            let (mut win, presented) = window(UiScale::from_percent(preset));
+            let ramp: Vec<u32> = (0..64u32).map(|i| (i * 4) << 16).collect();
+            win.present_argb(&ramp, 64, 1).expect("present");
+            let presented = presented.borrow();
+            let (pixels, size) = &*presented;
+            let row = &pixels[..usize::from(size.0)];
+            assert!(row.windows(2).all(|w| w[0] <= w[1]), "{preset}% inverted");
+            assert_eq!(row[0] >> 16, 0, "{preset}% clipped left edge");
+        }
     }
 
     #[test]
