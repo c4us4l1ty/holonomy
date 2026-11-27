@@ -828,11 +828,10 @@ impl FontSet {
         } else {
             1.0
         };
-        let Some(mut outline) = font.outlines.outline(
-            gid,
-            font.face.units_per_em(),
-            logical_px * device_scale,
-        )? else {
+        let Some(mut outline) =
+            font.outlines
+                .outline(gid, font.face.units_per_em(), logical_px * device_scale)?
+        else {
             return Ok(None);
         };
         let factor = logical_px / f32::from(font.face.units_per_em());
