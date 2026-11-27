@@ -339,7 +339,27 @@ pub fn save_ui_scale(scale: UiScale) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, format!("{}\n", scale.percent()));
+    write_owner_only(&path, format!("{}\n", scale.percent()).as_bytes());
+}
+
+/// Writes `bytes` to `file`, readable only by the owner on Unix.
+///
+/// Preferences are small, but they name things (recent document paths, display settings) and live
+/// in a `~/.config` that may be 0755. A plain `fs::write` creates the file with the process umask
+/// — commonly 0644 and world-readable — so these are created through `OpenOptions` with an explicit
+/// mode and never exist with wider access, not even for the instant before a chmod.
+pub fn write_owner_only(file: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    if let Ok(mut handle) = options.open(file) {
+        let _ = handle.write_all(bytes);
+    }
 }
 
 /// Applies [`UiScale`] to an entire native window: the renderer sees a smaller logical viewport,
@@ -786,6 +806,29 @@ mod tests {
                 height: 390
             })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_only_writes_are_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // A temp dir of our own; the helper only needs an existing parent.
+        let dir = std::env::temp_dir().join(format!("holonomy-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("recent.txt");
+        write_owner_only(&file, b"/home/someone/private-project/notes.wavefunction\n");
+        let mode = std::fs::metadata(&file).expect("written").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "preference files must be owner-only, got {mode:o}");
+        // Overwriting must not widen it either.
+        write_owner_only(&file, b"second\n");
+        let mode = std::fs::metadata(&file).expect("rewritten").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("readable"),
+            "second\n",
+            "the rewrite must truncate, not append"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

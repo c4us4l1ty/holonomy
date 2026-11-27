@@ -4230,12 +4230,9 @@ fn sync_recent_paths(target: &Path, remember: bool) {
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(file, format!("{}\n", entries.join("\n")));
+    crate::platform::write_owner_only(&file, format!("{}\n", entries.join("\n")).as_bytes());
 }
 
-/// Interactive graphical passphrase / file-path prompt rendered right inside the window when
-/// `holonomy-gui` is launched without a pre-supplied stdin passphrase (`UI-SPEC.md` §5.1–§5.2).
-#[allow(clippy::too_many_lines)]
 fn prompt_gui_document(
     x11: &mut dyn DesktopWindow,
     fonts: &FontSet,
