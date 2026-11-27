@@ -3351,7 +3351,12 @@ fn render_home(
     // Right-aligned icon row. `...` handles settings; search opens the inline field.
     let icon_y = 18;
     let icon_size = 30;
-    let menu_rect = Rect::new(content.x + content.w - icon_size - 20, icon_y, icon_size, icon_size);
+    let menu_rect = Rect::new(
+        content.x + content.w - icon_size - 20,
+        icon_y,
+        icon_size,
+        icon_size,
+    );
     let search_rect = Rect::new(menu_rect.x - icon_size - 6, icon_y, icon_size, icon_size);
     let view_rect = Rect::new(search_rect.x - icon_size - 6, icon_y, icon_size, icon_size);
     let new_rect = Rect::new(view_rect.x - icon_size - 6, icon_y, icon_size, icon_size);
@@ -3360,7 +3365,11 @@ fn render_home(
     draw_home_view_glyph(
         fb,
         view_rect,
-        if state.list_view { HOME_INK } else { HOME_MUTED },
+        if state.list_view {
+            HOME_INK
+        } else {
+            HOME_MUTED
+        },
         content,
         !state.list_view,
     );
@@ -3828,7 +3837,11 @@ fn render_home_document_cards(
                 card,
                 false,
             );
-            fb.fill_rect_clipped(Rect::new(card.x, y + row_h - 1, row_w, 1), HOME_FAINT, content);
+            fb.fill_rect_clipped(
+                Rect::new(card.x, y + row_h - 1, row_w, 1),
+                HOME_FAINT,
+                content,
+            );
             hits.push((card, HomeHit::Document(idx)));
         }
         return hits;
@@ -3855,17 +3868,7 @@ fn render_home_document_cards(
         // The title is elided to the card's width; the rules under it are the "preview".
         let title_w = card_w - 32;
         let title = home_fit_text(fonts, &entry.name, 940, title_w);
-        draw_home_text(
-            fb,
-            fonts,
-            x + 16,
-            y + 28,
-            &title,
-            940,
-            HOME_INK,
-            card,
-            true,
-        );
+        draw_home_text(fb, fonts, x + 16, y + 28, &title, 940, HOME_INK, card, true);
         let seed = entry.name.len() + idx;
         for line in 0..5i32 {
             let width = ((seed * 17 + line as usize * 37) % 46 + 46) as i32;
