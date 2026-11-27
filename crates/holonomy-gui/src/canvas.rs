@@ -2611,10 +2611,30 @@ fn render_document_sidebar(
     let home_row = Rect::new(x, rect.y + 54, inner, 34);
     fb.fill_rounded_rect(home_row, 8, selection, rect);
     draw_home_folder_icon(fb, x + 12, rect.y + 62, ink, rect);
-    draw_home_text(fb, fonts, x + 38, rect.y + 76, "Home", 880, ink, rect, false);
+    draw_home_text(
+        fb,
+        fonts,
+        x + 38,
+        rect.y + 76,
+        "Home",
+        880,
+        ink,
+        rect,
+        false,
+    );
     hits.push((home_row, DocumentChromeHit::Home));
 
-    draw_home_text(fb, fonts, x, rect.y + 122, "My documents", 760, muted, rect, false);
+    draw_home_text(
+        fb,
+        fonts,
+        x,
+        rect.y + 122,
+        "My documents",
+        760,
+        muted,
+        rect,
+        false,
+    );
 
     let actions_top = rect.y + rect.h - 96;
     let mut sy = rect.y + 144;
@@ -2644,7 +2664,17 @@ fn render_document_sidebar(
         sy += 32;
     }
 
-    draw_home_text(fb, fonts, x, actions_top - 48, "This document", 760, muted, rect, false);
+    draw_home_text(
+        fb,
+        fonts,
+        x,
+        actions_top - 48,
+        "This document",
+        760,
+        muted,
+        rect,
+        false,
+    );
     let doc_row = Rect::new(x, actions_top - 42, inner, 30);
     fb.fill_rounded_rect(doc_row, 7, selection, rect);
     draw_home_text(
@@ -2721,7 +2751,17 @@ fn render_document_breadcrumb(
         draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
         x += 14;
         let folder_shown = home_fit_text(fonts, folder, 840, 180);
-        draw_home_text(fb, fonts, x, baseline, &folder_shown, 840, muted, rect, false);
+        draw_home_text(
+            fb,
+            fonts,
+            x,
+            baseline,
+            &folder_shown,
+            840,
+            muted,
+            rect,
+            false,
+        );
         x += home_text_width(fonts, &folder_shown, 840) + 12;
     }
     draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
@@ -2740,7 +2780,17 @@ fn render_document_breadcrumb(
     );
 
     let find = Rect::new(rect.x + rect.w - 64, rect.y + 6, 48, rect.h - 12);
-    draw_home_text(fb, fonts, find.x + 10, baseline, "Find", 800, muted, find, false);
+    draw_home_text(
+        fb,
+        fonts,
+        find.x + 10,
+        baseline,
+        "Find",
+        800,
+        muted,
+        find,
+        false,
+    );
     hits.push((find, DocumentChromeHit::Find));
     hits
 }
@@ -2795,7 +2845,7 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
         true,
     );
     let col_w = (panel.w - 48) / cols.max(1);
-    let per_col = entry_count.div_ceil(cols.max(1)).max(1);
+    let per_col = ceil_div(entry_count, cols.max(1)).max(1);
     for (i, (key, desc)) in rows.iter().enumerate() {
         let i = i32::try_from(i).unwrap_or(0);
         let rx = panel.x + 24 + (i / per_col) * col_w;
@@ -2804,8 +2854,26 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
         draw_home_text(fb, fonts, rx, ry + 15, desc, 760, muted, panel, false);
     }
     let close = Rect::new(panel.x + panel.w - 44, panel.y + 12, 28, 28);
-    draw_home_text(fb, fonts, close.x + 8, close.y + 20, "\u{00D7}", 940, muted, close, false);
+    draw_home_text(
+        fb,
+        fonts,
+        close.x + 8,
+        close.y + 20,
+        "\u{00D7}",
+        940,
+        muted,
+        close,
+        false,
+    );
     (panel, close)
+}
+
+/// Integer ceiling division for positive operands (`div_ceil` is still unstable for signed
+/// integers on the pinned toolchain).
+fn ceil_div(numerator: i32, denominator: i32) -> i32 {
+    let denominator = denominator.max(1);
+    let numerator = numerator.max(0);
+    (numerator + denominator - 1) / denominator
 }
 
 /// Panel and grid geometry for the shortcut sheet.
@@ -2820,7 +2888,7 @@ fn shortcut_help_geometry(window_w: i32, window_h: i32, entries: i32) -> (Rect, 
     let panel_w = 560.min((window_w - 32).max(280));
     // Two columns need ~250 px each for a key plus its description; below that, one column.
     let cols = if panel_w >= 520 { 2 } else { 1 };
-    let per_col = entries.div_ceil(cols).max(1);
+    let per_col = ceil_div(entries, cols).max(1);
     let panel_h = (HEADER_H + per_col * ROW_H + FOOTER_H).min(window_h - 32);
     let panel = Rect::new(
         (window_w - panel_w).max(16) / 2,
@@ -6878,7 +6946,7 @@ mod tests {
         const ENTRIES: i32 = 14;
         for (w, h) in [(1_120, 780), (1_280, 800), (760, 520), (1_920, 1_080)] {
             let (panel, cols, row_h) = shortcut_help_geometry(w, h, ENTRIES);
-            let per_col = ENTRIES.div_ceil(cols);
+            let per_col = ceil_div(ENTRIES, cols);
             let col_w = (panel.w - 48) / cols;
             for i in 0..ENTRIES {
                 let col = i / per_col;
