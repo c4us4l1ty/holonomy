@@ -297,89 +297,7 @@ impl Session {
                 height: caret.height.to_f32(),
             });
         }
-        for line in frame.layout().lines() {
-            let clusters = line.clusters();
-            let mut start = 0;
-            while start < clusters.len() {
-                let style = clusters[start].style;
-                let mut end = start + 1;
-                while end < clusters.len() && clusters[end].style == style {
-                    end += 1;
-                }
-                let run = &clusters[start..end];
-                let rtl = run.len() >= 2 && run[0].byte > run[run.len() - 1].byte;
-                let slices: Vec<&str> = if rtl {
-                    run.iter().rev().map(|c| c.text).collect()
-                } else {
-                    run.iter().map(|c| c.text).collect()
-                };
-                let baseline = line.top().to_f32() + self.fonts.ascent(style).to_f32();
-                let mut last_cluster = usize::MAX;
-                let mut pen = 0.;
-                for (variant, glyph) in self.fonts.shape_run(&slices, style) {
-                    if glyph.cluster >= run.len() {
-                        continue;
-                    }
-                    if glyph.cluster != last_cluster {
-                        last_cluster = glyph.cluster;
-                        pen = 0.;
-                    }
-                    let span = glyph.cluster_span.max(1).min(run.len() - glyph.cluster);
-                    let visual = if rtl {
-                        run.len() - (glyph.cluster + span)
-                    } else {
-                        glyph.cluster
-                    };
-                    let x = run[visual].x.to_f32()
-                        + pen
-                        + self
-                            .fonts
-                            .scale_units(variant, glyph.x_offset, style)
-                            .to_f32();
-                    let y = baseline
-                        - self
-                            .fonts
-                            .scale_units(variant, glyph.y_offset, style)
-                            .to_f32();
-                    if let Some(mut outline) =
-                        self.fonts
-                            .vector_glyph(variant, glyph.glyph_id, style, device_scale)?
-                    {
-                        for contour in &mut outline.contours {
-                            for point in contour {
-                                point.0 += x;
-                                point.1 = y - point.1;
-                            }
-                        }
-                        output.glyphs.push(VectorGlyph {
-                            contours: outline.contours,
-                        });
-                    }
-                    pen += self
-                        .fonts
-                        .scale_units(variant, glyph.x_advance, style)
-                        .to_f32();
-                }
-                let width = (run.last().unwrap().end() - run[0].x).to_f32();
-                if style.is_underline() {
-                    output.decorations.push(BoxRect {
-                        x: run[0].x.to_f32(),
-                        y: baseline + 2.,
-                        width,
-                        height: 1.,
-                    });
-                }
-                if style.is_strikethrough() {
-                    output.decorations.push(BoxRect {
-                        x: run[0].x.to_f32(),
-                        y: baseline - self.fonts.ascent(style).to_f32() / 3.,
-                        width,
-                        height: 1.,
-                    });
-                }
-                start = end;
-            }
-        }
+        append_layout(&mut output, frame.layout(), &self.fonts, device_scale, self.height.to_f32())?;
         Ok(output)
     }
 
@@ -532,5 +450,175 @@ mod tests {
         assert_eq!(fixed(f32::INFINITY), Fixed::ZERO);
         assert_eq!(fixed(1.5), Fixed::from_64ths(96));
         assert_eq!(fixed(-1.5), Fixed::from_64ths(-96));
+    }
+}
+
+/// Produces vector geometry for a bounded sensitive input field without using GPUI text caches.
+pub fn vector_text(fonts: &FontSet, text: &str, width: f32, device_scale: f32) -> Result<VectorFrame> {
+    let layout = holonomy_eye::layout_window(text, 0, fixed(width.max(40.)), fonts);
+    let mut output = VectorFrame::default();
+    append_layout(&mut output, &layout, fonts, device_scale, 80.)?;
+    if let Some(caret) = layout.paint_point(text.len() as u64) {
+        output.caret = Some(BoxRect { x: caret.x.to_f32(), y: caret.top.to_f32(), width: 1., height: caret.height.to_f32() });
+    }
+    Ok(output)
+}
+
+fn append_layout(output: &mut VectorFrame, layout: &holonomy_eye::Layout<'_>, fonts: &FontSet, device_scale: f32, visible_height: f32) -> Result<()> {
+        for line in layout.lines() {
+            if line.top().to_f32() >= visible_height || (line.top() + line.height()).to_f32() <= 0. { continue; }
+            let clusters = line.clusters();
+            let mut start = 0;
+            while start < clusters.len() {
+                let style = clusters[start].style;
+                let mut end = start + 1;
+                while end < clusters.len() && clusters[end].style == style {
+                    end += 1;
+                }
+                let run = &clusters[start..end];
+                let rtl = run.len() >= 2 && run[0].byte > run[run.len() - 1].byte;
+                let slices: Vec<&str> = if rtl {
+                    run.iter().rev().map(|c| c.text).collect()
+                } else {
+                    run.iter().map(|c| c.text).collect()
+                };
+                let baseline = line.top().to_f32() + fonts.ascent(style).to_f32();
+                let mut last_cluster = usize::MAX;
+                let mut pen = 0.;
+                for (variant, glyph) in fonts.shape_run(&slices, style) {
+                    if glyph.cluster >= run.len() {
+                        continue;
+                    }
+                    if glyph.cluster != last_cluster {
+                        last_cluster = glyph.cluster;
+                        pen = 0.;
+                    }
+                    let span = glyph.cluster_span.max(1).min(run.len() - glyph.cluster);
+                    let visual = if rtl {
+                        run.len() - (glyph.cluster + span)
+                    } else {
+                        glyph.cluster
+                    };
+                    let x = run[visual].x.to_f32()
+                        + pen
+                        + fonts.scale_units(variant, glyph.x_offset, style)
+                            .to_f32();
+                    let y = baseline
+                        - fonts.scale_units(variant, glyph.y_offset, style)
+                            .to_f32();
+                    if let Some(mut outline) =
+                        fonts
+                            .vector_glyph(variant, glyph.glyph_id, style, device_scale)?
+                    {
+                        for contour in &mut outline.contours {
+                            for point in contour {
+                                point.0 += x;
+                                point.1 = y - point.1;
+                            }
+                        }
+                        output.glyphs.push(VectorGlyph {
+                            contours: outline.contours,
+                        });
+                    }
+                    pen += fonts.scale_units(variant, glyph.x_advance, style)
+                        .to_f32();
+                }
+                let width = (run.last().unwrap().end() - run[0].x).to_f32();
+                if style.is_underline() {
+                    output.decorations.push(BoxRect {
+                        x: run[0].x.to_f32(),
+                        y: baseline + 2.,
+                        width,
+                        height: 1.,
+                    });
+                }
+                if style.is_strikethrough() {
+                    output.decorations.push(BoxRect {
+                        x: run[0].x.to_f32(),
+                        y: baseline - fonts.ascent(style).to_f32() / 3.,
+                        width,
+                        height: 1.,
+                    });
+                }
+                start = end;
+            }
+        }
+    Ok(())
+}
+
+/// Fixed-capacity, zeroizing UTF-8 input. Edits never reallocate a passphrase buffer and deleting
+/// a character immediately clears its old bytes. No Debug/Display implementation exposes it.
+pub struct SecretInput {
+    storage: zeroize::Zeroizing<Vec<u8>>,
+    len: usize,
+}
+
+impl Default for SecretInput {
+    fn default() -> Self { Self { storage: zeroize::Zeroizing::new(vec![0; 4096]), len: 0 } }
+}
+
+impl SecretInput {
+    /// Appends valid UTF-8 if it fits, leaving the old value unchanged on refusal.
+    pub fn push_str(&mut self, text: &str) -> bool {
+        let Some(end) = self.len.checked_add(text.len()).filter(|&end| end <= self.storage.len()) else { return false; };
+        self.storage[self.len..end].copy_from_slice(text.as_bytes()); self.len=end; true
+    }
+    /// Removes the final Unicode scalar and overwrites the removed bytes immediately.
+    pub fn pop(&mut self) {
+        if let Some((at,_)) = self.char_indices().next_back() {
+            self.storage[at..self.len].zeroize(); self.len=at;
+        }
+    }
+}
+
+impl std::ops::Deref for SecretInput {
+    type Target = str;
+    fn deref(&self) -> &str { std::str::from_utf8(&self.storage[..self.len]).expect("SecretInput accepts only valid UTF-8") }
+}
+
+impl Zeroize for SecretInput {
+    fn zeroize(&mut self) { self.storage.as_mut_slice().zeroize(); self.len=0; }
+}
+
+/// Maps an exact UTF-16 range to UTF-8 byte boundaries, refusing split surrogate pairs and
+/// out-of-bounds OS requests rather than slicing a code point or guessing a document offset.
+pub fn utf16_range_bytes(text: &str, range: std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+    fn boundary(text: &str, target: usize) -> Option<usize> {
+        let mut units=0;
+        for (byte,ch) in text.char_indices() {
+            if units==target { return Some(byte); }
+            units+=ch.len_utf16();
+            if units>target { return None; }
+        }
+        (units==target).then_some(text.len())
+    }
+    if range.start>range.end { return None; }
+    Some(boundary(text,range.start)?..boundary(text,range.end)?)
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    #[test]
+    fn secret_input_never_reallocates_and_clears_deleted_bytes() {
+        let mut input=SecretInput::default();
+        let ptr=input.storage.as_ptr();
+        assert!(input.push_str("a😀é"));
+        input.pop(); assert_eq!(&*input,"a😀");
+        assert!(input.storage[input.len..].iter().all(|&b| b==0));
+        input.pop(); assert_eq!(&*input,"a");
+        assert!(!input.push_str(&"x".repeat(4096)));
+        assert_eq!(&*input,"a"); assert_eq!(ptr,input.storage.as_ptr());
+        input.zeroize(); assert!(input.is_empty()); assert!(input.storage.iter().all(|&b| b==0));
+    }
+    #[test]
+    fn utf16_ranges_never_split_surrogates_or_accept_reversed_offsets() {
+        assert_eq!(utf16_range_bytes("a😀é",1..3),Some(1..5));
+        assert_eq!(utf16_range_bytes("a😀é",2..3),None);
+        assert_eq!(utf16_range_bytes("a😀é",3..4),Some(5..7));
+        assert_eq!(utf16_range_bytes("a😀é",0..5),None);
+        assert_eq!(utf16_range_bytes("",0..0),Some(0..0));
+        let start=3; let end=1;
+        assert_eq!(utf16_range_bytes("test",start..end),None);
     }
 }
