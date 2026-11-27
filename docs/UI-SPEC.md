@@ -221,3 +221,19 @@ In-tree guards: `canvas::tests::quiet_chrome_tokens_match_the_drift_guarded_page
 `canvas::tests::chrome_reserves_page_space_without_moving_the_hit_test_origin`,
 `canvas::tests::document_sidebar_uses_metadata_only_and_paints_inside_its_rect`, and
 `canvas::tests::home_sidebar_plus_is_not_swallowed_by_the_library_row`.
+
+### 10.1 Dark paper
+
+The tokens in §10 are sampled from quiet.md's **light** Home screen. They are correct over
+`QUIET_MD_THEME.bg_body` and wrong over `QUIET_MD_DARK_THEME.bg_body` (`#1A1A19`): `#1f2225` ink on
+that paper measures 1.09:1, which is not text. Anything painted over the page theme therefore
+selects ink through the `ink_for` / `muted_ink_for` / `accent_ink_for` / `faint_for` /
+`soft_fill_for` / `selection_for` helpers in `holonomy-gui/src/canvas.rs`, which resolve to the
+§10 tokens on light paper and to the theme's own `text` / `text_caption` / `line_border` /
+`code_bg` tokens on dark paper. The rail's frosted gradient is likewise light-paper only; dark
+paper paints `code_gutter` instead, because approximating quiet.md's blurred wallpaper would mean
+reading the user's desktop, which §10 already refuses.
+
+`chrome_ink_stays_readable_on_both_papers` fails if either paper drops below 7:1 (primary),
+4:1 (caption) or 3:1 (accent) contrast.
+

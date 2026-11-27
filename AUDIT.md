@@ -68,6 +68,48 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-27 — D-101 — Bug hunt across the D-100 chrome: two user-visible defects and three latent ones.**
+  After D-100 landed on `main`, the whole app was re-read for defects rather than only the new
+  lines. CI was green throughout, so every finding below is a runtime/logic defect rather than a
+  build failure, and each got a regression test instead of a prose claim.
+  - **The shortcut sheet showed 4 of its 14 entries.** `render_shortcut_help` placed seven rows in
+    *two columns of `268 px`* inside a `560 px` panel, so ten entries were painted outside the
+    panel's clip and silently dropped. The grid is now derived from the panel width by
+    `shortcut_help_geometry` (one column below `520 px`, two above), and the sheet returns both its
+    panel and close rect. Pinned by `shortcut_sheet_shows_every_entry_inside_its_panel` at four
+    window sizes.
+  - **Chrome ink was invisible on dark paper.** The D-100 rail, breadcrumb and sheet reused
+    Home's *light* tokens (`HOME_INK #1f2225`, `HOME_MUTED`, `HOME_FAINT`, `HOME_SELECTION`,
+    `HOME_WASH`) over `QUIET_MD_DARK_THEME.bg_body #1a1a19` — a measured **1.09:1** contrast, i.e.
+    the folder rail was effectively blank in dark mode. All writing-view chrome now selects ink
+    through `ink_for`/`muted_ink_for`/`accent_ink_for`/`faint_for`/`soft_fill_for`/`selection_for`;
+    light paper still resolves to exactly the quoted quiet.md tokens. Pinned by
+    `chrome_ink_stays_readable_on_both_papers` (WCAG ratios, both themes) and
+    `dark_paper_rail_paints_inside_its_rect`.
+  - **The sheet was pointer-modal but not keyboard-modal.** With it open, typed characters reached
+    `app.press(...)` and edited the document underneath; the rail's `Shortcuts` row could also be
+    toggled shut over a live find/link bar. The sheet now swallows every key except `Esc`,
+    `Ctrl /`, and `Ctrl Q`/`Ctrl C` (quit, matching the pointer-modal behaviour), and opening it
+    from either the rail or `Ctrl /` clears an anchored find/link bar first.
+  - **New documents from the rail landed outside the library.** Home's `+` suggests a unique path
+    inside `HOLONOMY_NOTES_DIR`; the writing view's equivalent fell back to `notes.wavefunction`
+    in the process working directory, which Home then could not see. Both now share
+    `home_new_document_path(&home_library_root())`.
+  - **Documentation debt:** the Home token block carried two stacked doc comments (a `///` block
+    followed by `//`), which reads as a stray comment on the constant; it is one block now.
+  - **Also restored: `Ctrl+/` in the README.** D-100 removed that row from `README.md`'s shortcut
+    list while keeping the sheet, so the documented set and the shipped set disagreed; the README
+    documents it again.
+  - **Kept as designed:** the rail's gradient stays light-paper only — reading the user's wallpaper
+    to emulate quiet.md's real frosted glass would be an OS-surface dependency with no security
+    benefit — so dark paper paints the theme's own chrome colour instead (`docs/UI-SPEC.md` §10.1).
+  - **Found and deliberately not changed — `⋯` overflow menu can drop rows.** When the window is
+    too short for every collapsed toolbar action, the packing loop `break`s and the remaining
+    actions have no pointer target for that frame (`Scale`/theme/motion stay reachable by shortcut,
+    and undo/redo by `Ctrl Z`/`Ctrl Y`). Fixing it means re-deriving the menu height from actual
+    row packing, which cannot be verified in this sandbox (no Rust toolchain, no display), so it is
+    recorded here rather than shipped as an unexercised layout rewrite.
+
 - **2026-11-27 — D-100 — quiet.md chrome parity in both views, with the laws kept load-bearing.**
   The user asked for the UI of [`s1dashu/quiet-md`](https://github.com/s1dashu/quiet-md) across
   the writing view *and* Home, and asked explicitly that security and resource usage not be

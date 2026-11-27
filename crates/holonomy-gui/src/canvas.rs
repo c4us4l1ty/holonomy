@@ -1134,20 +1134,25 @@ fn draw_toolbar_button(
     if !disabled {
         match highlight {
             ButtonHighlight::Active => {
-                fb.fill_rounded_rect(rect, 7, HOME_WASH, clip);
-                fb.stroke_rounded_rect(rect, 7, Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 55), clip);
+                // `D-101`: an active pill used the light Home wash over dark paper, which read
+                // as a grey smudge; the wash follows the paper theme now.
+                let (fill, border) = if is_dark_theme(theme) {
+                    (
+                        Rgba8::rgba_pct(0x7a, 0xb0, 0xff, 18),
+                        Rgba8::rgba_pct(0x7a, 0xb0, 0xff, 55),
+                    )
+                } else {
+                    (HOME_WASH, Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 55))
+                };
+                fb.fill_rounded_rect(rect, 7, fill, clip);
+                fb.stroke_rounded_rect(rect, 7, border, clip);
             }
             ButtonHighlight::Mixed => {
                 fb.fill_rounded_rect(rect, 7, theme.code_bg, clip);
                 fb.stroke_rounded_rect(rect, 7, theme.line_border, clip);
             }
             ButtonHighlight::Off => {
-                let neutral = if is_dark_theme(theme) {
-                    Rgba8::rgb(0x2a, 0x2a, 0x29)
-                } else {
-                    HOME_CARD
-                };
-                fb.fill_rounded_rect(rect, 7, neutral, clip);
+                fb.fill_rounded_rect(rect, 7, soft_fill_for(theme), clip);
             }
         }
     }
@@ -2422,10 +2427,14 @@ where
 
 /// Visual tokens for the Home shell. They mirror the calm, low-contrast palette of the
 /// `quiet-md` inspiration while staying independent of the document parity theme.
-// Chrome palette quoted from quiet.md's own theme tokens where they exist (caret ink and
-// caption ink are `QUIET_MD_THEME.caret`/`.text_caption`); the frosted gradient is sampled from
-// its Home screenshot because the sidebar paints over the user's wallpaper, which this surface
-// cannot and must not read. No document plaintext enters any of these colours.
+///
+/// Chrome palette is quoted from quiet.md's own theme tokens where they exist (caret ink and
+/// caption ink are `QUIET_MD_THEME.caret`/`.text_caption`); the frosted gradient is sampled from
+/// its Home screenshot because the sidebar paints over the user's wallpaper, which this surface
+/// cannot and must not read. No document plaintext enters any of these colours.
+///
+/// These are *light* tokens. Anything painted over the page theme must go through
+/// [`ink_for`]/[`muted_ink_for`]/[`accent_ink_for`]/[`faint_for`]/[`soft_fill_for`] instead.
 const HOME_SIDE_TOP: Rgba8 = Rgba8::rgb(0xc2, 0xd9, 0xea);
 const HOME_SIDE_BOTTOM: Rgba8 = Rgba8::rgb(0xd8, 0xe4, 0xd6);
 const HOME_CANVAS_BG: Rgba8 = Rgba8::rgb(0xff, 0xff, 0xff);
@@ -2443,6 +2452,72 @@ const HOME_SIDEBAR_W: i32 = 216;
 const HOME_CARD_MIN_W: i32 = 208;
 const HOME_CARD_H: i32 = 196;
 const HOME_GAP: i32 = 20;
+
+/// Chrome ink for surfaces that are painted over the *page* theme rather than over Home's fixed
+/// white library (`D-101`). The Home palette above is quoted from quiet.md's light Home screen,
+/// so reusing `HOME_INK` on `#1A1A19` dark paper produced ink at 1.09:1 contrast — effectively
+/// invisible. Every writing-view surface selects ink through these helpers instead.
+const HOME_ACCENT_ON_DARK: Rgba8 = Rgba8::rgb(0x7a, 0xb0, 0xff);
+
+/// Primary chrome ink for `theme`'s paper.
+#[inline]
+const fn ink_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        theme.text
+    } else {
+        HOME_INK
+    }
+}
+
+/// Secondary/caption chrome ink for `theme`'s paper.
+#[inline]
+const fn muted_ink_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        theme.text_caption
+    } else {
+        HOME_MUTED
+    }
+}
+
+/// Accent (shortcut keys, links) ink with enough contrast on `theme`'s paper.
+#[inline]
+const fn accent_ink_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        HOME_ACCENT_ON_DARK
+    } else {
+        HOME_ACCENT
+    }
+}
+
+/// Hairline/border token for `theme`'s paper.
+#[inline]
+const fn faint_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        theme.line_border
+    } else {
+        HOME_FAINT
+    }
+}
+
+/// Soft control fill (tabs, inactive pills) for `theme`'s paper.
+#[inline]
+const fn soft_fill_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        theme.code_bg
+    } else {
+        HOME_CARD
+    }
+}
+
+/// Selected-row / raised-control wash for `theme`'s paper.
+#[inline]
+const fn selection_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        Rgba8::rgba_pct(0xff, 0xff, 0xff, 10)
+    } else {
+        HOME_SELECTION
+    }
+}
 
 /// Everything the writing-view chrome may show: file names and folder names only. The type
 /// deliberately has no `Document`, `Spine`, `SegmentSource` or `String` of document bytes, so
@@ -2487,9 +2562,14 @@ fn document_chrome_data(doc_path: &Path, folders: Vec<String>) -> DocumentChrome
 
 /// Draws the quiet.md-style folder rail beside the page. Paint stays inside `rect`; the only
 /// text drawn comes from [`DocumentChromeData`], which carries metadata, never document bytes.
+///
+/// The rail keeps quiet.md's frosted wash on light paper (`D-101`: the wash is quoted from the
+/// light Home screenshot). On dark paper it would be a bright slab next to `#1A1A19`, so it uses
+/// the theme's own chrome colours there and every ink token follows the paper underneath.
 fn render_document_sidebar(
     fb: &mut FrameBuffer,
     fonts: &FontSet,
+    theme: PageTheme,
     rect: Rect,
     data: &DocumentChromeData,
 ) -> Vec<(Rect, DocumentChromeHit)> {
@@ -2497,10 +2577,20 @@ fn render_document_sidebar(
     if rect.w <= 0 || rect.h <= 0 {
         return hits;
     }
-    fb.fill_vertical_gradient(rect, HOME_SIDE_TOP, HOME_SIDE_BOTTOM, rect);
+    let dark = is_dark_theme(&theme);
+    let ink = ink_for(&theme);
+    let muted = muted_ink_for(&theme);
+    let accent = accent_ink_for(&theme);
+    let faint = faint_for(&theme);
+    let selection = selection_for(&theme);
+    if dark {
+        fb.fill_rect_clipped(rect, theme.code_gutter, rect);
+    } else {
+        fb.fill_vertical_gradient(rect, HOME_SIDE_TOP, HOME_SIDE_BOTTOM, rect);
+    }
     fb.fill_rect_clipped(
         Rect::new(rect.x + rect.w - 1, rect.y, 1, rect.h),
-        HOME_FAINT,
+        faint,
         rect,
     );
 
@@ -2513,14 +2603,14 @@ fn render_document_sidebar(
         rect.y + 32,
         &home_fit_text(fonts, &data.library_label, 940, inner),
         940,
-        HOME_INK,
+        ink,
         rect,
         true,
     );
 
     let home_row = Rect::new(x, rect.y + 54, inner, 34);
-    fb.fill_rounded_rect(home_row, 8, HOME_SELECTION, rect);
-    draw_home_folder_icon(fb, x + 12, rect.y + 62, HOME_INK, rect);
+    fb.fill_rounded_rect(home_row, 8, selection, rect);
+    draw_home_folder_icon(fb, x + 12, rect.y + 62, ink, rect);
     draw_home_text(
         fb,
         fonts,
@@ -2528,7 +2618,7 @@ fn render_document_sidebar(
         rect.y + 76,
         "Home",
         880,
-        HOME_INK,
+        ink,
         rect,
         false,
     );
@@ -2541,7 +2631,7 @@ fn render_document_sidebar(
         rect.y + 122,
         "My documents",
         760,
-        HOME_MUTED,
+        muted,
         rect,
         false,
     );
@@ -2553,7 +2643,12 @@ fn render_document_sidebar(
             break;
         }
         let row = Rect::new(x, sy - 8, inner, 30);
-        draw_home_folder_icon(fb, x + 12, sy - 4, HOME_INK, rect);
+        let active = data.folder_label.as_deref() == Some(folder.as_str());
+        if active {
+            fb.fill_rounded_rect(row, 7, selection, rect);
+        }
+        let icon_ink = if active { accent } else { muted };
+        draw_home_folder_icon(fb, x + 12, sy - 4, icon_ink, rect);
         draw_home_text(
             fb,
             fonts,
@@ -2561,7 +2656,7 @@ fn render_document_sidebar(
             sy + 12,
             &home_fit_text(fonts, folder, 820, inner - 48),
             820,
-            HOME_INK,
+            ink,
             rect,
             false,
         );
@@ -2576,12 +2671,12 @@ fn render_document_sidebar(
         actions_top - 48,
         "This document",
         760,
-        HOME_MUTED,
+        muted,
         rect,
         false,
     );
     let doc_row = Rect::new(x, actions_top - 42, inner, 30);
-    fb.fill_rounded_rect(doc_row, 7, HOME_SELECTION, rect);
+    fb.fill_rounded_rect(doc_row, 7, selection, rect);
     draw_home_text(
         fb,
         fonts,
@@ -2589,7 +2684,7 @@ fn render_document_sidebar(
         actions_top - 22,
         &home_fit_text(fonts, &data.document_label, 820, inner - 24),
         820,
-        HOME_INK,
+        ink,
         rect,
         true,
     );
@@ -2604,24 +2699,15 @@ fn render_document_sidebar(
         ),
     ] {
         let row = Rect::new(x, baseline - 20, inner, 28);
-        draw_home_text(
-            fb,
-            fonts,
-            x + 8,
-            baseline,
-            label,
-            760,
-            HOME_INK,
-            rect,
-            false,
-        );
+        draw_home_text(fb, fonts, x + 8, baseline, label, 760, ink, rect, false);
         hits.push((row, hit));
     }
     hits
 }
 
-/// Breadcrumb row above the page: library › folder › file, plus a quiet search affordance.
-/// It is built from the path's metadata only; the page itself stays under [`PixelSurface`].
+/// Breadcrumb row above the page: library \u{203A} folder \u{203A} file, plus a quiet search
+/// affordance. It is built from the path's metadata only; the page itself stays under
+/// [`PixelSurface`]. Inks follow the active paper theme (`D-101`).
 fn render_document_breadcrumb(
     fb: &mut FrameBuffer,
     fonts: &FontSet,
@@ -2633,6 +2719,8 @@ fn render_document_breadcrumb(
     if rect.w <= 0 || rect.h <= 0 {
         return hits;
     }
+    let ink = ink_for(&theme);
+    let muted = muted_ink_for(&theme);
     fb.fill_rect_clipped(rect, theme.bg_body, rect);
     fb.fill_rect_clipped(
         Rect::new(rect.x, rect.y + rect.h - 1, rect.w, 1),
@@ -2649,7 +2737,7 @@ fn render_document_breadcrumb(
         baseline,
         &home_fit_text(fonts, &data.library_label, 840, 180),
         840,
-        HOME_MUTED,
+        muted,
         rect,
         false,
     );
@@ -2660,9 +2748,7 @@ fn render_document_breadcrumb(
     x += home_w + 12;
 
     if let Some(folder) = &data.folder_label {
-        draw_home_text(
-            fb, fonts, x, baseline, "\u{203A}", 840, HOME_MUTED, rect, false,
-        );
+        draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
         x += 14;
         let folder_shown = home_fit_text(fonts, folder, 840, 180);
         draw_home_text(
@@ -2672,15 +2758,13 @@ fn render_document_breadcrumb(
             baseline,
             &folder_shown,
             840,
-            HOME_MUTED,
+            muted,
             rect,
             false,
         );
         x += home_text_width(fonts, &folder_shown, 840) + 12;
     }
-    draw_home_text(
-        fb, fonts, x, baseline, "\u{203A}", 840, HOME_MUTED, rect, false,
-    );
+    draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
     x += 14;
     let space = (rect.x + rect.w - 108 - x).max(0);
     draw_home_text(
@@ -2690,7 +2774,7 @@ fn render_document_breadcrumb(
         baseline,
         &home_fit_text(fonts, &data.document_label, 900, space),
         900,
-        HOME_INK,
+        ink,
         rect,
         true,
     );
@@ -2703,7 +2787,7 @@ fn render_document_breadcrumb(
         baseline,
         "Find",
         800,
-        HOME_MUTED,
+        muted,
         find,
         false,
     );
@@ -2713,30 +2797,19 @@ fn render_document_breadcrumb(
 
 /// Static shortcut sheet. It holds no document text and no live state, so it cannot add a
 /// plaintext exposure or an idle repaint; it is painted only on the frame that opens it.
-fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme) -> Rect {
+///
+/// `D-101`: the first layout placed seven rows in two columns of `268 px` inside a `560 px`
+/// panel, so ten of the fourteen entries were painted outside the panel and clipped away entirely
+/// (the user-visible sheet listed four shortcuts). The grid is now derived from the panel width
+/// and the row count, so it cannot silently overflow again.
+fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme) -> (Rect, Rect) {
     let w = i32::from(fb.width);
     let h = i32::from(fb.height);
     let full = Rect::new(0, 0, w, h);
-    fb.fill_rect_clipped(full, Rgba8::rgba_pct(0x00, 0x00, 0x00, 22), full);
-    let panel = Rect::new(
-        (w - 560).max(16) / 2,
-        (h - 420).max(16) / 2,
-        560.min(w - 32),
-        420.min(h - 32),
-    );
-    fb.fill_rounded_rect(panel, 16, theme.bg_body, full);
-    fb.stroke_rounded_rect(panel, 16, theme.line_border, full);
-    draw_home_text(
-        fb,
-        fonts,
-        panel.x + 24,
-        panel.y + 38,
-        "Keyboard shortcuts",
-        1_020,
-        HOME_INK,
-        panel,
-        true,
-    );
+    let ink = ink_for(&theme);
+    let muted = muted_ink_for(&theme);
+    let accent = accent_ink_for(&theme);
+
     let rows: [(&str, &str); 14] = [
         ("Ctrl Z / Y", "Undo / redo"),
         ("Ctrl A", "Select all"),
@@ -2753,13 +2826,32 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
         ("Ctrl /", "This sheet"),
         ("Ctrl Q", "Save and quit"),
     ];
+
+    fb.fill_rect_clipped(full, Rgba8::rgba_pct(0x00, 0x00, 0x00, 22), full);
+    // A fixed `&'static` array of 14 entries can never exceed `i32`.
+    let entry_count = i32::try_from(rows.len()).unwrap_or(i32::MAX);
+    let (panel, cols, row_h) = shortcut_help_geometry(w, h, entry_count);
+    fb.fill_rounded_rect(panel, 16, theme.bg_body, full);
+    fb.stroke_rounded_rect(panel, 16, theme.line_border, full);
+    draw_home_text(
+        fb,
+        fonts,
+        panel.x + 24,
+        panel.y + 38,
+        "Keyboard shortcuts",
+        1_020,
+        ink,
+        panel,
+        true,
+    );
+    let col_w = (panel.w - 48) / cols.max(1);
+    let per_col = ceil_div(entry_count, cols.max(1)).max(1);
     for (i, (key, desc)) in rows.iter().enumerate() {
-        let row = i / 7;
-        let col = i % 7;
-        let rx = panel.x + 24 + col as i32 * 268;
-        let ry = panel.y + 84 + row as i32 * 36;
-        draw_home_text(fb, fonts, rx, ry, key, 780, HOME_ACCENT, panel, true);
-        draw_home_text(fb, fonts, rx, ry + 16, desc, 760, HOME_MUTED, panel, false);
+        let i = i32::try_from(i).unwrap_or(0);
+        let rx = panel.x + 24 + (i / per_col) * col_w;
+        let ry = panel.y + 84 + (i % per_col) * row_h;
+        draw_home_text(fb, fonts, rx, ry, key, 780, accent, panel, true);
+        draw_home_text(fb, fonts, rx, ry + 15, desc, 760, muted, panel, false);
     }
     let close = Rect::new(panel.x + panel.w - 44, panel.y + 12, 28, 28);
     draw_home_text(
@@ -2769,11 +2861,42 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
         close.y + 20,
         "\u{00D7}",
         940,
-        HOME_MUTED,
+        muted,
         close,
         false,
     );
-    close
+    (panel, close)
+}
+
+/// Integer ceiling division for positive operands (`div_ceil` is still unstable for signed
+/// integers on the pinned toolchain).
+fn ceil_div(numerator: i32, denominator: i32) -> i32 {
+    let denominator = denominator.max(1);
+    let numerator = numerator.max(0);
+    (numerator + denominator - 1) / denominator
+}
+
+/// Panel and grid geometry for the shortcut sheet.
+///
+/// The original layout hard-coded seven `268 px` columns inside a `560 px` panel, so ten of the
+/// fourteen entries were painted outside the panel and clipped (`D-101`). Deriving the grid from
+/// the panel width means a layout change cannot silently drop entries again.
+fn shortcut_help_geometry(window_w: i32, window_h: i32, entries: i32) -> (Rect, i32, i32) {
+    const ROW_H: i32 = 34;
+    const HEADER_H: i32 = 84;
+    const FOOTER_H: i32 = 24;
+    let panel_w = 560.min((window_w - 32).max(280));
+    // Two columns need ~250 px each for a key plus its description; below that, one column.
+    let cols = if panel_w >= 520 { 2 } else { 1 };
+    let per_col = ceil_div(entries, cols).max(1);
+    let panel_h = (HEADER_H + per_col * ROW_H + FOOTER_H).min(window_h - 32);
+    let panel = Rect::new(
+        (window_w - panel_w).max(16) / 2,
+        (window_h - panel_h).max(16) / 2,
+        panel_w,
+        panel_h,
+    );
+    (panel, cols, ROW_H)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4573,6 +4696,7 @@ fn run_document_session(
                 sidebar_hits = render_document_sidebar(
                     fb,
                     &chrome_fonts,
+                    theme,
                     Rect::new(0, bar_h, sw, i32::from(ch) - bar_h - STATUS_BAR_HEIGHT_PX),
                     &chrome_data,
                 );
@@ -4717,11 +4841,9 @@ fn run_document_session(
             render_status_strip(app.surface_mut(), &left, &right);
             if show_help {
                 let fonts = app.surface().fonts().clone();
-                help_close = Some(render_shortcut_help(
-                    app.surface_mut().framebuffer_mut(),
-                    &fonts,
-                    theme,
-                ));
+                help_close = Some(
+                    render_shortcut_help(app.surface_mut().framebuffer_mut(), &fonts, theme).1,
+                );
             } else {
                 help_close = None;
             }
@@ -4953,7 +5075,13 @@ fn run_document_session(
                                     verified_at = verified_segments.map(|_| Instant::now());
                                 }
                             }
-                            DocumentChromeHit::Help => show_help = !show_help,
+                            DocumentChromeHit::Help => {
+                                show_help = !show_help;
+                                if show_help {
+                                    find_bar = None;
+                                    link_bar = None;
+                                }
+                            }
                             DocumentChromeHit::Find => {}
                         }
                         pending_paint = true;
@@ -5162,6 +5290,25 @@ fn run_document_session(
                 }
                 DesktopEvent::Key { key, modifiers } => {
                     idle_chrome_visible = true;
+                    // `D-101`: typing with the sheet open edited the *document* underneath it.
+                    // The sheet swallows every key except its own dismissals and quit, so it is
+                    // modal for the keyboard as well as the pointer.
+                    if show_help {
+                        if matches!(key, Key::Escape) {
+                            show_help = false;
+                        } else if modifiers.control && !modifiers.alt {
+                            match key {
+                                Key::Character('/') => show_help = false,
+                                Key::Character('q' | 'Q' | 'c' | 'C') => {
+                                    show_help = false;
+                                    quit = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        pending_paint = true;
+                        continue;
+                    }
                     if modifiers.control && modifiers.alt {
                         let steps = match key {
                             Key::Character('=' | '+') => Some(1),
@@ -5180,7 +5327,11 @@ fn run_document_session(
                     if modifiers.control && !modifiers.alt {
                         match key {
                             Key::Character('/') => {
-                                show_help = !show_help;
+                                show_help = true;
+                                // `D-101`: opening the sheet over an anchored find/link bar left
+                                // the bar live underneath it; the sheet is the only overlay now.
+                                find_bar = None;
+                                link_bar = None;
                                 pending_paint = true;
                                 continue;
                             }
@@ -5333,11 +5484,8 @@ fn run_document_session(
                     }
 
                     if key == Key::Escape {
-                        if show_help {
-                            show_help = false;
-                            pending_paint = true;
-                            continue;
-                        }
+                        // The sheet is dismissed by the modal key guard above, so reaching here
+                        // means it is closed and `Escape` belongs to the layers beneath.
                         if let Some(ref mut h) = history_drawer {
                             if h.bookmark_input.take().is_some() || h.search_input.take().is_some()
                             {
@@ -6689,7 +6837,7 @@ mod tests {
             document_label: "notes.wavefunction".to_owned(),
             folders: vec!["Journal".to_owned(), "Field Notes".to_owned()],
         };
-        let hits = render_document_sidebar(&mut fb, &fonts, rect, &data);
+        let hits = render_document_sidebar(&mut fb, &fonts, QUIET_MD_THEME, rect, &data);
         assert!(hits.iter().any(|(_, h)| *h == DocumentChromeHit::Home));
         assert!(hits
             .iter()
@@ -6745,5 +6893,116 @@ mod tests {
             .find(|(rect, _)| rect.contains(plus.x + plus.w / 2, plus.y + plus.h / 2))
             .map(|(_, hit)| *hit);
         assert_eq!(resolved, Some(HomeHit::NewDocument));
+    }
+
+    /// WCAG relative-luminance contrast ratio, used only by these regression tests.
+    fn contrast_ratio(a: Rgba8, b: Rgba8) -> f64 {
+        fn channel(value: u8) -> f64 {
+            let c = f64::from(value) / 255.0;
+            if c <= 0.039_28 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(c: Rgba8) -> f64 {
+            0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+        }
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// `D-101`: the chrome ink helpers used to be the Home-only light palette, so the rail,
+    /// breadcrumb and shortcut sheet were ~1.1:1 ink on `#1A1A19` dark paper — invisible.
+    #[test]
+    fn chrome_ink_stays_readable_on_both_papers() {
+        for theme in [QUIET_MD_THEME, QUIET_MD_DARK_THEME] {
+            assert!(
+                contrast_ratio(ink_for(&theme), theme.bg_body) >= 7.0,
+                "primary chrome ink too low on {theme:?}"
+            );
+            assert!(
+                contrast_ratio(muted_ink_for(&theme), theme.bg_body) >= 4.0,
+                "caption chrome ink too low on {theme:?}"
+            );
+            assert!(
+                contrast_ratio(accent_ink_for(&theme), theme.bg_body) >= 3.0,
+                "accent chrome ink too low on {theme:?}"
+            );
+        }
+        // Light paper keeps exactly the quoted quiet.md tokens.
+        assert_eq!(ink_for(&QUIET_MD_THEME), HOME_INK);
+        assert_eq!(muted_ink_for(&QUIET_MD_THEME), HOME_MUTED);
+        assert_eq!(accent_ink_for(&QUIET_MD_THEME), HOME_ACCENT);
+        assert_eq!(ink_for(&QUIET_MD_DARK_THEME), QUIET_MD_DARK_THEME.text);
+    }
+
+    /// `D-101`: seven `268 px` columns overflowed the `560 px` sheet, so only 4 of the 14
+    /// shortcuts were visible. Every entry must now land inside the panel at small and large
+    /// window sizes alike.
+    #[test]
+    fn shortcut_sheet_shows_every_entry_inside_its_panel() {
+        const ENTRIES: i32 = 14;
+        for (w, h) in [(1_120, 780), (1_280, 800), (760, 520), (1_920, 1_080)] {
+            let (panel, cols, row_h) = shortcut_help_geometry(w, h, ENTRIES);
+            let per_col = ceil_div(ENTRIES, cols);
+            let col_w = (panel.w - 48) / cols;
+            for i in 0..ENTRIES {
+                let col = i / per_col;
+                let row = i % per_col;
+                let rx = panel.x + 24 + col * col_w;
+                let ry = panel.y + 84 + row * row_h;
+                assert!(
+                    rx + 200 <= panel.x + panel.w,
+                    "entry {i} runs past the panel at {w}x{h}"
+                );
+                assert!(
+                    ry + 15 <= panel.y + panel.h,
+                    "entry {i} falls below the panel at {w}x{h}"
+                );
+            }
+            assert!(
+                panel.x >= 0 && panel.y >= 0,
+                "panel starts off-screen at {w}x{h}"
+            );
+            assert!(
+                panel.x + panel.w <= w && panel.y + panel.h <= h,
+                "panel overflows the window at {w}x{h}"
+            );
+        }
+        // A narrow window needs the single-column fallback rather than clipped columns.
+        assert_eq!(shortcut_help_geometry(480, 600, ENTRIES).1, 1);
+        assert_eq!(shortcut_help_geometry(1_120, 780, ENTRIES).1, 2);
+    }
+
+    /// `D-101`: the rail keeps quiet.md's light wash, which is wrong on `#1A1A19` paper. The
+    /// dark paper rail must use theme chrome and still never paint outside its rect.
+    #[test]
+    fn dark_paper_rail_paints_inside_its_rect() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
+        let mut fb = FrameBuffer::new(1_280, 800, QUIET_MD_DARK_THEME.bg_body);
+        let before = fb.pixels.clone();
+        let rect = Rect::new(0, 40, DOC_SIDEBAR_W_PX, 736);
+        let data = DocumentChromeData {
+            library_label: "My documents".to_owned(),
+            folder_label: Some("Journal".to_owned()),
+            document_label: "notes.wavefunction".to_owned(),
+            folders: vec!["Journal".to_owned(), "Field Notes".to_owned()],
+        };
+        let hits = render_document_sidebar(&mut fb, &fonts, QUIET_MD_DARK_THEME, rect, &data);
+        assert!(hits.iter().any(|(_, h)| *h == DocumentChromeHit::Home));
+        for y in 0..i32::from(fb.height) {
+            for x in 0..i32::from(fb.width) {
+                if rect.contains(x, y) {
+                    continue;
+                }
+                let i = (y as usize) * usize::from(fb.width) + x as usize;
+                assert_eq!(
+                    fb.pixels[i], before[i],
+                    "dark rail painted outside its rect"
+                );
+            }
+        }
     }
 }
