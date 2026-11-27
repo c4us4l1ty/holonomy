@@ -68,6 +68,25 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-26** — **Native UI migration is not release-qualified.** The user's 200% blur
+  report invalidated the claim that integer framebuffer repetition was sufficient. The opt-in
+  `holonomy-native` frontend uses GPUI 0.2.2, but document strings stay out of its text layout
+  cache: the existing core exports positioned glyph outlines for device-scale vector drawing.
+  Glyph geometry still reveals text; neither this design nor explicit CPU/key wiping proves GPU
+  memory erasure. Fixed-capacity secret fields and transient outline buffers zeroize their data.
+  Real Xvfb input at reported 2x now unlocks an encrypted fixture, types, undoes/redoes, searches,
+  formats, saves and quits; an independent reopen verifies the resulting plaintext. This is not
+  a substitute for visual approval on the user's monitor or the remaining lifecycle gates.
+
+  **Pre-existing platform blocker:** `holonomy-line` explicitly refuses non-Unix durability.
+  Previous Windows compilation results did not qualify persistence. Native Windows encrypted
+  operations now refuse before KDF/file creation; `store::map_open` also returns an explicit
+  unsupported-platform error instead of a debug assertion panic. No durability fence is removed.
+  The existing frontend remains the release default until platform persistence, cooperative
+  emergency-reaper/scene cleanup, OS-quit handling, complete UI parity and visual checks close.
+  `crates/holonomy-native/README.md` is the implementation/remaining checklist.
+
+
 - **2026-11-27 — D-101 — Bug hunt across the D-100 chrome: two user-visible defects and three latent ones.**
   After D-100 landed on `main`, the whole app was re-read for defects rather than only the new
   lines. CI was green throughout, so every finding below is a runtime/logic defect rather than a

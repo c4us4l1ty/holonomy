@@ -1,36 +1,60 @@
-# Native UI preview (not the replacement editor yet)
+# Native vector frontend — development build
 
-An opt-in GPUI 0.2.2 shell that renders text and device-pixel rules without
-Holonomy's existing logical-framebuffer enlargement. This is the first migration
-slice, not a claim that the document editor's blur has been fixed.
+This is an opt-in migration, **not yet the default release editor**. GPUI draws
+window chrome; document text is shaped by Holonomy and painted as vector glyph
+outlines at the monitor's device scale. No finished logical framebuffer is enlarged,
+and document strings are not passed into GPUI's text layout cache.
 
 ```sh
-cargo build --locked -p holonomy-gui --bin holonomy-gui
-cargo run --locked -p holonomy-native --features native-ui
+cargo run --locked -p holonomy-native --features native-ui -- /absolute/document.wavefunction
 ```
 
-The Native UI preview workflow also builds downloadable binaries for Windows,
-macOS and Linux. Extract both binaries into the same directory. Run
-`holonomy-native` (`holonomy-native.exe` on Windows). These are unsigned development
-builds, not installers. Linux builds need system GPUI graphics/text dependencies
-and a working GPU/display; CI package installation is listed in the workflow.
+Omit the path for Home. Choose New or Open, enter a path, Tab/click to the masked
+passphrase field, then Enter. Creation refuses existing files; an open failure
+never falls back to creation. Development builds are unsigned, not installers.
+The Native UI preview workflow publishes platform binaries as run artifacts.
 
-- Home shell, light/dark switch, rendering specimen and live device-scale readout.
-- Text at 12, 16 and 24 logical pixels plus one-device-pixel rules.
-- Explicit launcher for the **existing** editor in a separate process; launching
-  it does not change that editor's rendering.
-- No encrypted document, passphrase or recent-file list is loaded into GPUI.
-- No updater, telemetry or font downloader is included in application code.
+## Implemented
 
-Not implemented: native unlock, document editing, IME/input routing, search,
-history, secure text-cache lifecycle, accessibility and parity qualification.
-Keep using the existing frontend for actual work. The preview is not a default
-launcher or part of the release installers.
+- Encrypted create/open using the existing store, bounded residency and document engine.
+- Native vector document rendering; logical paint/hit-test geometry is shared with the core.
+- Native text-input callbacks and bounded, zeroizing IME preedit. Document composition is
+  committed as one text insertion rather than persisting each intermediate candidate.
+- Keyboard editing, mouse selection, drag, scroll, undo/redo, select-all and basic formatting.
+- Save and save-before-close/Home; a save refusal keeps the session open.
+- Streaming Find, read-only witness previews, bookmark creation and integrity verification.
+- Explicit bounded clipboard copy/cut/paste with plaintext-egress disclosure.
+- Explicit resident-buffer/key wipe and clipboard clearing; **not** a GPU-erasure guarantee.
+- Fixed-capacity secret input buffers; deleted graphemes and dropped glyph contour buffers
+  are zeroized. Search/bookmark input is painted through the same vector path.
 
-For visual qualification, set the OS display to 200%, open Rendering specimen,
-and capture at native resolution without resizing the screenshot. Repeat at
-fractional scales and on mixed-DPI monitors. Compilation does not establish
-visual quality; user confirmation is still required.
+## Qualification and platform limits
 
-See `docs/QUIET-MD-UI-MIGRATION.md` and `vendor/xattr/HOLONOMY.md` for architecture
-and the temporary dependency compatibility patch.
+**Windows encrypted editing is unavailable.** The pre-existing world-line backend
+refuses platforms without its qualified durability primitives. The native frontend
+now reports this before KDF/file creation rather than hitting a debug assertion.
+A compiling Windows UI binary is not evidence of working Windows persistence.
+Do not remove that fence without implementing and qualifying a Windows storage backend.
+
+Linux/macOS exercise real encrypted round trips in session tests. Linux additionally
+runs an Xvfb smoke test at reported 2x scale: native input, unlock, editing, undo/redo,
+find, formatting, save, quit and independent encrypted reopen verification. CI
+screenshots are test specimens, not proof of quality on the user's actual monitor.
+
+Still outstanding before replacing the default:
+
+- Automatic cooperative emergency-reaper integration, complete scene/cache lifecycle
+  review and shutdown/OS-quit failure handling. Explicit CPU/key wipe is not equivalent.
+- Full IME reconversion/selection and accessibility qualification. The input context
+  deliberately does not expose surrounding document/passphrase text to the framework.
+- Full toolbar/chrome parity (including all rich formatting, links, folders/recent-file
+  navigation, import/export UI, complete history navigation and document zoom).
+- Native-platform runtime qualification, mixed-monitor DPI, fractional-scale visual
+  checks and user confirmation at 200%.
+
+**Use test documents only until these gates close.** The old frontend remains the
+release default; none of its installers or launchers is silently replaced.
+
+See `docs/QUIET-MD-UI-MIGRATION.md` and `vendor/xattr/HOLONOMY.md` for the migration
+and temporary compatibility patch. Linux build dependencies are listed in
+`.github/workflows/native-ui.yml`.

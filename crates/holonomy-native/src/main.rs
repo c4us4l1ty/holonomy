@@ -911,15 +911,13 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if range.as_ref().is_some_and(|range| {
-            range.start > range.end || range.end > self.preedit.encode_utf16().count()
-        }) {
-            self.status = "IME reconversion outside the marked input is not supported yet.".into();
-            cx.notify();
-            return;
+        let range = range.unwrap_or(0..self.preedit.encode_utf16().count());
+        if !self.preedit.replace_utf16(range, text) {
+            self.status = "Input range is unsupported or exceeds the 4096-byte composition limit.".into();
+            cx.notify(); return;
         }
-        self.preedit.zeroize();
-        self.commit_text(text);
+        let committed = std::mem::take(&mut self.preedit);
+        self.commit_text(&committed);
         cx.notify();
     }
     fn replace_and_mark_text_in_range(
@@ -930,16 +928,9 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if range.as_ref().is_some_and(|range| {
-            range.start > range.end || range.end > self.preedit.encode_utf16().count()
-        }) {
-            self.status = "IME reconversion outside the marked input is not supported yet.".into();
-            cx.notify();
-            return;
-        }
-        self.preedit.zeroize();
-        if !self.preedit.push_str(text) {
-            self.status = "Composition exceeds the 4096-byte input limit.".into();
+        let range = range.unwrap_or(0..self.preedit.encode_utf16().count());
+        if !self.preedit.replace_utf16(range, text) {
+            self.status = "Composition range is unsupported or exceeds the 4096-byte limit.".into();
         }
         cx.notify();
     }

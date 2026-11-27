@@ -991,3 +991,15 @@ pub fn test_params() -> KdfParamsRecord {
     );
     KdfParamsRecord { m_kib, t, p }
 }
+
+#[cfg(test)]
+mod durability_error_tests {
+    #[test]
+    fn missing_durability_is_an_explicit_error_not_a_debug_build_panic() {
+        let error = super::map_open(holonomy_line::LineError::UnsupportedDurability);
+        match error {
+            super::StoreError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
+            _ => panic!("unsupported durability must remain a platform error"),
+        }
+    }
+}

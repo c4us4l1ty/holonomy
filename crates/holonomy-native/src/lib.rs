@@ -482,9 +482,23 @@ impl SecretInput {
         self.len = end;
         true
     }
-    /// Removes the final Unicode scalar and overwrites the removed bytes immediately.
+    /// Replaces an exact UTF-16 range in place, refusing split surrogates or a capacity overflow.
+    /// A refusal leaves the old input unchanged, including its marked composition.
+    pub fn replace_utf16(&mut self, range: std::ops::Range<usize>, text: &str) -> bool {
+        let Some(bytes) = utf16_range_bytes(self, range) else { return false; };
+        let old_len = self.len;
+        let remaining = old_len - (bytes.end - bytes.start);
+        let Some(new_len) = remaining.checked_add(text.len()).filter(|&n| n <= self.storage.len()) else { return false; };
+        self.storage.copy_within(bytes.end..old_len, bytes.start + text.len());
+        self.storage[bytes.start..bytes.start + text.len()].copy_from_slice(text.as_bytes());
+        if new_len < old_len { self.storage[new_len..old_len].zeroize(); }
+        self.len = new_len;
+        true
+    }
+
+    /// Removes the final grapheme cluster and overwrites the removed bytes immediately.
     pub fn pop(&mut self) {
-        if let Some((at, _)) = self.char_indices().next_back() {
+        if let Some((at, _)) = holonomy_eye::Clusters::new(self).last() {
             self.storage[at..self.len].zeroize();
             self.len = at;
         }
@@ -675,6 +689,18 @@ mod input_tests {
         assert!(input.is_empty());
         assert!(input.storage.iter().all(|&b| b == 0));
     }
+    #[test]
+    fn composition_replacement_is_atomic_unicode_safe_and_zeroizes_its_tail() {
+        let mut input=SecretInput::default();
+        input.push_str("a😀bc");
+        assert!(input.replace_utf16(1..3,"é"));
+        assert_eq!(&*input,"aébc");
+        assert!(input.storage[input.len..].iter().all(|&b| b==0));
+        assert!(!input.replace_utf16(0..0,&"z".repeat(4096)));
+        assert_eq!(&*input,"aébc");
+        input.zeroize(); input.push_str("x👩‍💻"); input.pop(); assert_eq!(&*input,"x");
+    }
+
     #[test]
     fn utf16_ranges_never_split_surrogates_or_accept_reversed_offsets() {
         assert_eq!(utf16_range_bytes("a😀é", 1..3), Some(1..5));
