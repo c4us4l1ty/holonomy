@@ -126,23 +126,6 @@ jobs:
         # (rustfmt, clippy); the dtolnay action honors that file.
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --all -- --check
-      - name: Report the formatter diff on failure
-        if: failure()
-        run: |
-          # Probe only: the Actions log hosts are unreachable from the fixing sandbox, but
-          # annotations are readable through the API. Emit the diff as base64 annotations.
-          cargo fmt --all >/dev/null 2>&1
-          git diff > /tmp/fmt.diff
-          python3 - <<'EOF'
-          import base64, pathlib
-          raw = pathlib.Path('/tmp/fmt.diff').read_bytes()
-          data = base64.b64encode(raw).decode()
-          step = 6000
-          for i in range(0, len(data), step):
-              print(f"::error::FMTDIFF{i//step}:{data[i:i+step]}")
-          print(f"::error::FMTDIFFTOTAL:{len(data)}")
-          EOF
-          git checkout -- .
 
   clippy:
     name: clippy

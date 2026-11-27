@@ -3534,7 +3534,11 @@ fn render_home(
     // The flag reverses the catalogue's name order; there is no stored manual order to honour, so
     // it is labelled for what it does. Calling it "Manual" promised a drag-reorder the app does
     // not have, and `reverse_order` is the name that stops the label drifting again (`D-102`).
-    let sort_label = if state.reverse_order { "Z\u{2013}A" } else { "A\u{2013}Z" };
+    let sort_label = if state.reverse_order {
+        "Z\u{2013}A"
+    } else {
+        "A\u{2013}Z"
+    };
     let sort_w = home_text_width(fonts, sort_label, 800);
     let sort_rect = Rect::new(content.x + content.w - 24 - sort_w, controls_y, sort_w, 28);
     draw_home_text(
@@ -7111,7 +7115,10 @@ mod tests {
                         }
                     }
                 }
-                assert!(ink > 400, "{w}x{h}: folder card painted almost nothing ({ink} px)");
+                assert!(
+                    ink > 400,
+                    "{w}x{h}: folder card painted almost nothing ({ink} px)"
+                );
             }
         }
     }
@@ -7168,7 +7175,11 @@ mod tests {
             .rev()
             .find(|(rect, _)| rect.contains(close.x + close.w / 2, close.y + close.h / 2))
             .map(|(rect, _)| *rect);
-        assert_eq!(decided, Some(close), "the close button must take its own click");
+        assert_eq!(
+            decided,
+            Some(close),
+            "the close button must take its own click"
+        );
     }
 
     /// `D-102`: the popup / drawer / banner surfaces keep their resting chip, because there the
