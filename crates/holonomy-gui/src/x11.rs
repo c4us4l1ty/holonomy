@@ -2408,7 +2408,10 @@ mod tests {
 
             let mut setup_rep = vec![1u8, 0, 11, 0, 0, 0, 20, 0];
             setup_rep.extend_from_slice(&body);
-            assert!(send(&mut server_sock, &setup_rep), "peer closed before setup");
+            assert!(
+                send(&mut server_sock, &setup_rep),
+                "peer closed before setup"
+            );
 
             // The mock server races the client's teardown by design: the client stops polling and
             // drops its socket as soon as it has what it needs, which can land while this thread
