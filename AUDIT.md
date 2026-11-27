@@ -3130,6 +3130,19 @@ Listed so they stay dead.
   failure behavior. `metadata_digest` uses variable-output BLAKE2b-256 rather than truncating
   BLAKE2b-512; its reference-vector regression test passed in workspace CI.
 
+- **2026-11-27** — **Test-harness flake closed: mock X11 server vs. client teardown.**
+  `full_x11_wire_protocol_loopback_handshake_render_events_and_clipboard` failed once on macOS on
+  the post-merge run of `2bbcfe2` and passed on rerun. The fault was in the harness, not the
+  product: the client stops polling and drops its socket as soon as it has what it needs, so the
+  mock server's next `write_all` can land on a closed peer, which macOS surfaces as `EPIPE`; the
+  `.unwrap()`/`.expect()` turned an intended teardown into a panic. The mock now treats
+  `BrokenPipe` / `ConnectionReset` / `UnexpectedEof` as the end of its script and still panics on
+  every other error, so a real wiring fault is not masked. Two structural fixes came with it: the
+  `GET_INPUT_FOCUS` event batch is queued into one buffer (a partial batch could otherwise be
+  delivered if the first write raced), and a truncated final request ends the script instead of
+  panicking. Client-side assertions are unchanged, so the test still proves the handshake, the
+  scanline `PutImage` framing, the queued events and the clipboard round-trip.
+
 - **2026-11-27** — **`D-102` bug hunt (post-design audit, before merge).** Seven defects found
   and fixed, each with a regression test where the behaviour is observable:
 
