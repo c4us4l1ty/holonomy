@@ -2611,30 +2611,10 @@ fn render_document_sidebar(
     let home_row = Rect::new(x, rect.y + 54, inner, 34);
     fb.fill_rounded_rect(home_row, 8, selection, rect);
     draw_home_folder_icon(fb, x + 12, rect.y + 62, ink, rect);
-    draw_home_text(
-        fb,
-        fonts,
-        x + 38,
-        rect.y + 76,
-        "Home",
-        880,
-        ink,
-        rect,
-        false,
-    );
+    draw_home_text(fb, fonts, x + 38, rect.y + 76, "Home", 880, ink, rect, false);
     hits.push((home_row, DocumentChromeHit::Home));
 
-    draw_home_text(
-        fb,
-        fonts,
-        x,
-        rect.y + 122,
-        "My documents",
-        760,
-        muted,
-        rect,
-        false,
-    );
+    draw_home_text(fb, fonts, x, rect.y + 122, "My documents", 760, muted, rect, false);
 
     let actions_top = rect.y + rect.h - 96;
     let mut sy = rect.y + 144;
@@ -2664,17 +2644,7 @@ fn render_document_sidebar(
         sy += 32;
     }
 
-    draw_home_text(
-        fb,
-        fonts,
-        x,
-        actions_top - 48,
-        "This document",
-        760,
-        muted,
-        rect,
-        false,
-    );
+    draw_home_text(fb, fonts, x, actions_top - 48, "This document", 760, muted, rect, false);
     let doc_row = Rect::new(x, actions_top - 42, inner, 30);
     fb.fill_rounded_rect(doc_row, 7, selection, rect);
     draw_home_text(
@@ -2699,17 +2669,7 @@ fn render_document_sidebar(
         ),
     ] {
         let row = Rect::new(x, baseline - 20, inner, 28);
-        draw_home_text(
-            fb,
-            fonts,
-            x + 8,
-            baseline,
-            label,
-            760,
-            ink,
-            rect,
-            false,
-        );
+        draw_home_text(fb, fonts, x + 8, baseline, label, 760, ink, rect, false);
         hits.push((row, hit));
     }
     hits
@@ -2758,27 +2718,13 @@ fn render_document_breadcrumb(
     x += home_w + 12;
 
     if let Some(folder) = &data.folder_label {
-        draw_home_text(
-            fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false,
-        );
+        draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
         x += 14;
         let folder_shown = home_fit_text(fonts, folder, 840, 180);
-        draw_home_text(
-            fb,
-            fonts,
-            x,
-            baseline,
-            &folder_shown,
-            840,
-            muted,
-            rect,
-            false,
-        );
+        draw_home_text(fb, fonts, x, baseline, &folder_shown, 840, muted, rect, false);
         x += home_text_width(fonts, &folder_shown, 840) + 12;
     }
-    draw_home_text(
-        fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false,
-    );
+    draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
     x += 14;
     let space = (rect.x + rect.w - 108 - x).max(0);
     draw_home_text(
@@ -2794,17 +2740,7 @@ fn render_document_breadcrumb(
     );
 
     let find = Rect::new(rect.x + rect.w - 64, rect.y + 6, 48, rect.h - 12);
-    draw_home_text(
-        fb,
-        fonts,
-        find.x + 10,
-        baseline,
-        "Find",
-        800,
-        muted,
-        find,
-        false,
-    );
+    draw_home_text(fb, fonts, find.x + 10, baseline, "Find", 800, muted, find, false);
     hits.push((find, DocumentChromeHit::Find));
     hits
 }
@@ -2842,8 +2778,9 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
     ];
 
     fb.fill_rect_clipped(full, Rgba8::rgba_pct(0x00, 0x00, 0x00, 22), full);
-    let (panel, cols, row_h) = shortcut_help_geometry(w, h, rows.len());
-    let per_col = rows.len().div_ceil(cols);
+    // A fixed `&'static` array of 14 entries can never exceed `i32`.
+    let entry_count = i32::try_from(rows.len()).unwrap_or(i32::MAX);
+    let (panel, cols, row_h) = shortcut_help_geometry(w, h, entry_count);
     fb.fill_rounded_rect(panel, 16, theme.bg_body, full);
     fb.stroke_rounded_rect(panel, 16, theme.line_border, full);
     draw_home_text(
@@ -2857,27 +2794,17 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
         panel,
         true,
     );
-    let col_w = (panel.w - 48) / cols;
+    let col_w = (panel.w - 48) / cols.max(1);
+    let per_col = entry_count.div_ceil(cols.max(1)).max(1);
     for (i, (key, desc)) in rows.iter().enumerate() {
-        let col = (i / per_col) as i32;
-        let row = (i % per_col) as i32;
-        let rx = panel.x + 24 + col * col_w;
-        let ry = panel.y + 84 + row * row_h;
+        let i = i32::try_from(i).unwrap_or(0);
+        let rx = panel.x + 24 + (i / per_col) * col_w;
+        let ry = panel.y + 84 + (i % per_col) * row_h;
         draw_home_text(fb, fonts, rx, ry, key, 780, accent, panel, true);
         draw_home_text(fb, fonts, rx, ry + 15, desc, 760, muted, panel, false);
     }
     let close = Rect::new(panel.x + panel.w - 44, panel.y + 12, 28, 28);
-    draw_home_text(
-        fb,
-        fonts,
-        close.x + 8,
-        close.y + 20,
-        "\u{00D7}",
-        940,
-        muted,
-        close,
-        false,
-    );
+    draw_home_text(fb, fonts, close.x + 8, close.y + 20, "\u{00D7}", 940, muted, close, false);
     (panel, close)
 }
 
@@ -2886,14 +2813,14 @@ fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme)
 /// The original layout hard-coded seven `268 px` columns inside a `560 px` panel, so ten of the
 /// fourteen entries were painted outside the panel and clipped (`D-101`). Deriving the grid from
 /// the panel width means a layout change cannot silently drop entries again.
-fn shortcut_help_geometry(window_w: i32, window_h: i32, entries: usize) -> (Rect, usize, i32) {
+fn shortcut_help_geometry(window_w: i32, window_h: i32, entries: i32) -> (Rect, i32, i32) {
     const ROW_H: i32 = 34;
     const HEADER_H: i32 = 84;
     const FOOTER_H: i32 = 24;
     let panel_w = 560.min((window_w - 32).max(280));
     // Two columns need ~250 px each for a key plus its description; below that, one column.
     let cols = if panel_w >= 520 { 2 } else { 1 };
-    let per_col = entries.div_ceil(cols).max(1) as i32;
+    let per_col = entries.div_ceil(cols).max(1);
     let panel_h = (HEADER_H + per_col * ROW_H + FOOTER_H).min(window_h - 32);
     let panel = Rect::new(
         (window_w - panel_w).max(16) / 2,
@@ -6948,14 +6875,14 @@ mod tests {
     /// window sizes alike.
     #[test]
     fn shortcut_sheet_shows_every_entry_inside_its_panel() {
-        const ENTRIES: usize = 14;
+        const ENTRIES: i32 = 14;
         for (w, h) in [(1_120, 780), (1_280, 800), (760, 520), (1_920, 1_080)] {
             let (panel, cols, row_h) = shortcut_help_geometry(w, h, ENTRIES);
             let per_col = ENTRIES.div_ceil(cols);
-            let col_w = (panel.w - 48) / cols as i32;
+            let col_w = (panel.w - 48) / cols;
             for i in 0..ENTRIES {
-                let col = (i / per_col) as i32;
-                let row = (i % per_col) as i32;
+                let col = i / per_col;
+                let row = i % per_col;
                 let rx = panel.x + 24 + col * col_w;
                 let ry = panel.y + 84 + row * row_h;
                 assert!(
@@ -6967,7 +6894,10 @@ mod tests {
                     "entry {i} falls below the panel at {w}x{h}"
                 );
             }
-            assert!(panel.x >= 0 && panel.y >= 0, "panel starts off-screen at {w}x{h}");
+            assert!(
+                panel.x >= 0 && panel.y >= 0,
+                "panel starts off-screen at {w}x{h}"
+            );
             assert!(
                 panel.x + panel.w <= w && panel.y + panel.h <= h,
                 "panel overflows the window at {w}x{h}"
@@ -7000,7 +6930,10 @@ mod tests {
                     continue;
                 }
                 let i = (y as usize) * usize::from(fb.width) + x as usize;
-                assert_eq!(fb.pixels[i], before[i], "dark rail painted outside its rect");
+                assert_eq!(
+                    fb.pixels[i], before[i],
+                    "dark rail painted outside its rect"
+                );
             }
         }
     }
