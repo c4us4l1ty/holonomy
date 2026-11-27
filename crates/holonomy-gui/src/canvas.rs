@@ -1681,10 +1681,7 @@ where
         for (idx, (action, label, hl)) in items_to_show.into_iter().enumerate() {
             let idx = idx as i32;
             let (col, row) = (idx / rows.max(1), idx % rows.max(1));
-            let (bx, by) = (
-                menu_x + PAD + col * col_w,
-                menu_y + PAD + row * ROW_H,
-            );
+            let (bx, by) = (menu_x + PAD + col * col_w, menu_y + PAD + row * ROW_H);
             let (rect, _next) = draw_toolbar_button(
                 fb,
                 &fonts,
