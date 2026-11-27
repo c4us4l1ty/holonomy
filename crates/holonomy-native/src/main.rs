@@ -174,15 +174,16 @@ impl NativeHome {
         }
     }
 
-    fn wipe(&mut self) {
+    fn wipe(&mut self, cx: &mut Context<Self>) {
         let verified = self.session.as_mut().map_or(true, Session::wipe);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
         self.session.take();
         self.preedit.zeroize();
         self.passphrase.zeroize();
         self.query.zeroize();
         self.screen = Screen::Home;
         self.status = if verified {
-            "Resident text and keys wiped. GPU scene erasure is not qualified."
+            "Resident text/keys wiped; clipboard cleared. GPU memory and clipboard history are not qualified."
         } else {
             "Key wipe could not be confirmed."
         }
@@ -216,7 +217,7 @@ impl NativeHome {
             mods.control
         };
         if command && mods.shift && key == "escape" {
-            self.wipe();
+            self.wipe(cx);
             cx.notify();
             return;
         }
@@ -642,7 +643,7 @@ impl Render for NativeHome {
                         )))
                         .child(button("wipe", "Emergency wipe").on_click(cx.listener(
                             |this, _, _, cx| {
-                                this.wipe();
+                                this.wipe(cx);
                                 cx.notify();
                             },
                         ))),

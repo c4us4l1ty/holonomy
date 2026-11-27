@@ -23,9 +23,15 @@ sleep 1
 import -window "$window" native-unlock.png
 xdotool key Return
 # The title changes only after the real encrypted session has opened.
-timeout 45 xdotool search --sync --onlyvisible --name 'Holonomy Native — native-smoke.wavefunction' >/dev/null
+timeout 45 xdotool search --sync --onlyvisible --name 'native-smoke.wavefunction' >/dev/null
 xdotool key ctrl+a
 xdotool type --clearmodifiers --delay 35 'Saved by native UI smoke test'
+xdotool key ctrl+z
+xdotool key ctrl+y
+xdotool key ctrl+f
+xdotool type --clearmodifiers --delay 35 'native'
+xdotool key Return Escape
+xdotool key ctrl+b
 xdotool key ctrl+s
 # Wait for at least one rendered frame before recording the specimen.
 sleep 2
