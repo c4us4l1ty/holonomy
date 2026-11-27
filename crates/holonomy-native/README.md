@@ -22,12 +22,13 @@ The Native UI preview workflow publishes platform binaries as run artifacts.
   committed as one text insertion rather than persisting each intermediate candidate.
 - Keyboard editing, mouse selection, drag, scroll, undo/redo, select-all and basic formatting.
 - Save and save-before-close/Home; a save refusal keeps the session open. Uncommitted IME
-  composition blocks saving/closing until the platform commits or cancels it.
+  composition blocks unlock/create/save/close until the platform commits or cancels it.
 - Streaming Find, read-only witness previews, bookmark creation and integrity verification.
 - Explicit bounded clipboard copy/cut/paste with plaintext-egress disclosure.
 - Cooperative canary-verified resident-buffer/key wipe and clipboard clearing; **not** a
   GPU-erasure guarantee. Optional `HOLONOMY_DEADMAN_MS` enables the existing latched dead-man
-  watcher. A foreground poll observes a trip without repainting while idle; reads/saves after a
+  watcher; an explicitly configured invalid/zero timeout is refused rather than disabling it.
+  A foreground poll observes a trip without repainting while idle; reads/saves after a
   latched trip are refused until the wipe completes.
 - Fixed-capacity secret input buffers; deleted graphemes and dropped glyph contour buffers
   are zeroized. Search/bookmark input is painted through the same vector path.

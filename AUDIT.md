@@ -72,7 +72,9 @@ Listed so they stay dead.
   IME composition could discard uncommitted input; repeated wipe calls could report key erasure
   as success even if the original full receipt failed; unimplemented view transforms could enter
   hit testing without entering native paint; search/composition activity could fail to refresh
-  the dead-man heartbeat. Added focused regressions and a real refused-save/close/retry drill.
+  the dead-man heartbeat. Invalid configured timeouts also silently disabled the watcher, and
+  unlock/create could submit a partially composed passphrase; both now fail closed before
+  cryptographic work or file creation. Added focused regressions and a real refused-save/close/retry drill.
   Native CI now covers main, pull requests and core dependency changes, enforces formatting on
   the tested source, and exercises native input across integer and fractional display scales.
   The frontend remains opt-in: these checks do not close its documented release blockers.

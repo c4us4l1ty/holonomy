@@ -141,6 +141,19 @@ impl NativeHome {
     }
 
     fn unlock(&mut self) {
+        if let Err(error) = ensure_no_composition(&self.preedit) {
+            self.status = error.to_string();
+            return;
+        }
+        let timeout = match std::env::var("HOLONOMY_DEADMAN_MS") {
+            Ok(value) => holonomy_native::parse_deadman_timeout(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(error) => Err(error.into()),
+        };
+        let timeout = match timeout {
+            Ok(timeout) => timeout,
+            Err(error) => { self.status = error.to_string(); return; }
+        };
         if self.path.trim().is_empty() {
             self.status = "Choose a document path.".into();
             return;
@@ -155,12 +168,8 @@ impl NativeHome {
         self.passphrase.zeroize();
         match result {
             Ok(mut session) => {
-                if let Some(ms) = std::env::var("HOLONOMY_DEADMAN_MS")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .filter(|&ms| ms > 0)
-                {
-                    if let Err(error) = session.set_deadman(std::time::Duration::from_millis(ms)) {
+                if let Some(timeout) = timeout {
+                    if let Err(error) = session.set_deadman(timeout) {
                         self.status = error.to_string();
                         return;
                     }
@@ -425,10 +434,14 @@ impl NativeHome {
                 }
             }
             Screen::Unlock => {
-                self.passphrase.push_str(text);
+                if !self.passphrase.push_str(text) {
+                    self.status = "Passphrase input exceeds the 4096-byte limit.".into();
+                }
             }
             Screen::Find | Screen::Bookmark => {
-                self.query.push_str(text);
+                if !self.query.push_str(text) {
+                    self.status = "Search/bookmark input exceeds the 4096-byte limit.".into();
+                }
                 self.search_index = 0;
             }
             Screen::Editor => {
@@ -1047,7 +1060,7 @@ fn main() {
 // until the IME commits/cancels rather than guessing at a commit and later inserting it twice.
 fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
     if preedit.is_empty() { Ok(()) } else {
-        Err("Finish or cancel the current text composition before saving or closing.".into())
+        Err("Finish or cancel the current text composition before continuing.".into())
     }
 }
 

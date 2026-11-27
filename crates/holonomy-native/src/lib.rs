@@ -654,6 +654,16 @@ pub fn utf16_range_bytes(
     Some(boundary(text, range.start)?..boundary(text, range.end)?)
 }
 
+/// Parses an explicitly configured dead-man timeout. Invalid or zero values are errors rather
+/// than silently disabling an operator-requested safety mechanism.
+pub fn parse_deadman_timeout(value: Option<&str>) -> Result<Option<Duration>> {
+    value.map(|text| {
+        let milliseconds = text.parse::<u64>().ok().filter(|&ms| ms > 0)
+            .ok_or("HOLONOMY_DEADMAN_MS must be a positive integer number of milliseconds")?;
+        Ok(Duration::from_millis(milliseconds))
+    }).transpose()
+}
+
 fn require_durability() -> Result<()> {
     if cfg!(unix) {
         Ok(())
@@ -838,6 +848,15 @@ mod tests {
 #[cfg(test)]
 mod input_tests {
     use super::*;
+    #[test]
+    fn explicit_invalid_deadman_configuration_never_disables_protection() {
+        assert!(parse_deadman_timeout(None).unwrap().is_none());
+        assert_eq!(parse_deadman_timeout(Some("1500")).unwrap(), Some(Duration::from_millis(1500)));
+        for value in ["", "0", "-1", "NaN", "1.5", "18446744073709551616"] {
+            assert!(parse_deadman_timeout(Some(value)).is_err());
+        }
+    }
+
     #[test]
     fn secret_input_never_reallocates_and_clears_deleted_bytes() {
         let mut input = SecretInput::default();
