@@ -913,8 +913,10 @@ impl gpui::EntityInputHandler for NativeHome {
     ) {
         let range = range.unwrap_or(0..self.preedit.encode_utf16().count());
         if !self.preedit.replace_utf16(range, text) {
-            self.status = "Input range is unsupported or exceeds the 4096-byte composition limit.".into();
-            cx.notify(); return;
+            self.status =
+                "Input range is unsupported or exceeds the 4096-byte composition limit.".into();
+            cx.notify();
+            return;
         }
         let committed = std::mem::take(&mut self.preedit);
         self.commit_text(&committed);

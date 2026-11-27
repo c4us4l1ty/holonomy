@@ -485,13 +485,23 @@ impl SecretInput {
     /// Replaces an exact UTF-16 range in place, refusing split surrogates or a capacity overflow.
     /// A refusal leaves the old input unchanged, including its marked composition.
     pub fn replace_utf16(&mut self, range: std::ops::Range<usize>, text: &str) -> bool {
-        let Some(bytes) = utf16_range_bytes(self, range) else { return false; };
+        let Some(bytes) = utf16_range_bytes(self, range) else {
+            return false;
+        };
         let old_len = self.len;
         let remaining = old_len - (bytes.end - bytes.start);
-        let Some(new_len) = remaining.checked_add(text.len()).filter(|&n| n <= self.storage.len()) else { return false; };
-        self.storage.copy_within(bytes.end..old_len, bytes.start + text.len());
+        let Some(new_len) = remaining
+            .checked_add(text.len())
+            .filter(|&n| n <= self.storage.len())
+        else {
+            return false;
+        };
+        self.storage
+            .copy_within(bytes.end..old_len, bytes.start + text.len());
         self.storage[bytes.start..bytes.start + text.len()].copy_from_slice(text.as_bytes());
-        if new_len < old_len { self.storage[new_len..old_len].zeroize(); }
+        if new_len < old_len {
+            self.storage[new_len..old_len].zeroize();
+        }
         self.len = new_len;
         true
     }
@@ -691,14 +701,17 @@ mod input_tests {
     }
     #[test]
     fn composition_replacement_is_atomic_unicode_safe_and_zeroizes_its_tail() {
-        let mut input=SecretInput::default();
+        let mut input = SecretInput::default();
         input.push_str("a😀bc");
-        assert!(input.replace_utf16(1..3,"é"));
-        assert_eq!(&*input,"aébc");
-        assert!(input.storage[input.len..].iter().all(|&b| b==0));
-        assert!(!input.replace_utf16(0..0,&"z".repeat(4096)));
-        assert_eq!(&*input,"aébc");
-        input.zeroize(); input.push_str("x👩‍💻"); input.pop(); assert_eq!(&*input,"x");
+        assert!(input.replace_utf16(1..3, "é"));
+        assert_eq!(&*input, "aébc");
+        assert!(input.storage[input.len..].iter().all(|&b| b == 0));
+        assert!(!input.replace_utf16(0..0, &"z".repeat(4096)));
+        assert_eq!(&*input, "aébc");
+        input.zeroize();
+        input.push_str("x👩‍💻");
+        input.pop();
+        assert_eq!(&*input, "x");
     }
 
     #[test]
