@@ -1,0 +1,23 @@
+[package]
+name = "holonomy-native"
+description = "Opt-in device-scale GPUI frontend qualification shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+native-ui = ["dep:gpui"]
+
+[dependencies]
+gpui = { version = "=0.2.2", optional = true }
+
+[[bin]]
+name = "holonomy-native"
+path = "src/main.rs"
+required-features = ["native-ui"]

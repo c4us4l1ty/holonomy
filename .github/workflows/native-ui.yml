@@ -1,0 +1,65 @@
+name: Native UI preview
+on:
+  push:
+    branches: ["arena/**"]
+    paths:
+      - "crates/holonomy-native/**"
+      - ".github/workflows/native-ui.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev
+      - name: Resolve, format and compile preview
+        shell: bash
+        run: |
+          cargo generate-lockfile
+          cargo fmt --all
+          cargo check -p holonomy-native --features native-ui 2>&1 | tee native-check.log
+          exit "${PIPESTATUS[0]}"
+      - name: Save compiler diagnostics and generated metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ui-${{ matrix.os }}
+          path: |
+            Cargo.lock
+            crates/holonomy-native/src/main.rs
+            native-check.log
+  bridge:
+    needs: qualify
+    if: always() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: native-results
+      - name: Publish sandbox-readable results
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tar czf native-results.tgz native-results
+          base64 -w0 native-results.tgz | split -b 50000 -d - chunk-
+          for chunk in chunk-*; do
+            { echo "Native UI results $GITHUB_SHA ${chunk}"; cat "$chunk"; echo; } > body.txt
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/51/comments" -F body=@body.txt --silent
+          done
