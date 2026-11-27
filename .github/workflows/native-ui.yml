@@ -17,6 +17,8 @@ on:
       - ".github/workflows/native-ui.yml"
   pull_request:
   workflow_dispatch:
+env:
+  CI_DIAG_ISSUE: "128"
 permissions:
   contents: read
 jobs:
@@ -119,5 +121,5 @@ jobs:
           base64 -w0 native-results.tgz | split -b 50000 -d - chunk-
           for chunk in chunk-*; do
             { echo "Native UI results $GITHUB_SHA ${chunk}"; cat "$chunk"; echo; } > body.txt
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/51/comments" -F body=@body.txt --silent
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/${CI_DIAG_ISSUE}/comments" -F body=@body.txt --silent
           done

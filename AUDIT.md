@@ -77,6 +77,7 @@ Listed so they stay dead.
   cryptographic work or file creation. Added focused regressions and a real refused-save/close/retry drill.
   Native CI now covers main, pull requests and core dependency changes, enforces formatting on
   the tested source, and exercises native input across integer and fractional display scales.
+  Diagnostics issue #51 reached its 2,500-comment limit; CI reporters now use continuation #128.
   The frontend remains opt-in: these checks do not close its documented release blockers.
 
 

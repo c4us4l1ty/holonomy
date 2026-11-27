@@ -14,6 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  CI_DIAG_ISSUE: "128"
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
@@ -48,7 +49,7 @@ jobs:
       - name: Reproduce each command and post output to the diag issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DIAG_ISSUE: "51"
+          DIAG_ISSUE: ${{ env.CI_DIAG_ISSUE }}
         run: |
           set +e
           # The sandbox that fixes a failure cannot reach the Actions log hosts, so the diag
@@ -184,7 +185,7 @@ jobs:
           fi
           if [[ "${{ github.event_name }}" == push && "${{ github.ref }}" == refs/heads/arena/* ]]; then
             { echo "### Encrypted search measurement for ${{ github.sha }} (exit $result)"; echo '```'; cat "$RUNNER_TEMP/encrypted-search.log"; echo '```'; } > "$RUNNER_TEMP/encrypted-search-comment.md"
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/encrypted-search-comment.md" --silent || echo "::warning::issue 51 comment failed"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/encrypted-search-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
           fi
           if [[ "$result" -ne 0 ]]; then exit "$result"; fi
           grep 'HOLONOMY_ENCRYPTED_SEARCH' "$RUNNER_TEMP/encrypted-search.log"
@@ -202,7 +203,7 @@ jobs:
           fi
           if [[ "${{ github.event_name }}" == push && "${{ github.ref }}" == refs/heads/arena/* ]]; then
             { echo "### Isolated supervisor prototype for ${{ github.sha }} (exit $result)"; echo '```'; cat "$RUNNER_TEMP/supervisor-probe.log"; echo '```'; } > "$RUNNER_TEMP/supervisor-probe-comment.md"
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/supervisor-probe-comment.md" --silent || echo "::warning::issue 51 comment failed"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/supervisor-probe-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
           fi
           if [[ "$result" -ne 0 ]]; then exit "$result"; fi
           grep 'HOLONOMY_SUPERVISOR_SUMMARY' "$RUNNER_TEMP/supervisor-probe.log"
@@ -267,7 +268,7 @@ jobs:
             cat "$RUNNER_TEMP/wipe-gate.txt"
             echo '```'
           } > "$RUNNER_TEMP/track-a-gates-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/track-a-gates-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/track-a-gates-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
       # OQ-14 and its neighbour, measured rather than described: what a reopen does to a document
       # that was edited before its end, and what a deletion does to the file. Both tests assert
       # today's behaviour, so the numbers print every push and a change to either is a red build
@@ -304,7 +305,7 @@ jobs:
           { echo '### OQ-29 / OQ-30 / L-1 / L-2 — persistence & 60yr/30M scale';
             echo '```text'; cat "$RUNNER_TEMP/persist.txt"; echo '```'; } \
             > "$RUNNER_TEMP/persist-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/persist-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/persist-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   xvfb:
     name: X11 GUI live Xvfb qualification
@@ -333,7 +334,7 @@ jobs:
         run: |
           { echo '### X11 GUI live Xvfb qualification'; echo '```text'; cat "$RUNNER_TEMP/xvfb.txt"; echo '```'; } \
             > "$RUNNER_TEMP/xvfb-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/xvfb-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/xvfb-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   cross-os:
     name: cross-OS build & test (${{ matrix.os }})
@@ -377,7 +378,7 @@ jobs:
             exit $(( CLIPPY_RC || TEST_RC || BUILD_RC ))
           } | tee "$RUNNER_TEMP/cross-os.log"
           exit ${PIPESTATUS[0]}
-      - name: Report cross-OS failure diagnostics to issue 51
+      - name: Report cross-OS failure diagnostics to the CI diagnostics issue
         if: failure() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -389,7 +390,7 @@ jobs:
             tail -c 24000 "$RUNNER_TEMP/cross-os.log" || true
             echo '```'
           } > "$RUNNER_TEMP/cross-os-err.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/cross-os-err.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/cross-os-err.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   sync:
     name: L-10 rsync transfer measurement
@@ -419,7 +420,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           { echo '### L-10 rsync application-layer measurement'; echo '```text'; cat "$RUNNER_TEMP/rsync-measurement.txt"; echo '```'; } > "$RUNNER_TEMP/rsync-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/rsync-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/rsync-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   filesystem:
     name: L-6 ext4 ENOSPC rehearsal (not power-loss qualification)
@@ -449,7 +450,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           { echo '### L-6 ext4 loop-filesystem ENOSPC evidence (not a device power-cut test)'; echo '```text'; cat "$RUNNER_TEMP/ext4-enospc-measurement.txt"; echo '```'; } > "$RUNNER_TEMP/ext4-enospc-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/ext4-enospc-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/ext4-enospc-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   smoke:
     name: M8 smoke — the shipped binary through a real terminal
@@ -503,7 +504,7 @@ jobs:
             grep -E 'HOLONOMY_SMOKE|^smoke: ' "$RUNNER_TEMP/smoke.log"; \
             grep -E 'HOLONOMY_CRASH_RECOVERY|^crash: ' "$RUNNER_TEMP/crash.log"; echo '```'; } \
             > "$RUNNER_TEMP/smoke-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/smoke-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/smoke-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   portability:
     name: L-9 hand-off drill (process half, not the second machine)
@@ -556,7 +557,7 @@ jobs:
           { echo '### L-9 hand-off drill — Linux zero-state & artifact seed'; echo '```text'; \
             grep -E 'HOLONOMY_PORTABILITY|^l9: ' "$RUNNER_TEMP/l9.log"; echo '```'; } \
             > "$RUNNER_TEMP/l9-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/l9-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/l9-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   l9-cross-os:
     name: L-9 cross-OS hand-off (Linux -> ${{ matrix.os }})
@@ -632,7 +633,7 @@ jobs:
           echo "HOLONOMY_L9_CROSS_OS source=ubuntu-latest target=${{ matrix.os }} verified=true byte_identical=true profile_clean=true" \
             | tee "$RUNNER_TEMP/l9-cross-os.txt"
           rm -rf "$WORK"
-      - name: Record cross-OS L-9 hand-off evidence in issue 51
+      - name: Record cross-OS L-9 hand-off evidence in the CI diagnostics issue
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -640,7 +641,7 @@ jobs:
         run: |
           { echo "### L-9 cross-OS hand-off (Linux -> ${{ matrix.os }})"; echo '```text'; \
             cat "$RUNNER_TEMP/l9-cross-os.txt"; echo '```'; } > "$RUNNER_TEMP/l9-cross-os-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/l9-cross-os-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/l9-cross-os-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   lifecycle:
     name: Block 10 24-year fresh-user lifecycle drill
@@ -662,14 +663,14 @@ jobs:
           HOLONOMY_BINARY="$(pwd)/target/release/holonomy" \
             scripts/qualify-24yr-lifecycle.sh 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
           grep -E 'HOLONOMY_24YR_(CLI_DRILL|LIFECYCLE)' "$RUNNER_TEMP/lifecycle.log" > "$RUNNER_TEMP/lifecycle.txt"
-      - name: Record 24-year lifecycle drill in issue 51
+      - name: Record 24-year lifecycle drill in the CI diagnostics issue
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           { echo '### Block 10 24-year fresh-user lifecycle drill'; echo '```text'; \
             cat "$RUNNER_TEMP/lifecycle.txt"; echo '```'; } > "$RUNNER_TEMP/lifecycle-comment.md"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/51/comments" -F "body=@$RUNNER_TEMP/lifecycle-comment.md" --silent || echo "::warning::issue 51 comment failed"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${CI_DIAG_ISSUE}/comments" -F "body=@$RUNNER_TEMP/lifecycle-comment.md" --silent || echo "::warning::the CI diagnostics issue comment failed"
 
   gates:
     name: gates contract
