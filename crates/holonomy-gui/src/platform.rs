@@ -500,10 +500,10 @@ impl DesktopWindow for ScaledWindow {
                     let p11 = bottom_row[x1];
                     let mut value = 0u32;
                     for shift in [16, 8, 0] {
-                        let top = ((p00 >> shift) & 0xff) * left_weight
-                            + ((p10 >> shift) & 0xff) * wx;
-                        let bottom = ((p01 >> shift) & 0xff) * left_weight
-                            + ((p11 >> shift) & 0xff) * wx;
+                        let top =
+                            ((p00 >> shift) & 0xff) * left_weight + ((p10 >> shift) & 0xff) * wx;
+                        let bottom =
+                            ((p01 >> shift) & 0xff) * left_weight + ((p11 >> shift) & 0xff) * wx;
                         let sample = (top * top_weight + bottom * (256 - top_weight)) >> 16;
                         value |= (sample & 0xff) << shift;
                     }
