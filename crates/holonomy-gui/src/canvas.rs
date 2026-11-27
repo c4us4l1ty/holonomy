@@ -1645,27 +1645,29 @@ where
         let menu_w = 240.min(i32::from(win_w) - 24);
         let anchor_x = overflow_anchor.map_or(12, |r| r.x);
         let menu_x = anchor_x.min(i32::from(win_w) - menu_w - 12).max(12);
-        let mut mx = menu_x + 8;
-        let mut my = bar_h + 10;
-        let rows_est = ((items_to_show.len() as i32) * 52 / (menu_w - 16).max(40)) + 2;
-        let menu_h = (rows_est * 32 + 12).min(i32::from(win_h) - bar_h - 40);
-        let menu = Rect::new(menu_x, bar_h + 2, menu_w, menu_h.max(44));
+        // One action per row, so the popup's height is `rows * row_height` and no text has to be
+        // measured twice. The old code guessed a row count from the item count and then `break`-ed
+        // when the guess ran out, so in a short window the trailing actions vanished with no
+        // scroll and no hint they existed. Sizing from the actual item list cannot truncate.
+        const OVERFLOW_ROW_H: i32 = 30;
+        let menu_h = (items_to_show.len() as i32) * OVERFLOW_ROW_H + 12;
+        // Prefer to hang below the header; if the window is too short, sit as low as it fits.
+        let below = bar_h + 2;
+        let menu_y = if below + menu_h <= i32::from(win_h) - 8 {
+            below
+        } else {
+            (i32::from(win_h) - 8 - menu_h).max(2)
+        };
+        let menu = Rect::new(menu_x, menu_y, menu_w, menu_h);
         fb.fill_rect_clipped(menu, theme.bg_body, menu);
         fb.stroke_rect(menu, theme.line_border, menu);
-        for (action, label, hl) in items_to_show {
-            let est = (fonts.advance(label, Style::at(880)).sixtyfourths() >> 6) as i32 + 20;
-            if mx + est > menu.x + menu.w - 8 {
-                mx = menu.x + 8;
-                my += 30;
-            }
-            if my + 26 > menu.y + menu.h - 4 {
-                break;
-            }
-            let (rect, nx) = draw_toolbar_button(
+        for (row, (action, label, hl)) in items_to_show.into_iter().enumerate() {
+            let row_y = menu_y + 6 + (row as i32) * OVERFLOW_ROW_H;
+            let (rect, _next) = draw_toolbar_button(
                 fb,
                 &fonts,
-                mx,
-                my,
+                menu_x + 8,
+                row_y,
                 label,
                 hl,
                 read_only_history
@@ -1683,7 +1685,6 @@ where
                 ButtonSurface::Chipped,
             );
             hits.push(ToolbarHit { rect, action });
-            mx = nx;
         }
     }
 
@@ -3237,6 +3238,47 @@ fn draw_home_gear_icon(fb: &mut FrameBuffer, x: i32, y: i32, color: Rgba8, clip:
 /// Draws the Home shell into a logical-pixel framebuffer and returns its click targets. Every
 /// surface paired with [`crate::platform::DesktopWindow`] pointer coordinates, so scaling stays
 /// consistent with the editor.
+/// Applies one Home click that only changes navigation state.
+///
+/// Split out of the event loop so the state transitions are testable without a window: every
+/// branch here is reachable by a click, and the two that used to leave stale state behind —
+/// `Back` keeping the Favorites tab and a navigation click keeping a search query the user could
+/// no longer see or edit — are pinned by `back_and_folder_navigation_clear_the_favorites_tab_and_stale_query`.
+fn apply_home_hit(state: &mut HomeState, hit: HomeHit) {
+    match hit {
+        HomeHit::Folder(idx) => {
+            state.active_folder = Some(idx);
+            state.favorites = false;
+            // The click already cleared `search_focused`, so a retained query would keep
+            // filtering this folder with no way to edit or even see it.
+            state.query.clear();
+        }
+        HomeHit::Home | HomeHit::MyDocuments => {
+            state.active_folder = None;
+            state.favorites = false;
+            state.query.clear();
+        }
+        HomeHit::Back => {
+            state.active_folder = None;
+            // Back returns to the tab the breadcrumb came from; leaving `favorites` set opened a
+            // top-level view filtered to favourites, which reads as an empty library.
+            state.favorites = false;
+            state.query.clear();
+        }
+        HomeHit::Favorites => {
+            state.favorites = true;
+            state.active_folder = None;
+        }
+        HomeHit::Search => state.search_focused = true,
+        HomeHit::ReverseOrder => state.reverse_order = !state.reverse_order,
+        HomeHit::ListView => state.list_view = !state.list_view,
+        HomeHit::Settings => state.settings_open = true,
+        HomeHit::CloseOverlay => state.settings_open = false,
+        // Handled by the caller: both need to open a document, which needs the window.
+        HomeHit::NewDocument | HomeHit::Document(_) => {}
+    }
+}
+
 fn render_home(
     fb: &mut FrameBuffer,
     fonts: &FontSet,
@@ -4022,25 +4064,7 @@ fn show_home(
                                     }
                                 }
                             }
-                            HomeHit::Folder(idx) => {
-                                state.active_folder = Some(idx);
-                                state.favorites = false;
-                            }
-                            HomeHit::Home | HomeHit::MyDocuments => {
-                                state.active_folder = None;
-                                state.favorites = false;
-                                state.query.clear();
-                            }
-                            HomeHit::Back => state.active_folder = None,
-                            HomeHit::Favorites => {
-                                state.favorites = true;
-                                state.active_folder = None;
-                            }
-                            HomeHit::Search => state.search_focused = true,
-                            HomeHit::ReverseOrder => state.reverse_order = !state.reverse_order,
-                            HomeHit::ListView => state.list_view = !state.list_view,
-                            HomeHit::Settings => state.settings_open = true,
-                            HomeHit::CloseOverlay => state.settings_open = false,
+                            other => apply_home_hit(&mut state, other),
                         }
                     }
                     dirty = true;
@@ -6494,6 +6518,71 @@ mod tests {
             landed.byte, 7,
             "clicking rendered caret at zoom 1.25 / 144 DPI must resolve back to byte 7"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overflow_reveals_every_collapsed_action_even_in_a_short_window() {
+        // The popup used to estimate a row count and then `break` when the estimate ran out, so a
+        // short window silently lost trailing actions: no scroll, no hint, no way to reach them.
+        let (_tmp, doc) = temp_doc("overflow-short");
+        for height in [240u16, 300, 360, 480] {
+            let mut app = open_gui_app(&doc, View::IDENTITY, 560, height);
+            assert!(app.draw().expect("draw"));
+            let hits = render_toolbar_with(
+                &mut app,
+                SecurityDotState::Unprotected,
+                false,
+                false,
+                true,
+                false,
+                100,
+            );
+            for action in [
+                ToolbarAction::ZoomIn,
+                ToolbarAction::ZoomOut,
+                ToolbarAction::CycleUiScale,
+                ToolbarAction::ToggleTheme,
+                ToolbarAction::ToggleReducedMotion,
+            ] {
+                assert!(
+                    hits.iter().any(|h| h.action == action),
+                    "{action:?} must stay reachable in the overflow at height {height}"
+                );
+            }
+            // Every revealed row must sit inside the client area, or its label would be painted
+            // off-screen by the popup's own clip rect.
+            let limit = i32::from(height);
+            assert!(
+                hits.iter()
+                    .filter(|h| h.action != ToolbarAction::ToggleOverflow)
+                    .all(|h| h.rect.y >= 0 && h.rect.y + h.rect.h <= limit),
+                "every action row must be inside the window at height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn back_and_folder_navigation_clear_the_favorites_tab_and_stale_query() {
+        // `apply_home_hit` is the single place Home's navigation state changes, so it is what the
+        // click handler runs; testing it directly covers every entry point.
+        let mut state = HomeState::with_folder(None);
+        state.query = "zzz-no-such-document".to_owned();
+        state.search_focused = true;
+        state.favorites = true;
+        state.active_folder = Some(0);
+
+        // Back out of a folder while Favorites is showing must land on the unfiltered library.
+        apply_home_hit(&mut state, HomeHit::Back);
+        assert!(!state.favorites, "Back must leave the Favorites tab");
+        assert!(state.active_folder.is_none());
+        assert!(state.query.is_empty(), "Back must drop the stale query");
+
+        state.favorites = true;
+        state.query = "zzz-no-such-document".to_owned();
+        apply_home_hit(&mut state, HomeHit::Folder(0));
+        assert!(!state.favorites, "picking a folder must leave Favorites");
+        assert!(state.query.is_empty(), "picking a folder must drop the query");
     }
 
     #[cfg(unix)]
