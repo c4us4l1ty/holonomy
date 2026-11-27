@@ -74,7 +74,9 @@ Listed so they stay dead.
   hit testing without entering native paint; search/composition activity could fail to refresh
   the dead-man heartbeat. Invalid configured timeouts also silently disabled the watcher, and
   unlock/create could submit a partially composed passphrase; both now fail closed before
-  cryptographic work or file creation. Added focused regressions and a real refused-save/close/retry drill.
+  cryptographic work or file creation. Added focused regressions and a real refused-save/close drill. The new test caught an
+  incorrect retry assumption: append failure deliberately poisons the handle. Pending text
+  remains available for explicit recovery, but restoring the path must not clear that fence.
   Native CI now covers main, pull requests and core dependency changes, enforces formatting on
   the tested source, and exercises native input across integer and fractional display scales.
   Diagnostics issue #51 reached its 2,500-comment limit; CI reporters now use continuation #128.

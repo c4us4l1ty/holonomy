@@ -44,7 +44,9 @@ Do not remove that fence without implementing and qualifying a Windows storage b
 Linux/macOS exercise real encrypted round trips in session tests. Linux additionally
 runs Xvfb smoke tests at 1x, 1.25x, 1.5x, 1.75x and 2x: wrong-passphrase refusal,
 unlock, native input, editing, undo/redo, find, formatting, refused close with pending
-text, save retry, quit and independent encrypted reopen verification. CI
+text, continued refusal of a poisoned handle, explicit wipe/quit, and independent
+encrypted reopen verification of the last committed version. A failed append requires
+recovery/reopen; restoring a pathname never clears the storage safety fence. CI
 screenshots are test specimens, not proof of quality on the user's actual monitor.
 
 Still outstanding before replacing the default:

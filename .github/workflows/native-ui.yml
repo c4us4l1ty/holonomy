@@ -98,6 +98,7 @@ jobs:
             native-format.patch
             native-smoke*.png
             native-failure.png
+            native-refused-save.png
             native-unlock.png
             crates/holonomy-native/src/lib.rs
   bridge:

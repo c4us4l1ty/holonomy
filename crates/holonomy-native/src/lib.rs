@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn refused_close_preserves_pending_text_and_allows_retry() {
+    fn refused_close_preserves_pending_text_without_bypassing_poisoning() {
         let fixture = Fixture::new();
         let mut session = fixture.session();
         session
@@ -727,13 +727,14 @@ mod tests {
             session.editor.frame().unwrap().text(),
             "keep the unsaved text"
         );
-        session.prepare_close().unwrap();
+        assert!(session.prepare_close().is_err());
+        session.apply(Intent::SelectAll).unwrap();
+        assert_eq!(&**session.selected_text().unwrap(), "keep the unsaved text");
+        assert!(session.dirty());
+        assert!(session.wipe());
         drop(session);
         let mut reopened = Session::open(&fixture.0, b"native fixture passphrase").unwrap();
-        assert_eq!(
-            reopened.editor.frame().unwrap().text(),
-            "keep the unsaved text"
-        );
+        assert_eq!(reopened.editor.frame().unwrap().text(), "");
     }
 
     #[test]

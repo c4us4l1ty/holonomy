@@ -42,8 +42,11 @@ xdotool type --clearmodifiers --delay 35 'native'
 xdotool key Return Escape
 xdotool key ctrl+b
 xdotool key ctrl+s
+sleep 1
+import -window "$window" native-smoke.png
 # Removing the pathname makes the next append fail before any bytes can be written. Closing must
-# leave the process/window and pending text alive; restoring the path allows a successful retry.
+# leave the process/window and pending text alive. A failed append poisons the handle by design:
+# do not clear that fence or pretend a retry is guaranteed to recover it.
 xdotool key ctrl+End
 xdotool type --clearmodifiers --delay 35 ' pending'
 [[ ! -e "$held_path" ]]
@@ -55,12 +58,14 @@ kill -0 "$app_pid"
 xdotool getwindowname "$window" | grep -F 'native-smoke.wavefunction'
 mv "$held_path" "$HOLONOMY_NATIVE_SMOKE_PATH"
 held=false
-xdotool key ctrl+a
-xdotool type --clearmodifiers --delay 35 'Saved by native UI smoke test'
-xdotool key ctrl+s
-# Wait for at least one rendered frame before recording the specimen.
-sleep 2
-import -window "$window" native-smoke.png
+xdotool key ctrl+q
+sleep 1
+kill -0 "$app_pid"
+import -window "$window" native-refused-save.png
+# Only an explicit emergency wipe discards the pending text. Reopen below must still see the
+# previous committed version, never a partial or silently advanced save.
+xdotool key ctrl+shift+Escape
+timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
 xdotool key ctrl+q
 # Bounded wait without relying on an indefinite shell wait if shutdown breaks.
 timeout 20 tail --pid="$app_pid" -f /dev/null
