@@ -2950,7 +2950,7 @@ enum HomeHit {
     Back,
     Favorites,
     MyDocuments,
-    ManualOrder,
+    ReverseOrder,
     ListView,
     Settings,
     CloseOverlay,
