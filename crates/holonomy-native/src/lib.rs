@@ -1,10 +1,10 @@
 //! Native frontend session boundary: existing encrypted storage and editing semantics, with
 //! document glyphs exported as vector geometry rather than framework-owned plaintext strings.
 
+use holonomy_seal::{CanarySet, ReaperGuard, SecretArenas, TripReason, Tripwire};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use holonomy_seal::{CanarySet, ReaperGuard, SecretArenas, TripReason, Tripwire};
 
 use holonomy_eye::{raster::FontSet, Fixed, Point, Shaper};
 use holonomy_gui::store::{self, Document, DocumentSink, DocumentSource};
@@ -89,8 +89,18 @@ impl Emergency {
         let canaries = Arc::new(canaries);
         let tripwire = Tripwire::new(timeout);
         tripwire.beat();
-        let reaper = ReaperGuard::spawn_cooperative(Arc::clone(&arenas), Arc::clone(&canaries), Arc::clone(&tripwire), Duration::from_millis(50));
-        Self { reaper: Some(reaper), _canaries: canaries, arenas, tripwire }
+        let reaper = ReaperGuard::spawn_cooperative(
+            Arc::clone(&arenas),
+            Arc::clone(&canaries),
+            Arc::clone(&tripwire),
+            Duration::from_millis(50),
+        );
+        Self {
+            reaper: Some(reaper),
+            _canaries: canaries,
+            arenas,
+            tripwire,
+        }
     }
 }
 
@@ -161,8 +171,8 @@ impl Session {
 
     /// Applies the same intent as the existing frontend. History views cannot mutate storage.
     pub fn apply(&mut self, intent: Intent) -> Result<()> {
-        self.check_live()?;
         self.emergency.tripwire.beat();
+        self.check_live()?;
         if let Some(history) = self.history.as_mut() {
             if !matches!(
                 intent,
@@ -185,6 +195,7 @@ impl Session {
 
     /// Commits through the existing authenticated manifest/witness path.
     pub fn save(&mut self) -> Result<()> {
+        self.emergency.tripwire.beat();
         self.check_live()?;
         self.editor.flush()?;
         Ok(())
@@ -197,6 +208,9 @@ impl Session {
 
     /// Resizes both views using logical coordinates, independently of the monitor scale.
     pub fn resize(&mut self, width: f32, height: f32) {
+        if self.tripped() {
+            return;
+        }
         self.width = fixed(width.max(40.));
         self.height = fixed(height.max(40.));
         self.editor.resize(self.width, self.height);
@@ -275,29 +289,42 @@ impl Session {
     /// Volatile-wipes resident editor buffers and unlocked storage keys. The caller must also
     /// discard the GPU scene and its own input buffers; this does not certify GPU memory erasure.
     pub fn wipe(&mut self) -> bool {
-        let Some(reaper) = self.emergency.reaper.take() else { return self.document.are_keys_zeroized(); };
+        let Some(reaper) = self.emergency.reaper.take() else {
+            return self.document.are_keys_zeroized();
+        };
         self.emergency.tripwire.fire(TripReason::Manual);
         let arenas = &self.emergency.arenas;
         // SAFETY: the UI holds exclusive access, no further document/editor work is performed
         // until wait_outcome joins the cooperative reaper. Each registered allocation stays live.
         unsafe {
             self.document.arm_reaper(arenas);
-            self.editor.set_wipe_registry(Arc::new(holonomy_gui::SealWipeBridge(Arc::clone(arenas))));
+            self.editor
+                .set_wipe_registry(Arc::new(holonomy_gui::SealWipeBridge(Arc::clone(arenas))));
             if let Some(history) = &mut self.history {
-                history.set_wipe_registry(Arc::new(holonomy_gui::SealWipeBridge(Arc::clone(arenas))));
+                history
+                    .set_wipe_registry(Arc::new(holonomy_gui::SealWipeBridge(Arc::clone(arenas))));
             }
             reaper.acknowledge_quiescence();
         }
         let outcome = reaper.wait_outcome();
         self.editor.wipe_all_in_place();
-        if let Some(history) = &mut self.history { history.wipe_all_in_place(); }
-        self.document.are_keys_zeroized() && outcome.is_some_and(|result| result.canaries.ghost_canaries == 0 && result.wipe.bytes_wiped > 0 && result.wipe.arenas_wiped > 0)
+        if let Some(history) = &mut self.history {
+            history.wipe_all_in_place();
+        }
+        self.document.are_keys_zeroized()
+            && outcome.is_some_and(|result| {
+                result.canaries.ghost_canaries == 0
+                    && result.wipe.bytes_wiped > 0
+                    && result.wipe.arenas_wiped > 0
+            })
     }
 
     /// Enables the existing cooperative dead-man watcher. Call before exposing the session.
     pub fn set_deadman(&mut self, timeout: Duration) -> Result<()> {
         self.check_live()?;
-        if timeout.is_zero() { return Err("Dead-man timeout must be positive.".into()); }
+        if timeout.is_zero() {
+            return Err("Dead-man timeout must be positive.".into());
+        }
         self.emergency = Emergency::new(Some(timeout));
         Ok(())
     }
@@ -308,7 +335,11 @@ impl Session {
     }
 
     fn check_live(&self) -> Result<()> {
-        if self.tripped() { Err("Session emergency trip is latched; wiping before further access.".into()) } else { Ok(()) }
+        if self.tripped() {
+            Err("Session emergency trip is latched; wiping before further access.".into())
+        } else {
+            Ok(())
+        }
     }
 
     /// Computes toolbar formatting from the core selection, never from a second document model.
@@ -652,9 +683,11 @@ mod tests {
 
     #[test]
     fn deadman_latches_before_further_access_and_cooperative_wipe_verifies_keys() {
-        let fixture=Fixture::new();
-        let mut session=fixture.session();
-        session.apply(Intent::Type("uncommitted secret".into())).unwrap();
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session
+            .apply(Intent::Type("uncommitted secret".into()))
+            .unwrap();
         session.set_deadman(Duration::from_millis(10)).unwrap();
         std::thread::sleep(Duration::from_millis(30));
         assert!(session.tripped());

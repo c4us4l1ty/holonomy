@@ -23,6 +23,10 @@ Windows document backend. Native Windows encrypted operations now fail explicitl
 before KDF/file creation. That fence remains; Windows storage qualification and the
 remaining security/feature gates must close before replacing the default frontend.
 
+The cooperative canary-verified reaper and optional latched dead-man timer are now
+wired into the native session. Suspend/USB producers and GPU scene lifecycle
+qualification remain open; this is not equivalence with all existing lifecycle gates.
+
 The user reports that the current application remains blurry at 200% after the
 Windows DPI-awareness change. That report supersedes the previous assertion that
 integer framebuffer scaling was sufficient to make the application crisp.

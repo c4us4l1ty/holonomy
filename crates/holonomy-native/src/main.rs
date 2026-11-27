@@ -60,17 +60,23 @@ impl NativeHome {
         } else {
             Screen::Unlock
         };
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
-                if this.update(cx, |this, cx| {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(50))
+                .await;
+            if this
+                .update(cx, |this, cx| {
                     if this.session.as_ref().is_some_and(Session::tripped) {
                         this.wipe(cx);
                         cx.notify();
                     }
-                }).is_err() { break; }
+                })
+                .is_err()
+            {
+                break;
             }
-        }).detach();
+        })
+        .detach();
         Self {
             focus: cx.focus_handle(),
             fonts: holonomy_eye::FontSet::embedded(17).expect("embedded fonts"),
@@ -145,9 +151,14 @@ impl NativeHome {
         self.passphrase.zeroize();
         match result {
             Ok(mut session) => {
-                if let Some(ms) = std::env::var("HOLONOMY_DEADMAN_MS").ok().and_then(|value| value.parse::<u64>().ok()).filter(|&ms| ms > 0) {
+                if let Some(ms) = std::env::var("HOLONOMY_DEADMAN_MS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|&ms| ms > 0)
+                {
                     if let Err(error) = session.set_deadman(std::time::Duration::from_millis(ms)) {
-                        self.status=error.to_string(); return;
+                        self.status = error.to_string();
+                        return;
                     }
                 }
                 self.session = Some(session);

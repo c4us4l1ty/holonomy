@@ -24,7 +24,10 @@ The Native UI preview workflow publishes platform binaries as run artifacts.
 - Save and save-before-close/Home; a save refusal keeps the session open.
 - Streaming Find, read-only witness previews, bookmark creation and integrity verification.
 - Explicit bounded clipboard copy/cut/paste with plaintext-egress disclosure.
-- Explicit resident-buffer/key wipe and clipboard clearing; **not** a GPU-erasure guarantee.
+- Cooperative canary-verified resident-buffer/key wipe and clipboard clearing; **not** a
+  GPU-erasure guarantee. Optional `HOLONOMY_DEADMAN_MS` enables the existing latched dead-man
+  watcher. A foreground poll observes a trip without repainting while idle; reads/saves after a
+  latched trip are refused until the wipe completes.
 - Fixed-capacity secret input buffers; deleted graphemes and dropped glyph contour buffers
   are zeroized. Search/bookmark input is painted through the same vector path.
 
@@ -43,8 +46,8 @@ screenshots are test specimens, not proof of quality on the user's actual monito
 
 Still outstanding before replacing the default:
 
-- Automatic cooperative emergency-reaper integration, complete scene/cache lifecycle
-  review and shutdown/OS-quit failure handling. Explicit CPU/key wipe is not equivalent.
+- Suspend/USB tripwire producers, complete scene/cache lifecycle review and shutdown/OS-quit
+  failure handling. Manual/dead-man CPU/key wipe is not a full lifecycle qualification.
 - Full IME reconversion/selection and accessibility qualification. The input context
   deliberately does not expose surrounding document/passphrase text to the framework.
 - Full toolbar/chrome parity (including all rich formatting, links, folders/recent-file
