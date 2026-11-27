@@ -1114,6 +1114,19 @@ enum ButtonHighlight {
     Mixed,
 }
 
+/// Which surface a button sits on. quiet.md's document header is bare glyphs and text with no
+/// resting pill, but that rule is *about the header*: inside a popup, a drawer or a banner the
+/// fill is what tells the user the words are pressable. `D-102` removed the resting pill globally
+/// and made the drawer's `Live` / `PinBase` / `DiffPrev` and the recovery banner's `Dismiss` read
+/// as body copy — this distinction is the correction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonSurface {
+    /// Header / toolbar: unfilled at rest, so the bar reads as a row of glyphs.
+    Bare,
+    /// Popup, drawer or banner: a quiet chip at rest, so the control is discoverable.
+    Chipped,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_toolbar_button(
     fb: &mut FrameBuffer,
@@ -1125,35 +1138,40 @@ fn draw_toolbar_button(
     disabled: bool,
     theme: &PageTheme,
     clip: Rect,
+    surface: ButtonSurface,
 ) -> (Rect, i32) {
     let style = Style::at(880);
     let label_w = fonts.advance(label, style).sixtyfourths() >> 6;
     let w = (label_w as i32 + 16).max(26);
     let h = 26;
     let rect = Rect::new(x, y, w, h);
+    // `D-102`: quiet.md's header is bare glyphs on the page — no resting pill. Drawing a filled,
+    // outlined box under every toolbar item made the writing view read as a wall of grey chips,
+    // which is what diverged most from the reference. Only *on* marks are filled now, and the
+    // fills are quiet (`muted`-weight washes), matching quiet.md's 8 pt control radius. Surfaces
+    // where the fill carries the affordance (popup rows, drawer actions, the banner's `Dismiss`)
+    // opt back in through `ButtonSurface::Chipped`.
     if !disabled {
         match highlight {
             ButtonHighlight::Active => {
-                // `D-101`: an active pill used the light Home wash over dark paper, which read
-                // as a grey smudge; the wash follows the paper theme now.
                 let (fill, border) = if is_dark_theme(theme) {
                     (
-                        Rgba8::rgba_pct(0x7a, 0xb0, 0xff, 18),
-                        Rgba8::rgba_pct(0x7a, 0xb0, 0xff, 55),
+                        Rgba8::rgba_pct(0x7a, 0xb0, 0xff, 16),
+                        Rgba8::rgba_pct(0x7a, 0xb0, 0xff, 45),
                     )
                 } else {
-                    (HOME_WASH, Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 55))
+                    (HOME_WASH, Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 40))
                 };
-                fb.fill_rounded_rect(rect, 7, fill, clip);
-                fb.stroke_rounded_rect(rect, 7, border, clip);
+                fb.fill_rounded_rect(rect, 8, fill, clip);
+                fb.stroke_rounded_rect(rect, 8, border, clip);
             }
             ButtonHighlight::Mixed => {
-                fb.fill_rounded_rect(rect, 7, theme.code_bg, clip);
-                fb.stroke_rounded_rect(rect, 7, theme.line_border, clip);
+                fb.fill_rounded_rect(rect, 8, soft_fill_for(theme), clip);
             }
-            ButtonHighlight::Off => {
-                fb.fill_rounded_rect(rect, 7, soft_fill_for(theme), clip);
+            ButtonHighlight::Off if surface == ButtonSurface::Chipped => {
+                fb.fill_rounded_rect(rect, 8, soft_fill_for(theme), clip);
             }
+            ButtonHighlight::Off => {}
         }
     }
     let ink = if disabled {
@@ -1508,6 +1526,7 @@ where
                 ),
             &theme,
             bar,
+            ButtonSurface::Bare,
         );
         hits.push(ToolbarHit { rect, action });
         x = next_x + if end_group { gap } else { 0 };
@@ -1529,6 +1548,7 @@ where
             false,
             &theme,
             bar,
+            ButtonSurface::Bare,
         );
         hits.push(ToolbarHit {
             rect: ov_rect,
@@ -1568,6 +1588,7 @@ where
         false,
         &theme,
         bar,
+        ButtonSurface::Bare,
     );
     hits.push(ToolbarHit {
         rect: hist_rect,
@@ -1659,6 +1680,7 @@ where
                     ),
                 &theme,
                 menu,
+                ButtonSurface::Chipped,
             );
             hits.push(ToolbarHit { rect, action });
             mx = nx;
@@ -1710,6 +1732,7 @@ fn render_recovery_banner(
         false,
         &theme,
         bar,
+        ButtonSurface::Chipped,
     );
     Some(dismiss_rect)
 }
@@ -1964,6 +1987,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((bm_rect, HistoryButton::StartBookmark));
     let (sr_rect, nx2) = draw_toolbar_button(
@@ -1980,6 +2004,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((sr_rect, HistoryButton::StartSearch));
     let (rs_rect, nx3) = draw_toolbar_button(
@@ -1992,6 +2017,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((rs_rect, HistoryButton::RestoreSelected));
     let (lv_rect, _) = draw_toolbar_button(
@@ -2004,6 +2030,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((lv_rect, HistoryButton::CloseLive));
     y += 28;
@@ -2019,6 +2046,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((sb_rect, HistoryButton::SetDiffBase));
     let (dp_rect, dx2) = draw_toolbar_button(
@@ -2031,6 +2059,7 @@ fn render_history_drawer(
         false,
         &theme,
         drawer,
+        ButtonSurface::Chipped,
     );
     hits.push((dp_rect, HistoryButton::DiffPrev));
     if !state.search_hits.is_empty() {
@@ -2044,6 +2073,7 @@ fn render_history_drawer(
             false,
             &theme,
             drawer,
+            ButtonSurface::Chipped,
         );
         hits.push((nh_rect, HistoryButton::NextSearchHit));
     }
@@ -2129,6 +2159,7 @@ fn render_history_drawer(
                 false,
                 &theme,
                 drawer,
+                ButtonSurface::Chipped,
             );
             hits.push((bm_hit, HistoryButton::SelectBookmark(bm.witness_sequence)));
             bx = nx_bm + 4;
@@ -2447,10 +2478,12 @@ const HOME_FAINT: Rgba8 = Rgba8::rgb(0xe3, 0xe5, 0xe7);
 const HOME_ACCENT: Rgba8 = Rgba8::rgb(0x3a, 0x85, 0xf7);
 const HOME_WASH: Rgba8 = Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 12);
 const HOME_SELECTION: Rgba8 = Rgba8::rgba_pct(0xff, 0xff, 0xff, 34);
+/// The folder pocket in a Home card — quiet.md's glass folder, read as a flat wash here
+/// (`D-102`). Slightly cooler than `HOME_CARD` so the papers inside still separate from it.
+const HOME_POCKET: Rgba8 = Rgba8::rgba_pct(0xe8, 0xec, 0xef, 78);
 
 const HOME_SIDEBAR_W: i32 = 216;
 const HOME_CARD_MIN_W: i32 = 208;
-const HOME_CARD_H: i32 = 196;
 const HOME_GAP: i32 = 20;
 
 /// Chrome ink for surfaces that are painted over the *page* theme rather than over Home's fixed
@@ -2747,10 +2780,16 @@ fn render_document_breadcrumb(
     ));
     x += home_w + 12;
 
+    // Space the crumbs may use: everything left of the `Find` control, with a margin. Each crumb
+    // was previously bounded only by its own 180 pt cap, so a long folder name ran the crumbs
+    // (and their `›` separators) underneath that button on a narrow window (`D-102`).
+    let crumb_room = |x: i32| (rect.x + rect.w - 124 - x).max(0);
     if let Some(folder) = &data.folder_label {
+        let room = crumb_room(x);
         draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
         x += 14;
-        let folder_shown = home_fit_text(fonts, folder, 840, 180);
+        let folder_w = room.min(180).saturating_sub(14).max(24);
+        let folder_shown = home_fit_text(fonts, folder, 840, folder_w);
         draw_home_text(
             fb,
             fonts,
@@ -2764,9 +2803,11 @@ fn render_document_breadcrumb(
         );
         x += home_text_width(fonts, &folder_shown, 840) + 12;
     }
-    draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
-    x += 14;
-    let space = (rect.x + rect.w - 108 - x).max(0);
+    if crumb_room(x) > 20 {
+        draw_home_text(fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false);
+        x += 14;
+    }
+    let space = crumb_room(x);
     draw_home_text(
         fb,
         fonts,
@@ -2909,7 +2950,7 @@ enum HomeHit {
     Back,
     Favorites,
     MyDocuments,
-    ManualOrder,
+    ReverseOrder,
     ListView,
     Settings,
     CloseOverlay,
@@ -3036,7 +3077,7 @@ struct HomeState {
     query: String,
     search_focused: bool,
     favorites: bool,
-    manual_order: bool,
+    reverse_order: bool,
     list_view: bool,
     settings_open: bool,
 }
@@ -3057,7 +3098,7 @@ impl HomeState {
             query: String::new(),
             search_focused: false,
             favorites: false,
-            manual_order: false,
+            reverse_order: false,
             list_view: false,
             settings_open: false,
         }
@@ -3073,10 +3114,14 @@ impl HomeState {
                 if self.favorites {
                     return false;
                 }
-                if let Some(folder) = self.active_folder {
-                    if entry.folder != self.folders[folder].name {
-                        return false;
-                    }
+                // A stale index (the folder list shrank while it was selected) must not panic
+                // the paint path: `get` degrades to "no folder filter" instead.
+                let folder_filter = self
+                    .active_folder
+                    .and_then(|idx| self.folders.get(idx))
+                    .map(|folder| folder.name.as_str());
+                if folder_filter.is_some_and(|name| entry.folder != name) {
+                    return false;
                 }
                 needle.is_empty()
                     || entry.name.to_lowercase().contains(&needle)
@@ -3084,7 +3129,7 @@ impl HomeState {
             })
             .map(|(idx, _)| idx)
             .collect();
-        if self.manual_order {
+        if self.reverse_order {
             hits.reverse();
         }
         hits
@@ -3136,6 +3181,59 @@ fn draw_home_folder_icon(fb: &mut FrameBuffer, x: i32, y: i32, color: Rgba8, cli
     fb.fill_rounded_rect(Rect::new(x, y + 4, 14, 9), 2, color, clip);
 }
 
+/// Left edge of a rail glyph: rows start at the pill's edge, the glyph is centred at 38 pt and the
+/// label follows at 54 pt, which is quiet.md's rail geometry (`D-102`).
+fn home_library_glyph_x(row_x: i32) -> i32 {
+    row_x + 16
+}
+
+/// A small open-folder outline, drawn rather than depended on: no icon font ships with the app
+/// and quiet.md's glyph set is not vendored (`D-102`).
+fn draw_home_folder_outline(fb: &mut FrameBuffer, rect: Rect, color: Rgba8, clip: Rect) {
+    let w = rect.w.max(6);
+    let h = rect.h.max(5);
+    // Tab on the left of the top edge, then the body: the quiet.md folder silhouette.
+    let tab_w = (w * 5) / 12;
+    fb.fill_rounded_rect(Rect::new(rect.x, rect.y, tab_w, 4), 2, color, clip);
+    fb.fill_rounded_rect(Rect::new(rect.x, rect.y + 2, w, h - 2), 3, color, clip);
+}
+
+/// A magnifier: a 1 pt ring and a diagonal handle.
+fn draw_home_search_glyph(fb: &mut FrameBuffer, rect: Rect, color: Rgba8, clip: Rect) {
+    let cx = rect.x + rect.w / 2 - 1;
+    let cy = rect.y + rect.h / 2 - 1;
+    fb.stroke_rounded_rect(Rect::new(cx - 5, cy - 6, 11, 11), 6, color, clip);
+    for step in 0..4 {
+        let handle = Rect::new(cx + 4 + step, cy + 4 + step, 2, 2);
+        fb.fill_rect_clipped(handle, color, clip);
+    }
+}
+
+/// The grid/list toggle: four tiles for the grid, three bars for the list — it shows the view the
+/// button switches *to*, which is the convention the reference's toggle follows (`D-102`).
+fn draw_home_view_glyph(fb: &mut FrameBuffer, rect: Rect, color: Rgba8, clip: Rect, list: bool) {
+    let x = rect.x + rect.w / 2 - 6;
+    let y = rect.y + rect.h / 2 - 6;
+    if list {
+        for row in 0..3 {
+            fb.fill_rounded_rect(Rect::new(x, y + row * 4, 12, 2), 1, color, clip);
+        }
+        return;
+    }
+    for (dx, dy) in [(0, 0), (7, 0), (0, 7), (7, 7)] {
+        fb.fill_rounded_rect(Rect::new(x + dx, y + dy, 5, 5), 1, color, clip);
+    }
+}
+
+/// A gear: a ring with four teeth, matching the reference's settings row.
+fn draw_home_gear_icon(fb: &mut FrameBuffer, x: i32, y: i32, color: Rgba8, clip: Rect) {
+    fb.stroke_rounded_rect(Rect::new(x + 1, y + 1, 11, 11), 6, color, clip);
+    for (dx, dy) in [(5, -1), (5, 12), (-1, 5), (12, 5)] {
+        let tooth = Rect::new(x + dx, y + dy, 3, 2);
+        fb.fill_rect_clipped(tooth, color, clip);
+    }
+}
+
 /// Draws the Home shell into a logical-pixel framebuffer and returns its click targets. Every
 /// surface paired with [`crate::platform::DesktopWindow`] pointer coordinates, so scaling stays
 /// consistent with the editor.
@@ -3157,108 +3255,120 @@ fn render_home(
     fb.fill_vertical_gradient(sidebar, HOME_SIDE_TOP, HOME_SIDE_BOTTOM, full);
     fb.fill_rect_clipped(Rect::new(sidebar.w - 1, 0, 1, h), HOME_FAINT, full);
 
-    // Sidebar: Home, library folders, and a settings row pinned to the bottom.
-    let side_pad = 16;
-    let side_w = sidebar.w - 2 * side_pad;
-    let mut sy = 30;
-    let home_row = Rect::new(side_pad, sy - 8, side_w, 36);
+    // Sidebar (`D-102`). quiet.md's rail is a 30 pt row with radius 9, selection pills starting
+    // 14 pt in, an 18 pt folder glyph centred at 37 pt and labels at 54 pt. The previous build
+    // used 36 pt rows with a white wash on *every* row (Home, library, Settings), which read as a
+    // column of buttons instead of a quiet list; only the active row is filled now.
+    let sb_x = 14;
+    let side_w = sidebar.w - 2 * sb_x;
+    let row_h = 30;
+    let row_step = 31;
+    let mut sy = 34;
+    let home_row = Rect::new(sb_x, sy, side_w, row_h);
     if !state.favorites && state.active_folder.is_none() {
-        fb.fill_rounded_rect(home_row, 8, HOME_SELECTION, full);
+        fb.fill_rounded_rect(home_row, 9, HOME_SELECTION, full);
     }
-    draw_home_folder_icon(fb, side_pad + 12, sy, HOME_INK, full);
+    draw_home_folder_outline(
+        fb,
+        Rect::new(home_library_glyph_x(sb_x), sy + 7, 16, 13),
+        HOME_INK,
+        full,
+    );
     draw_home_text(
         fb,
         fonts,
-        side_pad + 36,
-        sy + 17,
+        sb_x + 40,
+        sy + 19,
         "Home",
-        920,
+        900,
         HOME_INK,
         full,
         false,
     );
     hits.push((home_row, HomeHit::Home));
-    sy += 62;
+    sy += 42;
 
-    let lib_row = Rect::new(side_pad, sy - 8, side_w, 36);
-    fb.fill_rounded_rect(lib_row, 8, HOME_SELECTION, full);
+    // "My documents" is a section row, not a filled button: the label carries the eye and the
+    // `+` is the only control on it.
     draw_home_text(
         fb,
         fonts,
-        side_pad + 12,
-        sy + 17,
+        sb_x + 12,
+        sy + 19,
         "My documents",
-        880,
-        HOME_INK,
+        820,
+        HOME_MUTED,
         full,
         false,
     );
-    // Push the row before the `+` so rev-order hit resolution reaches the smaller target.
-    hits.push((lib_row, HomeHit::MyDocuments));
-    let plus_x = sidebar.w - side_pad - 22;
+    hits.push((Rect::new(sb_x, sy, side_w, row_h), HomeHit::MyDocuments));
+    let plus_x = sidebar.w - sb_x - 20;
     draw_home_text(
         fb,
         fonts,
         plus_x,
-        sy + 17,
+        sy + 20,
         "+",
         1_040,
-        HOME_INK,
+        HOME_MUTED,
         full,
         false,
     );
-    hits.push((Rect::new(plus_x - 4, sy - 6, 26, 28), HomeHit::NewDocument));
-    sy += 42;
+    hits.push((Rect::new(plus_x - 5, sy + 2, 24, 26), HomeHit::NewDocument));
+    sy += row_step + 8;
 
-    for (idx, folder) in state.folders.iter().enumerate().take(14) {
-        if sy + 30 > h - 64 {
+    for (idx, folder) in state.folders.iter().enumerate().take(16) {
+        if sy + row_h > h - 62 {
             break;
         }
-        if Some(idx) == state.active_folder {
-            fb.fill_rounded_rect(
-                Rect::new(side_pad, sy - 7, side_w, 30),
-                7,
-                HOME_SELECTION,
-                full,
-            );
+        let active = Some(idx) == state.active_folder;
+        let row = Rect::new(sb_x, sy, side_w, row_h);
+        if active {
+            fb.fill_rounded_rect(row, 9, HOME_SELECTION, full);
         }
-        draw_home_folder_icon(fb, side_pad + 14, sy - 2, HOME_MUTED, full);
-        let label = home_fit_text(fonts, &folder.name, 840, side_w - 48);
+        draw_home_folder_outline(
+            fb,
+            Rect::new(home_library_glyph_x(sb_x), sy + 7, 16, 13),
+            if active { HOME_INK } else { HOME_MUTED },
+            full,
+        );
+        let label = home_fit_text(fonts, &folder.name, 840, side_w - 52);
         draw_home_text(
             fb,
             fonts,
-            side_pad + 38,
-            sy + 14,
+            sb_x + 40,
+            sy + 19,
             &label,
             840,
             HOME_INK,
             full,
             false,
         );
-        hits.push((
-            Rect::new(side_pad, sy - 8, side_w, 30),
-            HomeHit::Folder(idx),
-        ));
-        sy += 32;
+        hits.push((row, HomeHit::Folder(idx)));
+        sy += row_step;
     }
 
-    let settings = Rect::new(side_pad, h - 52, side_w, 34);
-    fb.fill_rounded_rect(settings, 8, HOME_SELECTION, full);
+    // Settings sits at the rail's foot, quiet until hovered (pointer hover is not tracked, so it
+    // stays unfilled and simply reads as the last row).
+    let settings = Rect::new(sb_x, h - 44, side_w, row_h);
     draw_home_text(
         fb,
         fonts,
-        side_pad + 12,
-        h - 30,
+        sb_x + 40,
+        h - 25,
         "Settings",
-        860,
+        840,
         HOME_MUTED,
         full,
         false,
     );
+    draw_home_gear_icon(fb, sb_x + 13, h - 32, HOME_MUTED, full);
     hits.push((settings, HomeHit::Settings));
 
-    // Header: quiet.md-style library breadcrumb, search field, quick actions.
-    let header_x = content.x + 32;
+    // Header: quiet.md's one-row top bar — a 17 pt title on the left, bare icon actions on the
+    // right (`+`, grid/list, search, `...`), then a hairline before the cards.
+    let header_h = 56;
+    let header_x = content.x + 24;
     let lib_label = home_library_label();
     let breadcrumb = match state.active_folder.and_then(|idx| state.folders.get(idx)) {
         Some(folder) => format!("{lib_label} \u{203A} {}", folder.name),
@@ -3268,220 +3378,220 @@ fn render_home(
         fb,
         fonts,
         header_x,
-        46,
-        &home_fit_text(fonts, &breadcrumb, 1_000, (content.w - 480).max(160)),
-        1_000,
+        36,
+        &home_fit_text(fonts, &breadcrumb, 1_020, (content.w - 300).max(120)),
+        1_020,
         HOME_INK,
         content,
         true,
     );
-    let search_w = (content.w - 420).clamp(180, 380);
-    let search_x = content.x + (content.w - search_w) / 2;
-    let search_rect = Rect::new(search_x, 20, search_w, 36);
-    fb.fill_rounded_rect(search_rect, 10, HOME_SURFACE, content);
-    fb.stroke_rounded_rect(search_rect, 10, HOME_FAINT, content);
-    let search_text = if state.query.is_empty() {
-        "Search documents\u{2026}".to_owned()
-    } else {
-        state.query.clone()
-    };
-    draw_home_text(
-        fb,
-        fonts,
-        search_x + 14,
-        43,
-        &search_text,
-        880,
-        if state.query.is_empty() {
-            HOME_MUTED
-        } else {
-            HOME_INK
-        },
-        search_rect,
-        false,
+
+    // Right-aligned icon row. `...` handles settings; search opens the inline field.
+    let icon_y = 18;
+    let icon_size = 30;
+    let menu_rect = Rect::new(
+        content.x + content.w - icon_size - 20,
+        icon_y,
+        icon_size,
+        icon_size,
     );
-    if state.search_focused {
-        fb.fill_rect_clipped(
-            Rect::new(
-                search_x + 14 + home_text_width(fonts, &search_text, 880),
-                27,
-                1,
-                18,
-            ),
-            HOME_ACCENT,
-            search_rect,
-        );
-    }
-    let shortcut = if cfg!(target_os = "macos") {
-        "\u{2318} J"
-    } else {
-        "Ctrl J"
-    };
-    draw_home_text(
-        fb,
-        fonts,
-        search_x + search_w - home_text_width(fonts, shortcut, 760) - 12,
-        43,
-        shortcut,
-        760,
-        HOME_MUTED,
-        search_rect,
-        false,
-    );
+    let search_rect = Rect::new(menu_rect.x - icon_size - 6, icon_y, icon_size, icon_size);
+    let view_rect = Rect::new(search_rect.x - icon_size - 6, icon_y, icon_size, icon_size);
+    let new_rect = Rect::new(view_rect.x - icon_size - 6, icon_y, icon_size, icon_size);
+    draw_home_search_glyph(fb, search_rect, HOME_MUTED, content);
     hits.push((search_rect, HomeHit::Search));
-
-    let action_new = Rect::new(content.x + content.w - 56, 20, 32, 32);
-    fb.fill_rounded_rect(action_new, 8, HOME_SURFACE, content);
-    fb.stroke_rounded_rect(action_new, 8, HOME_FAINT, content);
+    draw_home_view_glyph(
+        fb,
+        view_rect,
+        if state.list_view {
+            HOME_INK
+        } else {
+            HOME_MUTED
+        },
+        content,
+        !state.list_view,
+    );
+    hits.push((view_rect, HomeHit::ListView));
     draw_home_text(
         fb,
         fonts,
-        action_new.x + 9,
-        43,
+        new_rect.x + 9,
+        new_rect.y + 21,
         "+",
-        1_080,
+        1_120,
         HOME_INK,
-        action_new,
+        new_rect,
         false,
     );
-    hits.push((action_new, HomeHit::NewDocument));
+    hits.push((new_rect, HomeHit::NewDocument));
+    draw_home_text(
+        fb,
+        fonts,
+        menu_rect.x + 6,
+        menu_rect.y + 18,
+        "...",
+        900,
+        HOME_MUTED,
+        menu_rect,
+        false,
+    );
+    hits.push((menu_rect, HomeHit::Settings));
 
-    if content.w >= 480 {
-        let action_menu = Rect::new(content.x + content.w - 100, 20, 32, 32);
-        fb.fill_rounded_rect(action_menu, 8, HOME_SURFACE, content);
-        fb.stroke_rounded_rect(action_menu, 8, HOME_FAINT, content);
+    // Inline search field, shown under the header only while searching or focused. Keeping it out
+    // of the resting header is what makes the top bar as quiet as the reference's.
+    let mut list_top = header_h;
+    if state.search_focused || !state.query.is_empty() {
+        let field = Rect::new(header_x, header_h - 4, (content.w - 48).min(420), 32);
+        fb.fill_rounded_rect(field, 9, HOME_SURFACE, content);
+        fb.stroke_rounded_rect(field, 9, HOME_FAINT, content);
+        let text = if state.query.is_empty() {
+            "Search documents\u{2026}".to_owned()
+        } else {
+            state.query.clone()
+        };
         draw_home_text(
             fb,
             fonts,
-            action_menu.x + 10,
-            43,
-            "...",
-            900,
-            HOME_MUTED,
-            action_menu,
+            field.x + 12,
+            field.y + 21,
+            &text,
+            860,
+            if state.query.is_empty() {
+                HOME_MUTED
+            } else {
+                HOME_INK
+            },
+            field,
             false,
         );
-        hits.push((action_menu, HomeHit::Settings));
-    }
-
-    // Segmented tabs and library controls.
-    let tabs_y = 84;
-    let my_tab = Rect::new(header_x, tabs_y, 150, 32);
-    let fav_tab = Rect::new(my_tab.x + my_tab.w + 8, tabs_y, 112, 32);
-    for (rect, active) in [(my_tab, !state.favorites), (fav_tab, state.favorites)] {
-        fb.fill_rounded_rect(
-            rect,
-            9,
-            if active { HOME_WASH } else { HOME_CANVAS_BG },
-            content,
-        );
-        if active {
-            fb.stroke_rounded_rect(rect, 9, HOME_ACCENT, content);
+        if state.search_focused {
+            fb.fill_rect_clipped(
+                Rect::new(
+                    field.x + 12 + home_text_width(fonts, &text, 860),
+                    field.y + 8,
+                    1,
+                    16,
+                ),
+                HOME_ACCENT,
+                field,
+            );
         }
-    }
-    draw_home_text(
-        fb,
-        fonts,
-        my_tab.x + 16,
-        tabs_y + 22,
-        "My documents",
-        840,
-        HOME_INK,
-        my_tab,
-        !state.favorites,
-    );
-    draw_home_text(
-        fb,
-        fonts,
-        fav_tab.x + 16,
-        tabs_y + 22,
-        "Favorites",
-        840,
-        HOME_MUTED,
-        fav_tab,
-        false,
-    );
-    hits.push((my_tab, HomeHit::MyDocuments));
-    hits.push((fav_tab, HomeHit::Favorites));
-
-    let controls_y = tabs_y + 48;
-    let order = Rect::new(content.x + content.w - 236, controls_y, 116, 28);
-    let view_toggle = Rect::new(content.x + content.w - 108, controls_y, 76, 28);
-    fb.fill_rounded_rect(order, 7, HOME_WASH, content);
-    fb.fill_rounded_rect(view_toggle, 7, HOME_WASH, content);
-    draw_home_text(
-        fb,
-        fonts,
-        order.x + 10,
-        controls_y + 19,
-        if state.manual_order {
-            "Manual order"
+        let shortcut = if cfg!(target_os = "macos") {
+            "\u{2318} J"
         } else {
-            "Name order"
-        },
-        780,
-        HOME_INK,
-        order,
-        false,
-    );
-    draw_home_text(
-        fb,
-        fonts,
-        view_toggle.x + 12,
-        controls_y + 19,
-        if state.list_view { "List" } else { "Grid" },
-        780,
-        HOME_INK,
-        view_toggle,
-        false,
-    );
-    hits.push((order, HomeHit::ManualOrder));
-    hits.push((view_toggle, HomeHit::ListView));
-    draw_home_text(
-        fb,
-        fonts,
-        header_x,
-        controls_y + 19,
-        if state.active_folder.is_some() {
-            "Documents"
-        } else {
-            "Manage"
-        },
-        800,
-        HOME_MUTED,
-        content,
-        false,
-    );
-    if state.active_folder.is_some() {
-        let back = Rect::new(header_x + 76, controls_y - 2, 56, 26);
-        fb.fill_rounded_rect(back, 7, HOME_WASH, content);
+            "Ctrl J"
+        };
         draw_home_text(
             fb,
             fonts,
-            back.x + 12,
-            controls_y + 17,
-            "Back",
-            780,
-            HOME_INK,
+            field.x + field.w - home_text_width(fonts, shortcut, 760) - 10,
+            field.y + 21,
+            shortcut,
+            760,
+            HOME_MUTED,
+            field,
+            false,
+        );
+        hits.push((field, HomeHit::Search));
+        list_top = header_h + 38;
+    }
+    fb.fill_rect_clipped(
+        Rect::new(content.x, list_top - 1, content.w, 1),
+        HOME_FAINT,
+        content,
+    );
+
+    // Library row: quiet.md has no segmented tab strip here. Keep the two views reachable as a
+    // plain text pair (active in ink with a 2 pt underline, inactive muted), and the sort order as
+    // a single quiet label on the right. Cards start right under this row.
+    let controls_y = list_top + 14;
+    let baseline = controls_y + 19;
+    let mut cx = header_x;
+    for (label, active, hit) in [
+        ("My documents", !state.favorites, HomeHit::MyDocuments),
+        ("Favorites", state.favorites, HomeHit::Favorites),
+    ] {
+        let w = home_text_width(fonts, label, 880);
+        let rect = Rect::new(cx - 6, controls_y, w + 12, 28);
+        draw_home_text(
+            fb,
+            fonts,
+            cx,
+            baseline,
+            label,
+            880,
+            if active { HOME_INK } else { HOME_MUTED },
+            rect,
+            active,
+        );
+        if active {
+            fb.fill_rect_clipped(Rect::new(cx, controls_y + 25, w, 2), HOME_INK, rect);
+        }
+        hits.push((rect, hit));
+        cx += w + 22;
+    }
+
+    // The flag reverses the catalogue's name order; there is no stored manual order to honour, so
+    // it is labelled for what it does. Calling it "Manual" promised a drag-reorder the app does
+    // not have, and `reverse_order` is the name that stops the label drifting again (`D-102`).
+    let sort_label = if state.reverse_order {
+        "Z\u{2013}A"
+    } else {
+        "A\u{2013}Z"
+    };
+    let sort_w = home_text_width(fonts, sort_label, 800);
+    let sort_rect = Rect::new(content.x + content.w - 24 - sort_w, controls_y, sort_w, 28);
+    draw_home_text(
+        fb,
+        fonts,
+        sort_rect.x,
+        baseline,
+        sort_label,
+        800,
+        HOME_MUTED,
+        sort_rect,
+        false,
+    );
+    hits.push((sort_rect, HomeHit::ReverseOrder));
+
+    if state.active_folder.is_some() {
+        let back = Rect::new(header_x, controls_y + 32, 52, 26);
+        draw_home_text(
+            fb,
+            fonts,
+            back.x,
+            controls_y + 50,
+            "\u{2039} Back",
+            800,
+            HOME_MUTED,
             back,
             false,
         );
         hits.push((back, HomeHit::Back));
     }
 
-    let grid_y = controls_y + 42;
+    let grid_y = controls_y + 40 + if state.active_folder.is_some() { 32 } else { 0 };
     let hits_end = render_home_cards(fb, fonts, state, grid_y, content);
     hits.extend(hits_end);
 
     if state.settings_open {
+        // Centred in the content pane and clamped to it, so the sheet cannot hang off a small
+        // window or be pinned too high on a tall one.
+        let overlay_w = 440.min(content.w - 32);
+        let overlay_h = 248.min(content.h - 32);
         let overlay = Rect::new(
-            content.x + (content.w - 440).max(20) / 2,
-            150,
-            440.min(content.w - 40),
-            248,
+            content.x + (content.w - overlay_w) / 2,
+            (content.h - overlay_h) / 2,
+            overlay_w,
+            overlay_h,
         );
         fb.fill_rounded_rect(overlay, 14, HOME_SURFACE, full);
         fb.stroke_rounded_rect(overlay, 14, HOME_FAINT, full);
+        // The sheet is modal to the pointer: a click anywhere on it must not fall through to the
+        // card (or folder row) painted underneath and open a document behind the overlay. Pushing
+        // a swallow target *first* keeps it behind the close button, which is pushed last and so
+        // still wins the reverse-order lookup (`D-102`).
+        hits.push((overlay, HomeHit::CloseOverlay));
         draw_home_text(
             fb,
             fonts,
@@ -3503,11 +3613,16 @@ fn render_home(
         .iter()
         .enumerate()
         {
+            // Skip rows the clamped sheet cannot hold, rather than painting them past its edge.
+            let baseline = overlay.y + 78 + row as i32 * 30;
+            if baseline + 6 > overlay.y + overlay.h {
+                break;
+            }
             draw_home_text(
                 fb,
                 fonts,
                 overlay.x + 22,
-                overlay.y + 78 + row as i32 * 30,
+                baseline,
                 line,
                 820,
                 HOME_MUTED,
@@ -3541,18 +3656,33 @@ fn render_home_cards(
     content: Rect,
 ) -> Vec<(Rect, HomeHit)> {
     let mut hits = Vec::new();
-    let pad = 32;
+    // quiet.md's folder page insets the grid 24 pt from the pane on both sides.
+    let pad = 24;
     let available = content.w - 2 * pad;
     if state.favorites || (state.query.is_empty() && state.folders.is_empty()) {
-        let card = Rect::new(content.x + pad, top, available.min(560), 176);
-        fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
-        fb.stroke_rounded_rect(card, 14, HOME_TAB, content);
+        let card = Rect::new(content.x + pad, top, available.min(560), 200);
+        fb.fill_rounded_rect(card, 16, HOME_SURFACE, content);
+        fb.stroke_rounded_rect(card, 16, HOME_FAINT, content);
+        // The empty state says which emptiness this is; "No documents yet" under Favorites
+        // (which has no document list at all) would be a lie in the one place a user looks for
+        // reassurance (`D-102`).
+        let (title, caption) = if state.favorites {
+            (
+                "No favorites yet",
+                "Nothing is marked a favorite yet; the whole library is under My documents.",
+            )
+        } else {
+            (
+                "No documents yet",
+                "Create an encrypted document to start your library.",
+            )
+        };
         draw_home_text(
             fb,
             fonts,
             card.x + 24,
             card.y + 46,
-            "No documents yet",
+            title,
             980,
             HOME_INK,
             card,
@@ -3563,14 +3693,14 @@ fn render_home_cards(
             fonts,
             card.x + 24,
             card.y + 78,
-            "Create an encrypted document to start your library.",
+            caption,
             840,
             HOME_MUTED,
             card,
             false,
         );
-        let button = Rect::new(card.x + 24, card.y + 108, 156, 36);
-        fb.fill_rounded_rect(button, 9, HOME_ACCENT, card);
+        let button = Rect::new(card.x + 24, card.y + 112, 168, 36);
+        fb.fill_rounded_rect(button, 10, HOME_ACCENT, card);
         draw_home_text(
             fb,
             fonts,
@@ -3593,80 +3723,94 @@ fn render_home_cards(
     if let Some(idx) = state.active_folder {
         if let Some(folder) = state.folders.get(idx) {
             let mut visible: Vec<usize> = folder.entries.clone();
-            if state.manual_order {
+            if state.reverse_order {
                 visible.reverse();
             }
             return render_home_document_cards(fb, fonts, state, &visible, top, content);
         }
     }
 
-    let cols = ((available + HOME_GAP) / (HOME_CARD_MIN_W + HOME_GAP)).clamp(1, 4);
-    let card_w = (available - HOME_GAP * (cols - 1)) / cols;
+    // Card grid sized the way quiet.md's folder page does it: 24 pt of outer padding, columns from
+    // a 208 pt minimum, and a document-sized body with the folder's label *below* it (`D-102`).
+    let gap = HOME_GAP;
+    let cols = ((available + gap) / (HOME_CARD_MIN_W + gap)).clamp(1, 4);
+    // A floor keeps the card's insides from inverting on a very narrow pane; the row breaks
+    // below instead of painting a degenerate card.
+    let card_w = ((available - gap * (cols - 1)) / cols).max(120);
+    let label_h = 52;
+    // A 5:6 body can be taller than the pane on a short window, and the loop below breaks on the
+    // first card that does not fit — which left the pane completely empty at the 480x360 minimum
+    // window (a 378 pt card starting at y=110). Cap the body so at least one row always paints.
+    let room = (content.h - top - label_h - gap).max(72);
+    let body_h = ((card_w * 6) / 5).min(room);
+    let card_h = body_h + label_h;
     for (i, folder) in state.folders.iter().enumerate() {
         let col = i % cols as usize;
         let row = i / cols as usize;
-        let x = content.x + pad + col as i32 * (card_w + HOME_GAP);
-        let y = top + row as i32 * (HOME_CARD_H + HOME_GAP);
-        if y + HOME_CARD_H > content.y + content.h || x + card_w > content.x + content.w {
+        let x = content.x + pad + col as i32 * (card_w + gap);
+        let y = top + row as i32 * (card_h + gap);
+        if y + card_h > content.y + content.h || x + card_w > content.x + content.w {
             break;
         }
-        let card = Rect::new(x, y, card_w, HOME_CARD_H);
-        fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
-        fb.stroke_rounded_rect(card, 14, HOME_TAB, content);
-        // A quiet.md folder card is a soft grey folder behind a stack of paper. The preview
-        // lines are seeded from the folder name and entry index — never from document bytes.
-        fb.fill_rounded_rect(
-            Rect::new(x + 13, y + 16, card_w - 26, 122),
-            10,
-            HOME_CARD,
-            card,
-        );
-        fb.fill_rounded_rect(
-            Rect::new(x + 13, y + 16, (card_w - 26) / 2, 22),
-            8,
-            HOME_CARD,
-            card,
-        );
-        for layer in (0..3).rev() {
-            let page = Rect::new(
-                x + 20 + layer * 6,
-                y + 24 - layer * 5,
-                card_w - 48 - layer * 12,
-                104,
+        let card = Rect::new(x, y, card_w, card_h);
+        let body = Rect::new(x, y, card_w, body_h);
+        let pocket_top = body.y + body_h / 2;
+
+        // Three papers fanned up out of the pocket. Widths are derived from the column only and
+        // the preview strokes from the folder's *name and entry count* — never from document
+        // bytes, so painting a card cannot touch plaintext (law `L-2`).
+        let seed = folder.name.len() + folder.entries.len();
+        // Papers end where the pocket begins; sizing each from `body_h` independently let a
+        // capped (short-pane) body push the stack through the pocket and out of the card.
+        let paper_h = (pocket_top - body.y - 22).max(24);
+        for layer in 0..3i32 {
+            let w = (card_w - 34 - (2 - layer) * 14).max(24);
+            let lift = 14 + layer * 7;
+            let paper = Rect::new(
+                x + (card_w - w) / 2,
+                body.y + 22,
+                w,
+                (paper_h - lift).max(20),
             );
-            fb.fill_rounded_rect(page, 7, HOME_SURFACE, card);
-            fb.stroke_rounded_rect(page, 7, HOME_FAINT, card);
+            fb.fill_rounded_rect(paper, 10, HOME_SURFACE, card);
+            fb.stroke_rounded_rect(paper, 10, HOME_FAINT, card);
+            if layer == 2 {
+                // The front paper carries the preview: a short title rule and a few text lines.
+                for line in 0..3i32 {
+                    let pct = 46 + ((seed + line as usize * 7) % 5) as i32 * 9;
+                    let lw = ((paper.w - 28).min((paper.w - 28) * pct / 100)).max(4);
+                    let ly = paper.y + 30 + line * 12;
+                    if ly + 5 > paper.y + paper.h {
+                        break;
+                    }
+                    let ink = if line == 0 { HOME_TAB } else { HOME_FAINT };
+                    let stroke_h = if line == 0 { 5 } else { 3 };
+                    fb.fill_rounded_rect(Rect::new(paper.x + 14, ly, lw, stroke_h), 2, ink, paper);
+                }
+            }
         }
-        let preview = Rect::new(x + 26, y + 30, card_w - 60, 82);
-        let seed = folder.entries.first().copied().unwrap_or(0) + folder.name.len();
-        for line in 0..5i32 {
-            let width = ((seed * 17 + line as usize * 29) % 61 + 28) as i32;
-            fb.fill_rounded_rect(
-                Rect::new(
-                    preview.x + 4 + (line % 3) * 3,
-                    preview.y + 10 + line * 13,
-                    (preview.w - 16).min(width * preview.w / 100),
-                    3,
-                ),
-                1,
-                if line == 0 { HOME_MUTED } else { HOME_TAB },
-                preview,
-            );
-        }
-        fb.fill_rounded_rect(
-            Rect::new(preview.x + 4, preview.y + preview.h - 28, preview.w / 3, 20),
-            3,
-            HOME_TAB,
-            preview,
-        );
-        let label = home_fit_text(fonts, &folder.name, 900, card_w - 28);
+
+        // The pocket: a slab with a raised lip on its left. It is drawn *over* the papers so they
+        // read as cards slid inside a folder rather than a stack on top of one.
+        let lip_w = (card_w / 3).clamp(44, (card_w - 32).max(44));
+        let lip = Rect::new(x + 16, pocket_top - 10, lip_w, 20);
+        fb.fill_rounded_rect(lip, 9, HOME_POCKET, card);
+        let pocket = Rect::new(x + 6, pocket_top, card_w - 12, body_h - body_h / 2);
+        fb.fill_rounded_rect(pocket, 14, HOME_POCKET, card);
+        fb.stroke_rounded_rect(pocket, 14, HOME_FAINT, card);
+
+        // Label and count sit in the space below the pocket, clamped to it: the previous inset of
+        // `card_w - 4` let a long folder name paint over the neighbouring card (`D-102`).
+        let label_w = (card_w - 8).max(24);
+        let label = home_fit_text(fonts, &folder.name, 940, label_w);
+        let label_base = (y + body_h + 24).min(y + card_h - 30);
         draw_home_text(
             fb,
             fonts,
-            x + 16,
-            y + 154,
+            x + 4,
+            label_base,
             &label,
-            900,
+            940,
             HOME_INK,
             card,
             true,
@@ -3679,10 +3823,10 @@ fn render_home_cards(
         draw_home_text(
             fb,
             fonts,
-            x + 16,
-            y + 178,
+            x + 4,
+            label_base + 20,
             &count,
-            800,
+            820,
             HOME_MUTED,
             card,
             false,
@@ -3701,7 +3845,8 @@ fn render_home_document_cards(
     content: Rect,
 ) -> Vec<(Rect, HomeHit)> {
     let mut hits = Vec::new();
-    let pad = 32;
+    // Same 24 pt inset as the folder grid, so switching views does not shift the left edge.
+    let pad = 24;
     let available = content.w - 2 * pad;
     if entries.is_empty() {
         draw_home_text(
@@ -3718,89 +3863,97 @@ fn render_home_document_cards(
         return hits;
     }
     if state.list_view {
-        let row_h = 54;
-        for (row, &idx) in entries.iter().enumerate().take(8) {
+        // A list row is a flat line of text over a hairline — no card, no accent label. The old
+        // row carried a hardcoded "Open" that was never drawn as a separate control (a phantom
+        // affordance); the whole row is the target, as it is in the grid (`D-102`).
+        let row_h = 42;
+        let row_w = available.min(720);
+        for (row, &idx) in entries.iter().enumerate().take(12) {
             let y = top + row as i32 * row_h;
-            let card = Rect::new(content.x + pad, y, available.min(720), row_h - 8);
-            fb.fill_rounded_rect(card, 9, HOME_SURFACE, content);
-            fb.stroke_rounded_rect(card, 9, HOME_FAINT, content);
-            draw_home_folder_icon(fb, card.x + 14, card.y + 12, HOME_ACCENT, card);
+            if y + row_h > content.y + content.h {
+                break;
+            }
+            let entry = &state.entries[idx];
+            let card = Rect::new(content.x + pad, y, row_w, row_h);
+            draw_home_folder_icon(fb, card.x + 2, card.y + 11, HOME_MUTED, card);
             draw_home_text(
                 fb,
                 fonts,
-                card.x + 42,
-                card.y + 30,
-                &home_fit_text(fonts, &state.entries[idx].name, 880, card.w - 60),
+                card.x + 30,
+                card.y + 26,
+                &home_fit_text(fonts, &entry.name, 880, card.w - 160),
                 880,
                 HOME_INK,
                 card,
                 false,
             );
+            let folder = home_fit_text(fonts, &entry.folder, 780, 120);
+            let folder_x = card.x + card.w - home_text_width(fonts, &folder, 780);
             draw_home_text(
                 fb,
                 fonts,
-                card.x + card.w - 118,
-                card.y + 30,
-                "Open",
-                800,
-                HOME_ACCENT,
+                folder_x,
+                card.y + 26,
+                &folder,
+                780,
+                HOME_MUTED,
                 card,
                 false,
+            );
+            fb.fill_rect_clipped(
+                Rect::new(card.x, y + row_h - 1, row_w, 1),
+                HOME_FAINT,
+                content,
             );
             hits.push((card, HomeHit::Document(idx)));
         }
         return hits;
     }
-    let cols = ((available + HOME_GAP) / (HOME_CARD_MIN_W + HOME_GAP)).clamp(1, 4);
-    let card_w = (available - HOME_GAP * (cols - 1)) / cols;
+    // A document is a loose sheet: white, 14 pt corners, the title in near-ink at the top and a
+    // few faux body lines beneath (`D-102`). Line widths are seeded from the name only, so no
+    // document bytes are read to paint a card (law L-2).
+    let gap = HOME_GAP;
+    let cols = ((available + gap) / (HOME_CARD_MIN_W + gap)).clamp(1, 4);
+    let card_w = ((available - gap * (cols - 1)) / cols).max(120);
+    // Same short-pane cap as the folder grid: a 5:6 sheet must not push the only row off-screen.
+    let card_h = ((card_w * 6) / 5).min((content.h - top - gap).max(96));
     for (i, &idx) in entries.iter().enumerate().take(12) {
         let col = i % cols as usize;
         let row = i / cols as usize;
-        let x = content.x + pad + col as i32 * (card_w + HOME_GAP);
-        let y = top + row as i32 * (168 + HOME_GAP);
-        if y + 168 > content.y + content.h || x + card_w > content.x + content.w {
+        let x = content.x + pad + col as i32 * (card_w + gap);
+        let y = top + row as i32 * (card_h + gap);
+        if y + card_h > content.y + content.h || x + card_w > content.x + content.w {
             break;
         }
-        let card = Rect::new(x, y, card_w, 168);
-        fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
-        fb.stroke_rounded_rect(card, 14, HOME_TAB, content);
-        fb.fill_rounded_rect(
-            Rect::new(x + 14, y + 14, card_w - 28, 88),
-            8,
-            HOME_CARD,
-            card,
-        );
-        let preview = Rect::new(x + 22, y + 22, card_w - 44, 72);
-        for line in 0..4i32 {
+        let entry = &state.entries[idx];
+        let card = Rect::new(x, y, card_w, card_h);
+        fb.fill_rounded_rect(card, 14, HOME_SURFACE, card);
+        fb.stroke_rounded_rect(card, 14, HOME_FAINT, card);
+        // The title is elided to the card's width; the rules under it are the "preview".
+        let title_w = card_w - 32;
+        let title = home_fit_text(fonts, &entry.name, 940, title_w);
+        draw_home_text(fb, fonts, x + 16, y + 28, &title, 940, HOME_INK, card, true);
+        let seed = entry.name.len() + idx;
+        for line in 0..5i32 {
+            let width = ((seed * 17 + line as usize * 37) % 46 + 46) as i32;
             fb.fill_rounded_rect(
                 Rect::new(
-                    preview.x + 4,
-                    preview.y + 10 + line * 15,
-                    (preview.w - 12) * (60 + line * 8) / 100,
-                    3,
+                    x + 16,
+                    y + 44 + line * 11,
+                    title_w.min(width * title_w / 100).max(4),
+                    if line == 0 { 4 } else { 3 },
                 ),
-                1,
-                if line == 0 { HOME_FAINT } else { HOME_TAB },
-                preview,
+                2,
+                if line == 0 { HOME_TAB } else { HOME_FAINT },
+                card,
             );
         }
         draw_home_text(
             fb,
             fonts,
             x + 16,
-            y + 128,
-            &home_fit_text(fonts, &state.entries[idx].name, 900, card_w - 28),
-            900,
-            HOME_INK,
-            card,
-            true,
-        );
-        draw_home_text(
-            fb,
-            fonts,
-            x + 16,
-            y + 152,
-            &home_fit_text(fonts, &state.entries[idx].folder, 780, card_w - 28),
+            y + card_h - 14,
+            &home_fit_text(fonts, &entry.folder, 780, title_w),
             780,
             HOME_MUTED,
             card,
@@ -3884,7 +4037,7 @@ fn show_home(
                                 state.active_folder = None;
                             }
                             HomeHit::Search => state.search_focused = true,
-                            HomeHit::ManualOrder => state.manual_order = !state.manual_order,
+                            HomeHit::ReverseOrder => state.reverse_order = !state.reverse_order,
                             HomeHit::ListView => state.list_view = !state.list_view,
                             HomeHit::Settings => state.settings_open = true,
                             HomeHit::CloseOverlay => state.settings_open = false,
@@ -3929,7 +4082,10 @@ fn show_home(
                         Key::Backspace if state.search_focused => {
                             state.query.pop();
                         }
-                        Key::Enter if state.search_focused => {
+                        // An empty query matches *every* entry, so Enter on a freshly focused
+                        // search box used to open whichever document sorted first and drop the
+                        // user out of Home without them choosing anything. Require a query.
+                        Key::Enter if state.search_focused && !state.query.trim().is_empty() => {
                             if let Some(&idx) = state.matching_entries().first() {
                                 let path = state.entries[idx].path.clone();
                                 if let Some(chosen) = prompt_gui_document(
@@ -6747,7 +6903,7 @@ mod tests {
             query: String::new(),
             search_focused: false,
             favorites: false,
-            manual_order: false,
+            reverse_order: false,
             list_view: false,
             settings_open: false,
         };
@@ -6877,7 +7033,7 @@ mod tests {
             query: String::new(),
             search_focused: false,
             favorites: false,
-            manual_order: false,
+            reverse_order: false,
             list_view: false,
             settings_open: false,
         };
@@ -6893,6 +7049,204 @@ mod tests {
             .find(|(rect, _)| rect.contains(plus.x + plus.w / 2, plus.y + plus.h / 2))
             .map(|(_, hit)| *hit);
         assert_eq!(resolved, Some(HomeHit::NewDocument));
+    }
+
+    /// A populated library at a given size, for the geometry tests below.
+    fn home_state_with_two_folders() -> HomeState {
+        let entries = vec![
+            HomeEntry {
+                name: "Board".to_owned(),
+                folder: "Blue".to_owned(),
+                path: PathBuf::from("Blue/Board.wavefunction"),
+            },
+            HomeEntry {
+                name: "Snow".to_owned(),
+                folder: "Maps".to_owned(),
+                path: PathBuf::from("Maps/Snow.wavefunction"),
+            },
+        ];
+        let folders = group_home_folders(&entries);
+        HomeState {
+            entries,
+            folders,
+            active_folder: None,
+            query: String::new(),
+            search_focused: false,
+            favorites: false,
+            reverse_order: false,
+            list_view: false,
+            settings_open: false,
+        }
+    }
+
+    /// `D-102`: a 5:6 card body can exceed a short pane, and the grid loop breaks on the first
+    /// card that does not fit — which painted *nothing* at the 480x360 window minimum.
+    #[test]
+    fn home_grid_paints_a_folder_card_at_the_window_minimum() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+        let state = home_state_with_two_folders();
+        for (w, h) in [(480u16, 360u16), (500, 400), (760, 520), (1_120, 780)] {
+            let mut fb = FrameBuffer::new(w, h, HOME_CANVAS_BG);
+            let hits = render_home(&mut fb, &fonts, &state, 100);
+            let painted: Vec<Rect> = hits
+                .iter()
+                .filter(|(_, hit)| matches!(hit, HomeHit::Folder(_)))
+                .map(|(rect, _)| *rect)
+                .collect();
+            assert!(
+                !painted.is_empty(),
+                "{w}x{h} must paint at least one folder card"
+            );
+            for card in painted {
+                assert!(
+                    card.y + card.h <= i32::from(h),
+                    "{w}x{h}: card bottom {} exceeds the window",
+                    card.y + card.h
+                );
+                // The card must actually be painted, not merely present as a hit rect. Card and
+                // page are both white, so count the ink (pocket, strokes, labels) inside.
+                let bg = rgba_to_xrgb(HOME_CANVAS_BG);
+                let mut ink = 0usize;
+                for y in card.y.max(0)..(card.y + card.h).min(i32::from(fb.height)) {
+                    for x in card.x.max(0)..(card.x + card.w).min(i32::from(fb.width)) {
+                        let idx = y as usize * usize::from(fb.width) + x as usize;
+                        if fb.pixels[idx] != bg {
+                            ink += 1;
+                        }
+                    }
+                }
+                assert!(
+                    ink > 400,
+                    "{w}x{h}: folder card painted almost nothing ({ink} px)"
+                );
+            }
+        }
+    }
+
+    /// `D-102`: the settings sheet paints over the cards, so it must also swallow the pointer.
+    /// Without a hit entry covering it, a click on the sheet fell through and opened the document
+    /// underneath.
+    #[test]
+    fn home_settings_sheet_swallows_clicks_instead_of_opening_cards() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+        let mut state = home_state_with_two_folders();
+        state.settings_open = true;
+        let (w, h) = (1_120u16, 780u16);
+        let mut fb = FrameBuffer::new(w, h, HOME_CANVAS_BG);
+        let hits = render_home(&mut fb, &fonts, &state, 100);
+
+        // The swallow target is the overlay itself, pushed before the close button.
+        let sheet = hits
+            .iter()
+            .find(|(_, hit)| *hit == HomeHit::CloseOverlay)
+            .map(|(rect, _)| *rect)
+            .expect("sheet swallow target");
+        // Find a folder card the sheet actually covers, then probe the middle of the overlap.
+        let probe = hits
+            .iter()
+            .filter(|(_, hit)| matches!(hit, HomeHit::Folder(_)))
+            .map(|(rect, _)| *rect)
+            .find_map(|card| {
+                let x0 = card.x.max(sheet.x);
+                let y0 = card.y.max(sheet.y);
+                let x1 = (card.x + card.w).min(sheet.x + sheet.w);
+                let y1 = (card.y + card.h).min(sheet.y + sheet.h);
+                (x1 - x0 > 8 && y1 - y0 > 8).then(|| ((x0 + x1) / 2, (y0 + y1) / 2))
+            })
+            .expect("the sheet must overlap at least one folder card at 1120x780");
+        let resolved = hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(probe.0, probe.1))
+            .map(|(_, hit)| *hit);
+        assert_eq!(
+            resolved,
+            Some(HomeHit::CloseOverlay),
+            "the sheet must take the click, not the folder card behind it"
+        );
+        // The close button is pushed last, so it must still win inside its own rect.
+        let close = hits.last().map(|(rect, _)| *rect).expect("a last hit");
+        assert!(
+            close.w <= 40 && close.h <= 40,
+            "the last-pushed target must be the small close button, not the sheet"
+        );
+        let decided = hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(close.x + close.w / 2, close.y + close.h / 2))
+            .map(|(rect, _)| *rect);
+        assert_eq!(
+            decided,
+            Some(close),
+            "the close button must take its own click"
+        );
+    }
+
+    /// `D-102`: the popup / drawer / banner surfaces keep their resting chip, because there the
+    /// fill is the only thing marking the words as pressable. The bare header rule is *about the
+    /// header*; applying it everywhere made the recovery banner's `Dismiss` read as body text.
+    #[test]
+    fn chipped_surfaces_keep_a_resting_fill_and_the_header_does_not() {
+        let theme = QUIET_MD_THEME;
+        let fonts = FontSet::embedded(theme.body_size_px).expect("fonts");
+        let (w, h) = (420u16, 120u16);
+        let mut bare_fb = FrameBuffer::new(w, h, theme.bg_body);
+        let (bare, _) = draw_toolbar_button(
+            &mut bare_fb,
+            &fonts,
+            10,
+            10,
+            "Undo",
+            ButtonHighlight::Off,
+            false,
+            &theme,
+            Rect::new(0, 0, i32::from(w), i32::from(h)),
+            ButtonSurface::Bare,
+        );
+        let mid = |fb: &FrameBuffer, rect: Rect| {
+            let x = (rect.x + rect.w / 2) as usize;
+            let y = (rect.y + rect.h - 2) as usize;
+            fb.pixels[y * usize::from(fb.width) + x]
+        };
+        assert_eq!(
+            mid(&bare_fb, bare),
+            rgba_to_xrgb(theme.bg_body),
+            "the header must not paint a resting pill"
+        );
+
+        let mut chipped_fb = FrameBuffer::new(w, h, theme.bg_body);
+        let (chip, _) = draw_toolbar_button(
+            &mut chipped_fb,
+            &fonts,
+            10,
+            10,
+            "Undo",
+            ButtonHighlight::Off,
+            false,
+            &theme,
+            Rect::new(0, 0, i32::from(w), i32::from(h)),
+            ButtonSurface::Chipped,
+        );
+        assert_ne!(
+            mid(&chipped_fb, chip),
+            rgba_to_xrgb(theme.bg_body),
+            "a popup/drawer/banner control needs a visible chip at rest"
+        );
+    }
+
+    /// `D-102`: an out-of-range `active_folder` used to index `folders` on the paint path. It must
+    /// degrade to "no filter" for both the cover list and the paint.
+    #[test]
+    fn stale_active_folder_does_not_panic_the_paint_path() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("fonts");
+        let mut state = home_state_with_two_folders();
+        state.active_folder = Some(99);
+        assert_eq!(state.matching_entries().len(), 2);
+        let mut fb = FrameBuffer::new(1_120, 780, HOME_CANVAS_BG);
+        let hits = render_home(&mut fb, &fonts, &state, 100);
+        assert!(hits
+            .iter()
+            .any(|(_, hit)| matches!(hit, HomeHit::Folder(_))));
     }
 
     /// WCAG relative-luminance contrast ratio, used only by these regression tests.
