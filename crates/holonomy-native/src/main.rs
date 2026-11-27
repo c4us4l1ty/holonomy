@@ -104,7 +104,16 @@ impl NativeHome {
         };
     }
 
+    // A composition belongs to the current field, selection and document view. Never route
+    // its later platform commit into a different destination or move its insertion point.
+    fn composition_ready(&mut self) -> bool {
+        composition_ready(&self.preedit, &mut self.status)
+    }
+
     fn apply(&mut self, intent: Intent) {
+        if !self.composition_ready() {
+            return;
+        }
         if let Some(session) = self.session.as_mut() {
             let navigation = matches!(intent, Intent::RevealCaret);
             let result = session.apply(intent);
@@ -234,6 +243,9 @@ impl NativeHome {
     }
 
     fn clipboard(&mut self, cut: bool, cx: &mut Context<Self>) {
+        if !self.composition_ready() {
+            return;
+        }
         if let Some(session) = &mut self.session {
             match session.selected_text() {
                 Ok(text) => {
@@ -281,7 +293,12 @@ impl NativeHome {
             cx.notify();
             return;
         }
-        if !self.preedit.is_empty() && !command {
+        if !self.preedit.is_empty() {
+            if command {
+                self.composition_ready();
+                cx.stop_propagation();
+                cx.notify();
+            }
             return;
         }
         if self.screen == Screen::Unlock {
@@ -572,6 +589,10 @@ impl Render for NativeHome {
                             },
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.composition_ready() {
+                                cx.notify();
+                                return;
+                            }
                             this.editing_path = true;
                             cx.notify();
                         })),
@@ -590,6 +611,10 @@ impl Render for NativeHome {
                             ),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.composition_ready() {
+                                cx.notify();
+                                return;
+                            }
                             this.editing_path = false;
                             cx.notify();
                         })),
@@ -604,6 +629,7 @@ impl Render for NativeHome {
                     )
                     .child(
                         button("cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| {
+                            this.preedit.zeroize();
                             this.passphrase.zeroize();
                             this.screen = Screen::Home;
                             cx.notify();
@@ -676,6 +702,10 @@ impl Render for NativeHome {
                         )))
                         .child(
                             button("find", "Find").on_click(cx.listener(|this, _, _, cx| {
+                                if !this.composition_ready() {
+                                    cx.notify();
+                                    return;
+                                }
                                 this.screen = Screen::Find;
                                 this.query.zeroize();
                                 this.search_index = 0;
@@ -684,12 +714,20 @@ impl Render for NativeHome {
                         )
                         .child(button("history", "History").on_click(cx.listener(
                             |this, _, _, cx| {
+                                if !this.composition_ready() {
+                                    cx.notify();
+                                    return;
+                                }
                                 this.show_history = !this.show_history;
                                 cx.notify();
                             },
                         )))
                         .child(button("bookmark", "Bookmark").on_click(cx.listener(
                             |this, _, _, cx| {
+                                if !this.composition_ready() {
+                                    cx.notify();
+                                    return;
+                                }
                                 this.query.zeroize();
                                 this.screen = Screen::Bookmark;
                                 cx.notify();
@@ -744,6 +782,10 @@ impl Render for NativeHome {
                     let mut history = div().flex().flex_wrap().gap_2().child(
                         button("current", "Current document").on_click(cx.listener(
                             |this, _, _, cx| {
+                                if !this.composition_ready() {
+                                    cx.notify();
+                                    return;
+                                }
                                 if let Some(s) = &mut this.session {
                                     s.show_current();
                                 }
@@ -760,6 +802,10 @@ impl Render for NativeHome {
                                     .p_2()
                                     .child(format!("Witness {sequence}"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this.composition_ready() {
+                                            cx.notify();
+                                            return;
+                                        }
                                         if let Some(s) = &mut this.session {
                                             let result = s.show_witness(sequence);
                                             this.report(result, "Read-only checkpoint.");
@@ -1065,6 +1111,16 @@ fn main() {
 
 // Saving cannot silently drop text that still belongs to the platform's composition. Refuse
 // until the IME commits/cancels rather than guessing at a commit and later inserting it twice.
+fn composition_ready(preedit: &SecretInput, status: &mut String) -> bool {
+    match ensure_no_composition(preedit) {
+        Ok(()) => true,
+        Err(error) => {
+            *status = error.to_string();
+            false
+        }
+    }
+}
+
 fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
     if preedit.is_empty() {
         Ok(())
@@ -1076,6 +1132,18 @@ fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn composition_transition_guard_preserves_pending_text_and_reports_refusal() {
+        let mut input = SecretInput::default();
+        input.push_str("किताब");
+        let mut status = String::new();
+        assert!(!composition_ready(&input, &mut status));
+        assert!(!status.is_empty());
+        assert_eq!(&*input, "किताब");
+        input.zeroize();
+        assert!(composition_ready(&input, &mut status));
+    }
+
     #[test]
     fn pending_composition_refuses_save_without_consuming_text() {
         let mut input = SecretInput::default();
