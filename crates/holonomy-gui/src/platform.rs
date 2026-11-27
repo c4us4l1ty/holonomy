@@ -559,6 +559,64 @@ impl DesktopWindow for ScaledWindow {
     }
 }
 
+/// Chooses the source crop and destination size for presenting one framebuffer.
+///
+/// A backend is handed a *logical* viewport whenever a fractional display scale is active, and at
+/// integer scales such as 200 % the renderer keeps that logical buffer and presents it at its own
+/// resolution. The client area can therefore be smaller than the framebuffer, and a backend that
+/// hands both rectangles to a scaler asks the OS to *smooth-stretch* the image — softening every
+/// glyph and icon a second time on top of the deliberate scale choice. Cropping the oversized
+/// framebuffer to the visible client area keeps the pixels exactly as rasterized.
+///
+/// Returns `(width, height, source_x, source_y)` for the blit, or `None` when there is nothing to
+/// present. Scaling *up* is left to the backend: that only happens when the window is larger than
+/// the renderer's logical viewport, where shrinking the viewport instead would lose content.
+#[must_use]
+pub fn blit_viewport(
+    client: (u16, u16),
+    framebuffer: (u16, u16),
+) -> Option<(u16, u16, u16, u16)> {
+    let (cw, ch) = client;
+    let (fw, fh) = framebuffer;
+    if cw == 0 || ch == 0 || fw == 0 || fh == 0 {
+        return None;
+    }
+    if fw <= cw && fh <= ch {
+        return Some((fw, fh, 0, 0));
+    }
+    let w = cw.min(fw);
+    let h = ch.min(fh);
+    Some((w, h, (fw - w) / 2, (fh - h) / 2))
+}
+
+/// Converts a window size the caller asked for in layout units into physical pixels for a backend
+/// that reports true device pixels.
+///
+/// Enabling DPI awareness stops the OS from stretching the window, so a client area requested in
+/// layout units has to be multiplied by the display scale or the window would open at a fraction of
+/// its intended apparent size on a scaled display. 96 dpi is the reference, so the identity holds
+/// everywhere except HiDPI. The result is clamped into `u16`, the widest a client area can be here.
+#[must_use]
+pub fn physical_size_hint(logical: (u16, u16), dpi: i64) -> (u16, u16) {
+    fn axis(value: u16, dpi: i64) -> u16 {
+        // Round to nearest physical pixel so 125 % of an odd size does not creep by one.
+        let scaled = (i64::from(value) * dpi.clamp(72, 288) + 48) / 96;
+        u16::try_from(scaled.clamp(1, i64::from(u16::MAX))).unwrap_or(u16::MAX)
+    }
+    (axis(logical.0, dpi), axis(logical.1, dpi))
+}
+
+/// Opts the process into per-monitor DPI awareness where the platform needs an explicit opt-in.
+///
+/// Win32 processes are DPI-unaware by default: Windows reports a 96 dpi client area and then
+/// bitmap-stretches the finished window to the real display scale, which softens every glyph and
+/// icon next to native apps. The call must precede the first window, is idempotent, and is a no-op
+/// on platforms that derive scale from the display server instead (X11, Cocoa).
+pub fn declare_dpi_awareness() {
+    #[cfg(target_os = "windows")]
+    crate::win32::enable_per_monitor_dpi_awareness();
+}
+
 /// Opens the native desktop window for the current OS (`Win32` on Windows, `Cocoa`/`X11` on
 /// macOS, pure-`libc` `X11` on Linux/Unix).
 ///
@@ -731,6 +789,45 @@ mod tests {
                 height: 390
             })
         ));
+    }
+
+    #[test]
+    fn blit_viewport_never_stretches_a_matching_framebuffer() {
+        // The 1:1 case must reach the screen untouched: source and destination identical.
+        assert_eq!(blit_viewport((800, 600), (800, 600)), Some((800, 600, 0, 0)));
+        // A smaller framebuffer is still presented at its own size, anchored top-left.
+        assert_eq!(blit_viewport((800, 600), (747, 520)), Some((747, 520, 0, 0)));
+    }
+
+    #[test]
+    fn blit_viewport_crops_an_oversized_framebuffer_instead_of_shrinking_it() {
+        // A window opened at a 200 % logical viewport stays logical-sized after the user shrinks
+        // the frame; presenting it whole would smooth-stretch every glyph. Crop instead.
+        let crop = blit_viewport((1000, 700), (1120, 780));
+        assert_eq!(crop, Some((1000, 700, 60, 40)));
+        // The crop is centred, so equal margins are dropped on both sides.
+        let (w, h, x, y) = crop.expect("crop");
+        assert_eq!(1_120 - w, 2 * x);
+        assert_eq!(780 - h, 2 * y);
+    }
+
+    #[test]
+    fn physical_size_hint_preserves_apparent_size_across_scales() {
+        // 96 dpi is the reference, so a standard display gets exactly what was requested.
+        assert_eq!(physical_size_hint((1_120, 780), 96), (1_120, 780));
+        // A 200 % display needs twice the device pixels for the same apparent window.
+        assert_eq!(physical_size_hint((1_120, 780), 192), (2_240, 1_560));
+        assert_eq!(physical_size_hint((1_120, 780), 144), (1_680, 1_170));
+        // Rounding is to nearest, and the result can never exceed a `u16` client area.
+        assert_eq!(physical_size_hint((801, 801), 144), (1_202, 1_202));
+        assert_eq!(physical_size_hint((u16::MAX, u16::MAX), 288), (u16::MAX, u16::MAX));
+        assert_eq!(physical_size_hint((0, 0), 96), (1, 1));
+    }
+
+    #[test]
+    fn blit_viewport_rejects_empty_geometry() {
+        assert_eq!(blit_viewport((0, 0), (800, 600)), None);
+        assert_eq!(blit_viewport((800, 600), (0, 600)), None);
     }
 
     #[test]

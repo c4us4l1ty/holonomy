@@ -3143,6 +3143,36 @@ Listed so they stay dead.
   panicking. Client-side assertions are unchanged, so the test still proves the handshake, the
   scanline `PutImage` framing, the queued events and the clipboard round-trip.
 
+- **2026-11-27** — **Blurry rendering on scaled Windows displays: the process was DPI-unaware.**
+  Reported symptom: every glyph, icon and hairline in the native window looked soft while other
+  applications on the same screen were crisp. Measured from a screenshot, a one-pixel icon stem
+  spanned five columns (`252, 222, 33, 186, 229`) instead of resolving to a solid core with one
+  antialiased neighbour — the signature of a *smooth* resample, not the integer pixel-repeat the
+  UI scale path performs at 200 %. The resample was not in Holonomy: the process declared no DPI
+  awareness anywhere (no `SetProcessDpiAwareness*` call, no application manifest, no `.rc`), so
+  Windows treated it as DPI-unaware, reported a 96 dpi client area, and bitmap-stretched the
+  finished window to the real display scale. The renderer had been drawing a correct 96 dpi
+  picture that the OS then blurred. Two related faults shared the same root: `GetDeviceCaps`
+  could only ever answer 96 dpi, so the document view's own `View::dpi` never saw the real
+  display either; and because `ScaledWindow` presents a *logical* framebuffer, the Win32 blit
+  passed equal source and destination rectangles to `StretchDIBits`, which smooth-stretches
+  whenever the client area is not the framebuffer size. Fixes, smallest-first: (1) opt into
+  per-monitor awareness before the first window exists — `SetProcessDpiAwarenessContext`
+  (PER_MONITOR_AWARE_V2) resolved from `shcore.dll`, falling back to `SetProcessDpiAwareness`
+  and then `SetProcessDPIAware`, with `ERROR_ACCESS_DENIED` treated as "already pinned", so the
+  call is idempotent and harmless on any Windows version; (2) take the window DPI from
+  `GetDpiForWindow`, which tracks the monitor the window is actually on and so also fixes
+  dragging between displays of different scale, with `GetDeviceCaps` retained as the fallback;
+  (3) crop an oversized framebuffer to the visible client area in `blit_viewport` rather than
+  handing both rectangles to GDI, so pixels reach the screen exactly as rasterized. Awareness
+  also stops the OS from stretching a requested client area, so `physical_size_hint` re-expresses
+  the requested layout size in device pixels to keep the window the same apparent size, and the
+  frame is re-requested from `SetWindowPos` if the window lands on a non-primary monitor. The
+  geometry is pure and covered by tests in `platform.rs` (one-to-one, crop, empty, and four
+  scale conversions including `u16` clamping); the FFI paths are compile- and review-verified
+  only, since a scaled Windows display is not available to this audit. Layout constants, corner
+  radii and the 1 px rules are untouched, so nothing about the 96 dpi picture moves.
+
 - **2026-11-27** — **`D-102` bug hunt (post-design audit, before merge).** Seven defects found
   and fixed, each with a regression test where the behaviour is observable:
 

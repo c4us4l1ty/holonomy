@@ -65,8 +65,16 @@ const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC_0020;
 const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
 const WDA_MONITOR: u32 = 0x0000_0001;
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x0000_0011;
+
+/// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` (Windows 10 1703+).
+const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
+/// `ERROR_ACCESS_DENIED`: the process DPI awareness was already pinned, which is success for us.
+const ERROR_ACCESS_DENIED: u32 = 5;
 
 const VK_BACK: u16 = 0x08;
 const VK_TAB: u16 = 0x09;
@@ -158,6 +166,8 @@ extern "system" {
     fn GlobalFree(h_mem: Hglobal) -> Hglobal;
     fn GlobalLock(h_mem: Hglobal) -> *mut c_void;
     fn GlobalUnlock(h_mem: Hglobal) -> Bool;
+    fn SetLastError(dw_err_code: u32);
+    fn GetLastError() -> u32;
 }
 
 #[link(name = "user32")]
@@ -210,6 +220,16 @@ extern "system" {
     fn GetClipboardData(u_format: u32) -> Hglobal;
     fn CloseClipboard() -> Bool;
     fn SetWindowDisplayAffinity(h_wnd: Hwnd, dw_affinity: u32) -> Bool;
+    fn LoadLibraryW(lp_lib_file_name: *const u16) -> *mut c_void;
+    fn SetWindowPos(
+        h_wnd: Hwnd,
+        h_wnd_insert_after: Hwnd,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        u_flags: u32,
+    ) -> Bool;
 }
 
 #[link(name = "gdi32")]
@@ -406,6 +426,125 @@ fn read_imm_string(hwnd: Hwnd, kind: u32) -> Option<String> {
     }
 }
 
+/// The `shcore.dll` awareness entry point, resolved lazily so it may be absent.
+struct DpiApi {
+    set_process_dpi_awareness_context: Option<unsafe extern "system" fn(isize) -> Bool>,
+}
+
+fn dpi_api() -> &'static DpiApi {
+    static API: std::sync::OnceLock<DpiApi> = std::sync::OnceLock::new();
+    API.get_or_init(|| {
+        // SAFETY: `shcore.dll` is optional; a missing library simply leaves the slot empty.
+        unsafe {
+            let shcore = LoadLibraryW(wide_null("shcore.dll").as_ptr());
+            let set_ctx = if shcore.is_null() {
+                null()
+            } else {
+                GetProcAddress(shcore, c"SetProcessDpiAwarenessContext".as_ptr().cast())
+            };
+            let set_context = if set_ctx.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<
+                    *const c_void,
+                    unsafe extern "system" fn(isize) -> Bool,
+                >(set_ctx))
+            };
+            DpiApi {
+                set_process_dpi_awareness_context: set_context,
+            }
+        }
+    })
+}
+
+/// Opts the process into per-monitor DPI awareness *before* the first window exists.
+///
+/// Without this the process is DPI-unaware, so Windows reports a 96 dpi client area and then
+/// bitmap-stretches the finished window to the real display scale. Everything Holonomy draws —
+/// glyphs, icon strokes, hairlines — is produced at 96 dpi and resampled by the compositor, which
+/// is why the UI looks soft next to native apps on a scaled display. Declaring awareness makes
+/// `GetDeviceCaps`/`GetDpiForWindow` report the true scale and the framebuffer reach the screen
+/// 1:1. The later, richer APIs win when available; each step is a no-op if unavailable, and
+/// `ERROR_ACCESS_DENIED` means an earlier call already pinned awareness, which is also fine.
+pub fn enable_per_monitor_dpi_awareness() {
+    // SAFETY: the call only takes a scalar; failure is reported through the return value.
+    unsafe {
+        let api = dpi_api();
+        if let Some(set_ctx) = api.set_process_dpi_awareness_context {
+            SetLastError(0);
+            let ok = set_ctx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            if ok != 0 || GetLastError() == ERROR_ACCESS_DENIED {
+                return;
+            }
+        }
+    }
+    // Windows 8.1 fallback: per-monitor aware (v1) via `SetProcessDpiAwareness`.
+    // SAFETY: dynamically resolved; absence is tolerated.
+    unsafe {
+        let shcore = LoadLibraryW(wide_null("shcore.dll").as_ptr());
+        if !shcore.is_null() {
+            let addr = GetProcAddress(shcore, c"SetProcessDpiAwareness".as_ptr().cast());
+            if !addr.is_null() {
+                let set_awareness = std::mem::transmute::<
+                    *const c_void,
+                    unsafe extern "system" fn(i32) -> i32,
+                >(addr);
+                let _ = set_awareness(2); // PROCESS_PER_MONITOR_DPI_AWARE
+            }
+        }
+    }
+    // Last resort for Windows 7/8.0 and for a static-import failure above.
+    // SAFETY: `SetProcessDPIAware` exists since Vista.
+    unsafe {
+        let user32 = LoadLibraryW(wide_null("user32.dll").as_ptr());
+        if !user32.is_null() {
+            let addr = GetProcAddress(user32, c"SetProcessDPIAware".as_ptr().cast());
+            if !addr.is_null() {
+                let set_aware = std::mem::transmute::<
+                    *const c_void,
+                    unsafe extern "system" fn() -> Bool,
+                >(addr);
+                let _ = set_aware();
+            }
+        }
+    }
+}
+
+/// The monitor DPI of an existing window.
+///
+/// `GetDpiForWindow` reports the scale of the monitor the window is *currently on*, so the window
+/// stays sharp when dragged between displays of different scale. It is resolved lazily because it
+/// requires per-monitor awareness to be in effect; the `GetDeviceCaps` fallback is what a
+/// DPI-unaware or Windows 7 session can report.
+fn dpi_for(hwnd: Hwnd) -> i64 {
+    // SAFETY: `hwnd` is a live window handle owned by this module; both calls are read-only.
+    let raw = unsafe {
+        let user32 = LoadLibraryW(wide_null("user32.dll").as_ptr());
+        let get_for_window = if user32.is_null() {
+            null()
+        } else {
+            GetProcAddress(user32, c"GetDpiForWindow".as_ptr().cast())
+        };
+        if !get_for_window.is_null() && !hwnd.is_null() {
+            let get = std::mem::transmute::<
+                *const c_void,
+                unsafe extern "system" fn(Hwnd) -> u32,
+            >(get_for_window);
+            get(hwnd)
+        } else {
+            let hdc = GetDC(hwnd);
+            if hdc.is_null() {
+                96u32
+            } else {
+                let d = GetDeviceCaps(hdc, LOGPIXELSX);
+                ReleaseDC(hwnd, hdc);
+                u32::try_from(d).unwrap_or(96)
+            }
+        }
+    };
+    i64::from(if raw == 0 { 96 } else { raw }).clamp(72, 288)
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: Hwnd,
     msg: u32,
@@ -587,8 +726,13 @@ impl Win32Window {
     ///
     /// Returns [`Win32Error`] if window class registration or creation fails.
     pub fn open(title: &str, width: u16, height: u16) -> Result<Self, Win32Error> {
-        let w = width.max(320);
-        let h = height.max(240);
+        // Must happen before the first window: awareness cannot be raised once one exists.
+        enable_per_monitor_dpi_awareness();
+        // The display DPI is only known once a window exists, so seed with the primary display's
+        // scale and correct it below from the window that was actually created.
+        let hint = crate::platform::physical_size_hint((width, height), dpi_for(null_mut()));
+        let w = hint.0.max(320);
+        let h = hint.1.max(240);
         let class_name = wide_null("HolonomyQuietMarkdownWin32");
         let title_w = wide_null(title);
 
@@ -637,20 +781,29 @@ impl Win32Window {
         unsafe {
             GetClientRect(hwnd, &mut rc);
         }
-        let cw = u16::try_from((rc.right - rc.left).max(1)).unwrap_or(w);
-        let ch = u16::try_from((rc.bottom - rc.top).max(1)).unwrap_or(h);
-
-        let dpi = unsafe {
-            let hdc = GetDC(hwnd);
-            let raw = if hdc.is_null() {
-                96
-            } else {
-                let d = GetDeviceCaps(hdc, LOGPIXELSX);
-                ReleaseDC(hwnd, hdc);
-                d
-            };
-            i64::from(raw).clamp(72, 288)
-        };
+        let dpi = dpi_for(hwnd);
+        // `CreateWindowExW` sizes the frame in physical pixels for the monitor it lands on. If that
+        // monitor is not the primary one its scale differs from the seed used above, so ask for the
+        // same apparent size again now that the real DPI is known.
+        let corrected = crate::platform::physical_size_hint((width, height), dpi);
+        let (want_w, want_h) = (corrected.0.max(320), corrected.1.max(240));
+        if (want_w, want_h) != (w, h) {
+            // SAFETY: resizing an owned, already-created window; failure leaves the seed size.
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    i32::from(want_w),
+                    i32::from(want_h),
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                GetClientRect(hwnd, &mut rc);
+            }
+        }
+        let cw = u16::try_from((rc.right - rc.left).max(1)).unwrap_or(want_w);
+        let ch = u16::try_from((rc.bottom - rc.top).max(1)).unwrap_or(want_h);
 
         let queue = Rc::new(RefCell::new(WinQueue {
             events: VecDeque::with_capacity(32),
@@ -736,21 +889,24 @@ impl DesktopWindow for Win32Window {
             if hdc.is_null() {
                 return Err(Box::new(Win32Error("GetDC failed".to_owned())));
             }
-            StretchDIBits(
-                hdc,
-                0,
-                0,
-                i32::from(width),
-                i32::from(height),
-                0,
-                0,
-                i32::from(width),
-                i32::from(height),
-                pixels.as_ptr().cast(),
-                &info,
-                DIB_RGB_COLORS,
-                SRCCOPY,
-            );
+            let viewport = crate::platform::blit_viewport(self.size(), (width, height));
+            if let Some((w_dst, h_dst, x_src, y_src)) = viewport {
+                StretchDIBits(
+                    hdc,
+                    0,
+                    0,
+                    i32::from(w_dst),
+                    i32::from(h_dst),
+                    i32::from(x_src),
+                    i32::from(y_src),
+                    i32::from(w_dst),
+                    i32::from(h_dst),
+                    pixels.as_ptr().cast(),
+                    &info,
+                    DIB_RGB_COLORS,
+                    SRCCOPY,
+                );
+            }
             ReleaseDC(self.hwnd, hdc);
         }
         Ok(())
