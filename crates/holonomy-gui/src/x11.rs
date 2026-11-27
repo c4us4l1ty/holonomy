@@ -2408,20 +2408,57 @@ mod tests {
 
             let mut setup_rep = vec![1u8, 0, 11, 0, 0, 0, 20, 0];
             setup_rep.extend_from_slice(&body);
-            server_sock.write_all(&setup_rep).expect("send setup");
+            assert!(
+                send(&mut server_sock, &setup_rep),
+                "peer closed before setup"
+            );
 
-            let read_req = |sock: &mut UnixStream| -> Option<(u8, u8, Vec<u8>)> {
+            // The mock server races the client's teardown by design: the client stops polling and
+            // drops its socket as soon as it has what it needs, which can land while this thread
+            // is mid-write. On macOS that surfaces as `EPIPE` from `write_all`, and the old
+            // `.unwrap()`/`.expect()` turned an intended, harmless close into a test panic — the
+            // flake that reddened the post-merge run. A closed peer now ends the script (the
+            // client's own assertions still run and still mean what they meant); every other
+            // error still panics.
+            //
+            // Plain `fn`s, not closures: `send_reply` would otherwise hold a unique borrow of
+            // `send` for its whole lifetime, so the direct `send(...)` calls below could not
+            // coexist with it.
+            fn peer_gone(e: &std::io::Error) -> bool {
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::UnexpectedEof
+                )
+            }
+
+            // `false` means the peer closed; callers stop driving the script.
+            fn send(sock: &mut UnixStream, bytes: &[u8]) -> bool {
+                match sock.write_all(bytes) {
+                    Ok(()) => true,
+                    Err(e) if peer_gone(&e) => false,
+                    Err(e) => panic!("mock X11 server write failed: {e}"),
+                }
+            }
+
+            fn read_req(sock: &mut UnixStream) -> Option<(u8, u8, Vec<u8>)> {
                 let mut h = [0u8; 4];
                 if sock.read_exact(&mut h).is_err() {
                     return None;
                 }
                 let words = u16::from_le_bytes([h[2], h[3]]) as usize;
                 let mut rest = vec![0u8; (words - 1) * 4];
-                sock.read_exact(&mut rest).expect("read req body");
-                Some((h[0], h[1], rest))
-            };
+                // A truncated final request means the client hung up mid-frame; end the script
+                // rather than panicking inside the mock.
+                match sock.read_exact(&mut rest) {
+                    Ok(()) => Some((h[0], h[1], rest)),
+                    Err(e) if peer_gone(&e) => None,
+                    Err(e) => panic!("mock X11 server read failed: {e}"),
+                }
+            }
 
-            let send_reply = |sock: &mut UnixStream, seq: u16, b1: u8, payload: &[u8]| {
+            fn send_reply(sock: &mut UnixStream, seq: u16, b1: u8, payload: &[u8]) -> bool {
                 assert_eq!(payload.len() % 4, 0);
                 let mut pkt = vec![0u8; 32 + payload.len().saturating_sub(24)];
                 pkt[0] = 1;
@@ -2431,8 +2468,8 @@ mod tests {
                 pkt[4..8].copy_from_slice(&(extra as u32).to_le_bytes());
                 let copy_len = payload.len().min(pkt.len() - 8);
                 pkt[8..8 + copy_len].copy_from_slice(&payload[..copy_len]);
-                sock.write_all(&pkt).expect("send reply");
-            };
+                send(sock, &pkt)
+            }
 
             let mut seq = 0u16;
             let mut next_atom = 100u32;
@@ -2465,7 +2502,7 @@ mod tests {
                         }
                         let mut p = vec![0u8; 24];
                         p[0..4].copy_from_slice(&atom.to_le_bytes());
-                        send_reply(&mut server_sock, seq, 0, &p);
+                        let _ = send_reply(&mut server_sock, seq, 0, &p);
                     }
                     op::GET_KEYBOARD_MAPPING => {
                         // 3 keycodes (8..=10), 2 keysyms per keycode -> 24 bytes after 24-byte hdr.
@@ -2475,52 +2512,56 @@ mod tests {
                         for (i, s) in syms.iter().enumerate() {
                             p[24 + i * 4..24 + i * 4 + 4].copy_from_slice(&s.to_le_bytes());
                         }
-                        send_reply(&mut server_sock, seq, 2, &p);
+                        let _ = send_reply(&mut server_sock, seq, 2, &p);
                     }
                     op::CREATE_WINDOW => saw_create_win = true,
                     op::MAP_WINDOW => saw_map_win = true,
                     op::GET_INPUT_FOCUS => {
-                        send_reply(&mut server_sock, seq, 0, &[0u8; 24]);
+                        let _ = send_reply(&mut server_sock, seq, 0, &[0u8; 24]);
                         // Push batch of synthetic server events onto wire right after sync!
+                        // Queued as one buffer: the batch is a single unit, and if the peer has
+                        // already hung up the whole script ends (see `peer_gone`).
+                        let mut batch = Vec::with_capacity(32 * 7);
                         // 1. KeyPress keycode 8 ('a')
                         let mut kp = [0u8; 32];
                         kp[0] = event_code::KEY_PRESS;
                         kp[1] = 8;
-                        server_sock.write_all(&kp).unwrap();
+                        batch.extend_from_slice(&kp);
                         // 2. ButtonPress left @ (50, 60) + MotionNotify (80, 90) + ButtonRelease
                         let mut bp = [0u8; 32];
                         bp[0] = event_code::BUTTON_PRESS;
                         bp[1] = 1;
                         bp[24..26].copy_from_slice(&50i16.to_le_bytes());
                         bp[26..28].copy_from_slice(&60i16.to_le_bytes());
-                        server_sock.write_all(&bp).unwrap();
+                        batch.extend_from_slice(&bp);
                         let mut mv = [0u8; 32];
                         mv[0] = event_code::MOTION_NOTIFY;
                         mv[24..26].copy_from_slice(&80i16.to_le_bytes());
                         mv[26..28].copy_from_slice(&90i16.to_le_bytes());
-                        server_sock.write_all(&mv).unwrap();
+                        batch.extend_from_slice(&mv);
                         let mut br = [0u8; 32];
                         br[0] = event_code::BUTTON_RELEASE;
                         br[1] = 1;
-                        server_sock.write_all(&br).unwrap();
+                        batch.extend_from_slice(&br);
                         // 3. ConfigureNotify resize 900x700 + Expose
                         let mut cfg = [0u8; 32];
                         cfg[0] = event_code::CONFIGURE_NOTIFY;
                         cfg[20..22].copy_from_slice(&900u16.to_le_bytes());
                         cfg[22..24].copy_from_slice(&700u16.to_le_bytes());
-                        server_sock.write_all(&cfg).unwrap();
+                        batch.extend_from_slice(&cfg);
                         let mut exp = [0u8; 32];
                         exp[0] = event_code::EXPOSE;
                         exp[12..14].copy_from_slice(&900u16.to_le_bytes());
                         exp[14..16].copy_from_slice(&700u16.to_le_bytes());
-                        server_sock.write_all(&exp).unwrap();
+                        batch.extend_from_slice(&exp);
                         // 4. ClientMessage WM_DELETE_WINDOW with SendEvent bit 0x80 set!
                         let mut cm = [0u8; 32];
                         cm[0] = event_code::CLIENT_MESSAGE | event_code::SEND_EVENT_FLAG;
                         cm[1] = 32;
                         cm[8..12].copy_from_slice(&wm_protocols_atom.to_le_bytes());
                         cm[12..16].copy_from_slice(&wm_delete_atom.to_le_bytes());
-                        server_sock.write_all(&cm).unwrap();
+                        batch.extend_from_slice(&cm);
+                        let _ = send(&mut server_sock, &batch);
                     }
                     op::PUT_IMAGE => {
                         put_image_bytes += rest.len().saturating_sub(20);
@@ -2535,7 +2576,7 @@ mod tests {
                         sr[12..16].copy_from_slice(&clipboard_atom.to_le_bytes());
                         sr[16..20].copy_from_slice(&utf8_atom.to_le_bytes());
                         sr[20..24].copy_from_slice(&sel_prop_atom.to_le_bytes());
-                        server_sock.write_all(&sr).unwrap();
+                        let _ = send(&mut server_sock, &sr);
                     }
                     op::CONVERT_SELECTION => {
                         saw_convert_sel = true;
@@ -2544,7 +2585,7 @@ mod tests {
                         sn[12..16].copy_from_slice(&clipboard_atom.to_le_bytes());
                         sn[16..20].copy_from_slice(&utf8_atom.to_le_bytes());
                         sn[20..24].copy_from_slice(&sel_prop_atom.to_le_bytes());
-                        server_sock.write_all(&sn).unwrap();
+                        let _ = send(&mut server_sock, &sn);
                     }
                     op::GET_PROPERTY => {
                         let pasted = b"clipboard-hello";
@@ -2553,7 +2594,7 @@ mod tests {
                         p[0..4].copy_from_slice(&utf8_atom.to_le_bytes());
                         p[8..12].copy_from_slice(&(pasted.len() as u32).to_le_bytes());
                         p[24..24 + pasted.len()].copy_from_slice(pasted);
-                        send_reply(&mut server_sock, seq, 8, &p);
+                        let _ = send_reply(&mut server_sock, seq, 8, &p);
                     }
                     _ => {}
                 }
