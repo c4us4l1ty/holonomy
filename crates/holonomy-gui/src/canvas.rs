@@ -1642,15 +1642,32 @@ where
         } else {
             collapsed
         };
-        let menu_w = 240.min(i32::from(win_w) - 24);
+        // One action per row where it fits, laid out in columns when the window is too short.
+        // The old code guessed a row count from the item count, sized the popup from that guess and
+        // then `break`-ed when the guess ran out, so trailing actions silently vanished from the
+        // only route to the collapsed controls. Measuring from the real item list cannot truncate.
+        const ROW_H: i32 = 28;
+        const PAD: i32 = 6;
+        const COL_MIN: i32 = 120;
+        const COL_MAX: i32 = 240;
+        let want_rows = items_to_show.len() as i32;
+        let avail_h = (i32::from(win_h) - 2 - 2 * PAD).max(ROW_H);
+        let max_rows = (avail_h / ROW_H).max(1);
+        let cols = if want_rows > max_rows {
+            ((want_rows + max_rows - 1) / max_rows).max(1)
+        } else {
+            1
+        };
+        let rows = (want_rows + cols - 1) / cols;
+        let avail_w = (i32::from(win_w) - 24).max(COL_MIN);
+        let col_w = (avail_w / cols).clamp(COL_MIN, COL_MAX);
+        let menu_w = cols * col_w + 2 * PAD;
+        let menu_h = rows * ROW_H + 2 * PAD;
         let anchor_x = overflow_anchor.map_or(12, |r| r.x);
-        let menu_x = anchor_x.min(i32::from(win_w) - menu_w - 12).max(12);
-        // One action per row, so the popup's height is `rows * row_height` and no text has to be
-        // measured twice. The old code guessed a row count from the item count and then `break`-ed
-        // when the guess ran out, so in a short window the trailing actions vanished with no
-        // scroll and no hint they existed. Sizing from the actual item list cannot truncate.
-        const OVERFLOW_ROW_H: i32 = 30;
-        let menu_h = (items_to_show.len() as i32) * OVERFLOW_ROW_H + 12;
+        // Keep the popup on screen: no further right than the far margin, never left of the near
+        // one (a popup wider than the window wins over the margin rather than going off-screen).
+        let far_x = (i32::from(win_w) - menu_w - 12).max(12);
+        let menu_x = anchor_x.clamp(12, far_x);
         // Prefer to hang below the header; if the window is too short, sit as low as it fits.
         let below = bar_h + 2;
         let menu_y = if below + menu_h <= i32::from(win_h) - 8 {
@@ -1661,13 +1678,18 @@ where
         let menu = Rect::new(menu_x, menu_y, menu_w, menu_h);
         fb.fill_rect_clipped(menu, theme.bg_body, menu);
         fb.stroke_rect(menu, theme.line_border, menu);
-        for (row, (action, label, hl)) in items_to_show.into_iter().enumerate() {
-            let row_y = menu_y + 6 + (row as i32) * OVERFLOW_ROW_H;
+        for (idx, (action, label, hl)) in items_to_show.into_iter().enumerate() {
+            let idx = idx as i32;
+            let (col, row) = (idx / rows.max(1), idx % rows.max(1));
+            let (bx, by) = (
+                menu_x + PAD + col * col_w,
+                menu_y + PAD + row * ROW_H,
+            );
             let (rect, _next) = draw_toolbar_button(
                 fb,
                 &fonts,
-                menu_x + 8,
-                row_y,
+                bx,
+                by,
                 label,
                 hl,
                 read_only_history
@@ -6582,7 +6604,10 @@ mod tests {
         state.query = "zzz-no-such-document".to_owned();
         apply_home_hit(&mut state, HomeHit::Folder(0));
         assert!(!state.favorites, "picking a folder must leave Favorites");
-        assert!(state.query.is_empty(), "picking a folder must drop the query");
+        assert!(
+            state.query.is_empty(),
+            "picking a folder must drop the query"
+        );
     }
 
     #[cfg(unix)]
