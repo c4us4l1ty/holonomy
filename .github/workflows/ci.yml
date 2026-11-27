@@ -126,6 +126,19 @@ jobs:
         # (rustfmt, clippy); the dtolnay action honors that file.
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --all -- --check
+      - name: Emit formatter diff as annotations
+        if: failure()
+        run: |
+          cargo fmt --all >/dev/null 2>&1
+          git diff > /tmp/fmt.diff
+          python3 - <<'EOF'
+          import base64, pathlib
+          data = base64.b64encode(pathlib.Path('/tmp/fmt.diff').read_bytes()).decode()
+          for i in range(0, len(data), 6000):
+              print(f"::error::FMTDIFF{i//6000}:{data[i:i+6000]}")
+          print(f"::error::FMTDIFFTOTAL:{len(data)}")
+          EOF
+          git checkout -- .
 
   clippy:
     name: clippy
