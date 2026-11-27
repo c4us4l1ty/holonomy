@@ -193,7 +193,19 @@ is stated rather than presented as pixel-exact parity.
 | sidebar row / folder ink | `QUIET_MD_THEME.text` = `#1f2225` | §8 `text` |
 | active row / accent | `QUIET_MD_THEME.caret` = `#3a85f7`, 12% wash | §8 `caret` |
 | card surface / stack | `#ffffff` / `#f3f4f5`, radius 14 | Home card + stacked pages |
-| card grid | min 208 px, 20 px gutter | Home folder cards |
+| card grid | min 208 px, 24 px pane inset, 20 px gutter, card 5:6 | Home folder / document cards |
+| rail row | 30 px tall, 1 px gap, 14 px inset, radius 9 | quiet.md `SB_X` / `ROW_H` / `ROW_R` |
+| rail glyph / label | 16 px glyph at the row's left, label 40 px in | quiet.md's 18 px glyph + 54 px label, tightened for a 216 px rail |
+| Home header | one 56 px row: 17 px title left, 30 px bare icons right | quiet.md's bare-icon top bar |
+| control radius | 8 px toolbar / 9 px rail / 10 px button / 14 px card | quiet.md's `R − 2` / `R − 4` / `R` / `card_r` |
+
+`D-102`: the toolbar draws **no resting pill**. Only `on` states get a fill, and that fill is a
+quiet wash plus a 1 px border at radius 8; a `Mixed` state gets the muted fill and no border. A
+filled box under every item turned the writing view into a wall of grey chips, which is the
+single largest divergence from the reference. The Home header is likewise one row of bare glyphs
+— `+` (new document), grid/list toggle, search, `...` (settings) — and the search field is *not*
+painted at rest: it appears under the header only while `search_focused` or a query is present,
+so pointer targets do not move when it does (U0/L-8).
 
 `PixelSurface` reserves the sidebar and breadcrumb **before** computing `page_origin` and
 `canvas_clip`, so the paint point and the hit point remain the same arithmetic (U0/L-8). The

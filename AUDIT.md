@@ -3130,6 +3130,28 @@ Listed so they stay dead.
   failure behavior. `metadata_digest` uses variable-output BLAKE2b-256 rather than truncating
   BLAKE2b-512; its reference-vector regression test passed in workspace CI.
 
+- **2026-11-26** — **`D-102`: design convergence to quiet.md, Holonomy first.** The Home shell
+  was rebuilt on the reference's own geometry — 30 px rail rows at radius 9 with a 14 px inset and
+  only the *active* row filled (the previous build washed every row, which read as a column of
+  buttons), a one-row 56 px header with a 17 px title and four bare 30 px glyphs (`+`, grid/list,
+  search, `...`), and an inline search field that is painted only while focused or non-empty. The
+  card grid now uses the reference's folder-page arithmetic: 24 px pane inset, 20 px gutter, 4:5
+  body columns from a 208 px minimum clamped to 1–4, folders drawn as three fanned papers behind a
+  pocket with the label *below* the stack, documents as white sheets with metadata-only preview
+  rules. The toolbar lost its resting pill entirely: only `on` states fill (quiet wash + 1 px
+  border at radius 8), so the writing view no longer reads as a wall of grey chips. List rows were
+  flattened to text over hairlines and the phantom hardcoded `"Open"` label — never a separate
+  control — is gone. An out-of-range `active_folder` now degrades to "no filter" instead of
+  indexing `folders` on the paint path.
+
+  What the reference asked for and Holonomy refused: previews stay data-free line patterns seeded
+  from folder metadata, never decrypted excerpts (`L-2`); the header hides the search field at
+  rest but *every* painted target still has exactly one hit rect from the same arithmetic
+  (`L-8`); the empty state distinguishes Favorites from an empty library rather than claiming "No
+  documents yet" where no document list exists. `HOME_CARD_H` was deleted because the card height
+  is now derived from its column width. Open caveat carried forward: the `⋯` overflow still drops
+  rows in very short windows (needs a layout rewrite, not exercised by CI).
+
 - **2026-11-16** — Block 2 residuals closed. **OQ-5**: Argon2 now runs exclusively through
   `kdf::run_argon2`, which derives over a caller-owned `Arena` whose `Drop` zeroizes the
   whole m-cost slab before free (argon2 `zeroize` feature enabled at the workspace pin);
