@@ -4,6 +4,9 @@ on:
     branches: ["arena/**"]
     paths:
       - "crates/holonomy-native/**"
+      - "vendor/xattr/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/native-ui.yml"
   workflow_dispatch:
 permissions:
@@ -28,7 +31,7 @@ jobs:
       - name: Resolve, format and compile preview
         shell: bash
         run: |
-          cargo generate-lockfile
+          cargo metadata --format-version 1 > /dev/null
           cargo fmt --all
           cargo check -p holonomy-native --features native-ui 2>&1 | tee native-check.log
           exit "${PIPESTATUS[0]}"

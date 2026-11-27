@@ -18,7 +18,7 @@ members = [
     "crates/holonomy-text",
     "crates/xtask",
 ]
-exclude = ["holonomy-old", "holonomy-v5-1-0"]
+exclude = ["holonomy-old", "holonomy-v5-1-0", "vendor/xattr"]
 
 [workspace.package]
 # One bump per roadmap block; sealed at 6.0.0 by Block 10's release gate.
@@ -59,3 +59,7 @@ missing_docs = "warn"
 [profile.release]
 # Security release posture lands with Block 2; Block 1 keeps the profile minimal.
 incremental = false
+
+# GPUI 0.2.2 pulls xattr 0.2.3 through zed-async-tar. See vendor/xattr/HOLONOMY.md.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }

@@ -1,7 +1,10 @@
 //! Opt-in native-scale UI shell. Document editing stays in the existing application for now.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use gpui::{div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Window, WindowBounds, WindowOptions};
+use gpui::{
+    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Window, WindowBounds,
+    WindowOptions,
+};
 
 #[derive(Default)]
 struct NativeHome {
@@ -15,13 +18,21 @@ impl NativeHome {
         // A separate process deliberately keeps plaintext and passphrases out of GPUI until
         // framework text-cache lifetimes have been reviewed against the wipe contract.
         let result = std::env::current_exe().and_then(|path| {
-            let name = if cfg!(windows) { "holonomy-gui.exe" } else { "holonomy-gui" };
+            let name = if cfg!(windows) {
+                "holonomy-gui.exe"
+            } else {
+                "holonomy-gui"
+            };
             std::process::Command::new(path.with_file_name(name)).spawn()
         });
         match result {
             Ok(mut child) => {
-                std::thread::spawn(move || { let _ = child.wait(); });
-                self.status = "Existing editor launched in a separate window. Its rendering is unchanged.".into();
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                self.status =
+                    "Existing editor launched in a separate window. Its rendering is unchanged."
+                        .into();
             }
             Err(error) => {
                 self.status = format!("Could not launch the existing editor: {error}. Build holonomy-gui beside this binary.");
@@ -94,7 +105,8 @@ fn main() {
                 ..Default::default()
             },
             |_, cx| cx.new(|_| NativeHome::default()),
-        ).expect("could not open the native UI preview");
+        )
+        .expect("could not open the native UI preview");
         cx.activate(true);
     });
 }
