@@ -572,10 +572,7 @@ impl DesktopWindow for ScaledWindow {
 /// present. Scaling *up* is left to the backend: that only happens when the window is larger than
 /// the renderer's logical viewport, where shrinking the viewport instead would lose content.
 #[must_use]
-pub fn blit_viewport(
-    client: (u16, u16),
-    framebuffer: (u16, u16),
-) -> Option<(u16, u16, u16, u16)> {
+pub fn blit_viewport(client: (u16, u16), framebuffer: (u16, u16)) -> Option<(u16, u16, u16, u16)> {
     let (cw, ch) = client;
     let (fw, fh) = framebuffer;
     if cw == 0 || ch == 0 || fw == 0 || fh == 0 {
@@ -794,9 +791,15 @@ mod tests {
     #[test]
     fn blit_viewport_never_stretches_a_matching_framebuffer() {
         // The 1:1 case must reach the screen untouched: source and destination identical.
-        assert_eq!(blit_viewport((800, 600), (800, 600)), Some((800, 600, 0, 0)));
+        assert_eq!(
+            blit_viewport((800, 600), (800, 600)),
+            Some((800, 600, 0, 0))
+        );
         // A smaller framebuffer is still presented at its own size, anchored top-left.
-        assert_eq!(blit_viewport((800, 600), (747, 520)), Some((747, 520, 0, 0)));
+        assert_eq!(
+            blit_viewport((800, 600), (747, 520)),
+            Some((747, 520, 0, 0))
+        );
     }
 
     #[test]
@@ -820,7 +823,10 @@ mod tests {
         assert_eq!(physical_size_hint((1_120, 780), 144), (1_680, 1_170));
         // Rounding is to nearest, and the result can never exceed a `u16` client area.
         assert_eq!(physical_size_hint((801, 801), 144), (1_202, 1_202));
-        assert_eq!(physical_size_hint((u16::MAX, u16::MAX), 288), (u16::MAX, u16::MAX));
+        assert_eq!(
+            physical_size_hint((u16::MAX, u16::MAX), 288),
+            (u16::MAX, u16::MAX)
+        );
         assert_eq!(physical_size_hint((0, 0), 96), (1, 1));
     }
 

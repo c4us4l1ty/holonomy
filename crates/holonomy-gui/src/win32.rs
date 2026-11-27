@@ -500,10 +500,8 @@ pub fn enable_per_monitor_dpi_awareness() {
         if !user32.is_null() {
             let addr = GetProcAddress(user32, c"SetProcessDPIAware".as_ptr().cast());
             if !addr.is_null() {
-                let set_aware = std::mem::transmute::<
-                    *const c_void,
-                    unsafe extern "system" fn() -> Bool,
-                >(addr);
+                let set_aware =
+                    std::mem::transmute::<*const c_void, unsafe extern "system" fn() -> Bool>(addr);
                 let _ = set_aware();
             }
         }
@@ -526,10 +524,9 @@ fn dpi_for(hwnd: Hwnd) -> i64 {
             GetProcAddress(user32, c"GetDpiForWindow".as_ptr().cast())
         };
         if !get_for_window.is_null() && !hwnd.is_null() {
-            let get = std::mem::transmute::<
-                *const c_void,
-                unsafe extern "system" fn(Hwnd) -> u32,
-            >(get_for_window);
+            let get = std::mem::transmute::<*const c_void, unsafe extern "system" fn(Hwnd) -> u32>(
+                get_for_window,
+            );
             get(hwnd)
         } else {
             let hdc = GetDC(hwnd);
