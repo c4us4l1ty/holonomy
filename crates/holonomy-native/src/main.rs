@@ -91,7 +91,9 @@ impl NativeHome {
         if let Some(session) = self.session.as_mut() {
             let navigation = matches!(intent, Intent::RevealCaret);
             let result = session.apply(intent);
-            if !navigation || result.is_err() { self.report(result, ""); }
+            if !navigation || result.is_err() {
+                self.report(result, "");
+            }
         }
     }
 
@@ -225,12 +227,14 @@ impl NativeHome {
             cx.notify();
             return;
         }
-        if !self.preedit.is_empty() && !command { return; }
+        if !self.preedit.is_empty() && !command {
+            return;
+        }
         if self.screen == Screen::Unlock {
             match key {
                 "escape" => {
                     self.preedit.zeroize();
-        self.passphrase.zeroize();
+                    self.passphrase.zeroize();
                     self.screen = Screen::Home;
                 }
                 "tab" => self.editing_path = !self.editing_path,
@@ -269,10 +273,22 @@ impl NativeHome {
         } else if self.screen == Screen::Editor {
             if command {
                 match key {
-                    "left" => self.apply(Intent::Move { to: Move::WordLeft, extend: mods.shift }),
-                    "right" => self.apply(Intent::Move { to: Move::WordRight, extend: mods.shift }),
-                    "home" => self.apply(Intent::Move { to: Move::DocumentStart, extend: mods.shift }),
-                    "end" => self.apply(Intent::Move { to: Move::DocumentEnd, extend: mods.shift }),
+                    "left" => self.apply(Intent::Move {
+                        to: Move::WordLeft,
+                        extend: mods.shift,
+                    }),
+                    "right" => self.apply(Intent::Move {
+                        to: Move::WordRight,
+                        extend: mods.shift,
+                    }),
+                    "home" => self.apply(Intent::Move {
+                        to: Move::DocumentStart,
+                        extend: mods.shift,
+                    }),
+                    "end" => self.apply(Intent::Move {
+                        to: Move::DocumentEnd,
+                        extend: mods.shift,
+                    }),
                     "backspace" => self.apply(Intent::DeleteWordBefore),
                     "delete" => self.apply(Intent::DeleteWordAfter),
                     "s" => {
@@ -336,20 +352,48 @@ impl NativeHome {
                 self.apply(Intent::RevealCaret);
             }
         }
-        if command || matches!(key, "escape" | "tab" | "enter" | "backspace" | "delete" | "left" | "right" | "up" | "down" | "home" | "end") { cx.stop_propagation(); }
+        if command
+            || matches!(
+                key,
+                "escape"
+                    | "tab"
+                    | "enter"
+                    | "backspace"
+                    | "delete"
+                    | "left"
+                    | "right"
+                    | "up"
+                    | "down"
+                    | "home"
+                    | "end"
+            )
+        {
+            cx.stop_propagation();
+        }
         cx.notify();
     }
 
     fn commit_text(&mut self, text: &str) {
         match self.screen {
             Screen::Unlock if self.editing_path => {
-                if self.path.len().saturating_add(text.len()) <= 4096 { self.path.push_str(text); }
+                if self.path.len().saturating_add(text.len()) <= 4096 {
+                    self.path.push_str(text);
+                }
             }
-            Screen::Unlock => { self.passphrase.push_str(text); }
-            Screen::Find | Screen::Bookmark => { self.query.push_str(text); self.search_index = 0; }
+            Screen::Unlock => {
+                self.passphrase.push_str(text);
+            }
+            Screen::Find | Screen::Bookmark => {
+                self.query.push_str(text);
+                self.search_index = 0;
+            }
             Screen::Editor => {
-                if text.len() <= 1024 * 1024 { self.apply(Intent::Type(text.into())); self.apply(Intent::RevealCaret); }
-                else { self.status = "Text input exceeds the 1 MiB limit.".into(); }
+                if text.len() <= 1024 * 1024 {
+                    self.apply(Intent::Type(text.into()));
+                    self.apply(Intent::RevealCaret);
+                } else {
+                    self.status = "Text input exceeds the 1 MiB limit.".into();
+                }
             }
             Screen::Home => {}
         }
@@ -416,7 +460,19 @@ fn paint_frame(bounds: Bounds<Pixels>, frame: VectorFrame, ink: u32, window: &mu
 
 impl Render for NativeHome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.set_window_title(&self.session.as_ref().map_or_else(|| "Holonomy Native".to_string(), |session| format!("Holonomy Native — {}", session.path().file_name().unwrap_or_default().to_string_lossy())));
+        window.set_window_title(&self.session.as_ref().map_or_else(
+            || "Holonomy Native".to_string(),
+            |session| {
+                format!(
+                    "Holonomy Native — {}",
+                    session
+                        .path()
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )
+            },
+        ));
         let (bg, panel, ink, muted) = if self.dark {
             (0x191b1e, 0x222529, 0xeeeeec, 0xa8acae)
         } else {
@@ -592,11 +648,33 @@ impl Render for NativeHome {
                         ))),
                 );
                 if self.screen != Screen::Editor {
-                    body = body.child(format!("{} · Enter confirms · Escape cancels", if self.screen == Screen::Find { "Find" } else { "Bookmark name" }));
+                    body = body.child(format!(
+                        "{} · Enter confirms · Escape cancels",
+                        if self.screen == Screen::Find {
+                            "Find"
+                        } else {
+                            "Bookmark name"
+                        }
+                    ));
                     let entity = cx.entity();
-                    body = body.child(canvas(move |bounds, window, cx| {
-                        entity.update(cx, |this,_| holonomy_native::vector_text(&this.fonts, &this.query, f32::from(bounds.size.width)-48., window.scale_factor()).unwrap_or_default())
-                    }, move |bounds, frame, window, _| paint_frame(bounds,frame,ink,window)).w_full().h(px(72.)));
+                    body = body.child(
+                        canvas(
+                            move |bounds, window, cx| {
+                                entity.update(cx, |this, _| {
+                                    holonomy_native::vector_text(
+                                        &this.fonts,
+                                        &this.query,
+                                        f32::from(bounds.size.width) - 48.,
+                                        window.scale_factor(),
+                                    )
+                                    .unwrap_or_default()
+                                })
+                            },
+                            move |bounds, frame, window, _| paint_frame(bounds, frame, ink, window),
+                        )
+                        .w_full()
+                        .h(px(72.)),
+                    );
                 }
                 if self.show_history {
                     let mut history = div().flex().flex_wrap().gap_2().child(
@@ -681,26 +759,58 @@ impl Render for NativeHome {
                                 cx.notify();
                             }
                         }))
-                        .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
-                            let delta = event.delta.pixel_delta(px(24.));
-                            this.apply(Intent::ScrollBy(holonomy_native::fixed(-f32::from(
-                                delta.y,
-                            ))));
-                            cx.notify();
-                        }))
+                        .on_scroll_wheel(cx.listener(
+                            |this, event: &gpui::ScrollWheelEvent, _, cx| {
+                                let delta = event.delta.pixel_delta(px(24.));
+                                this.apply(Intent::ScrollBy(holonomy_native::fixed(-f32::from(
+                                    delta.y,
+                                ))));
+                                cx.notify();
+                            },
+                        ))
                         .child(drawing),
                 );
             }
         }
         if !self.preedit.is_empty() {
-            let entity=cx.entity();
-            body=body.child(canvas(move |bounds,window,cx| entity.update(cx,|this,_| holonomy_native::vector_text(&this.fonts, if this.screen == Screen::Unlock && !this.editing_path { "••••" } else { &this.preedit },f32::from(bounds.size.width)-48.,window.scale_factor()).unwrap_or_default()),move |bounds,frame,window,_|paint_frame(bounds,frame,ink,window)).h(px(64.)).w_full());
+            let entity = cx.entity();
+            body = body.child(
+                canvas(
+                    move |bounds, window, cx| {
+                        entity.update(cx, |this, _| {
+                            holonomy_native::vector_text(
+                                &this.fonts,
+                                if this.screen == Screen::Unlock && !this.editing_path {
+                                    "••••"
+                                } else {
+                                    &this.preedit
+                                },
+                                f32::from(bounds.size.width) - 48.,
+                                window.scale_factor(),
+                            )
+                            .unwrap_or_default()
+                        })
+                    },
+                    move |bounds, frame, window, _| paint_frame(bounds, frame, ink, window),
+                )
+                .h(px(64.))
+                .w_full(),
+            );
         }
-        let input_entity=cx.entity();
-        let focus=self.focus.clone();
-        let input=canvas(|_,_,_| (),move |bounds,_,window,cx| {
-            window.handle_input(&focus,gpui::ElementInputHandler::new(bounds,input_entity),cx);
-        }).absolute().size_full();
+        let input_entity = cx.entity();
+        let focus = self.focus.clone();
+        let input = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, cx| {
+                window.handle_input(
+                    &focus,
+                    gpui::ElementInputHandler::new(bounds, input_entity),
+                    cx,
+                );
+            },
+        )
+        .absolute()
+        .size_full();
         div()
             .size_full()
             .track_focus(&self.focus)
@@ -746,50 +856,120 @@ impl Render for NativeHome {
 // avoids turning each composition update into an undoable/persisted edit. The context deliberately
 // excludes surrounding document/passphrase text; reconversion outside the marked range is refused.
 impl gpui::EntityInputHandler for NativeHome {
-    fn text_for_range(&mut self, range: std::ops::Range<usize>, adjusted: &mut Option<std::ops::Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
-        if self.screen == Screen::Unlock && !self.editing_path { return None; }
-        let bytes=holonomy_native::utf16_range_bytes(&self.preedit,range.clone())?;
-        *adjusted=Some(range);
+    fn text_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        adjusted: &mut Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        if self.screen == Screen::Unlock && !self.editing_path {
+            return None;
+        }
+        let bytes = holonomy_native::utf16_range_bytes(&self.preedit, range.clone())?;
+        *adjusted = Some(range);
         Some(self.preedit[bytes].to_string())
     }
-    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<gpui::UTF16Selection> {
-        if self.screen == Screen::Home { return None; }
-        let end=self.preedit.encode_utf16().count();
-        Some(gpui::UTF16Selection { range:end..end, reversed:false })
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<gpui::UTF16Selection> {
+        if self.screen == Screen::Home {
+            return None;
+        }
+        let end = self.preedit.encode_utf16().count();
+        Some(gpui::UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
     }
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
-        if self.preedit.is_empty() { None } else { Some(0..self.preedit.encode_utf16().count()) }
+    fn marked_text_range(
+        &self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        if self.preedit.is_empty() {
+            None
+        } else {
+            Some(0..self.preedit.encode_utf16().count())
+        }
     }
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let text=std::mem::take(&mut self.preedit);
-        if !text.is_empty() { self.commit_text(&text); }
+        let text = std::mem::take(&mut self.preedit);
+        if !text.is_empty() {
+            self.commit_text(&text);
+        }
         cx.notify();
     }
-    fn replace_text_in_range(&mut self, range: Option<std::ops::Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
-        if range.as_ref().is_some_and(|range| range.start>range.end || range.end>self.preedit.encode_utf16().count()) {
-            self.status="IME reconversion outside the marked input is not supported yet.".into(); cx.notify(); return;
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if range.as_ref().is_some_and(|range| {
+            range.start > range.end || range.end > self.preedit.encode_utf16().count()
+        }) {
+            self.status = "IME reconversion outside the marked input is not supported yet.".into();
+            cx.notify();
+            return;
         }
         self.preedit.zeroize();
         self.commit_text(text);
         cx.notify();
     }
-    fn replace_and_mark_text_in_range(&mut self, range: Option<std::ops::Range<usize>>, text: &str, _: Option<std::ops::Range<usize>>, _: &mut Window, cx: &mut Context<Self>) {
-        if range.as_ref().is_some_and(|range| range.start>range.end || range.end>self.preedit.encode_utf16().count()) {
-            self.status="IME reconversion outside the marked input is not supported yet.".into(); cx.notify(); return;
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if range.as_ref().is_some_and(|range| {
+            range.start > range.end || range.end > self.preedit.encode_utf16().count()
+        }) {
+            self.status = "IME reconversion outside the marked input is not supported yet.".into();
+            cx.notify();
+            return;
         }
         self.preedit.zeroize();
-        if !self.preedit.push_str(text) { self.status="Composition exceeds the 4096-byte input limit.".into(); }
+        if !self.preedit.push_str(text) {
+            self.status = "Composition exceeds the 4096-byte input limit.".into();
+        }
         cx.notify();
     }
-    fn bounds_for_range(&mut self, _: std::ops::Range<usize>, bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
-        if let Some(session)=&mut self.session {
-            if let Some(caret)=session.frame(1.).ok()?.caret {
-                return Some(Bounds::new(point(self.bounds.origin.x+px(24.+caret.x),self.bounds.origin.y+px(24.+caret.y)),size(px(1.),px(caret.height))));
+    fn bounds_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        bounds: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        if let Some(session) = &mut self.session {
+            if let Some(caret) = session.frame(1.).ok()?.caret {
+                return Some(Bounds::new(
+                    point(
+                        self.bounds.origin.x + px(24. + caret.x),
+                        self.bounds.origin.y + px(24. + caret.y),
+                    ),
+                    size(px(1.), px(caret.height)),
+                ));
             }
         }
         Some(bounds)
     }
-    fn character_index_for_point(&mut self, _: gpui::Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> { None }
+    fn character_index_for_point(
+        &mut self,
+        _: gpui::Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
 }
 
 fn main() {

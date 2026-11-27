@@ -29,7 +29,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev xvfb xdotool imagemagick mesa-vulkan-drivers
+          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev xvfb xdotool x11-utils imagemagick mesa-vulkan-drivers
       - name: Resolve, format and compile preview
         shell: bash
         run: |
@@ -78,6 +78,7 @@ jobs:
             native-format.patch
             native-smoke.png
             native-failure.png
+            native-unlock.png
             crates/holonomy-native/src/lib.rs
   bridge:
     needs: qualify
