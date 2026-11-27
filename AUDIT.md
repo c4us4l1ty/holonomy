@@ -3143,6 +3143,17 @@ Listed so they stay dead.
   panicking. Client-side assertions are unchanged, so the test still proves the handshake, the
   scanline `PutImage` framing, the queued events and the clipboard round-trip.
 
+- **2026-11-27** — **Second flake in the Xvfb qualification job, recorded so it is not
+  re-investigated.** The post-merge run of `09aa0e6` failed `X11 GUI live Xvfb qualification`
+  with exit 100 and passed on `gh run rerun --failed` with the identical tree; the same job
+  passed on the pre-merge run of the same commit. The change under test was Win32-only, so no
+  X11 code was in the delta. This is the second flake in the display-server qualification path
+  this week (the first was the mock X11 harness, closed in `5d2c375`), and both point the same
+  way: the failure is in the timing of the live X session, not in the product. Nothing was
+  changed for it — there is still no evidence of a product defect, and guessing at a fix would
+  hide the next real one. If it recurs, the next step is to capture the script's own output
+  through the diagnostics bridge rather than to loosen an assertion.
+
 - **2026-11-27** — **Blurry rendering on scaled Windows displays: the process was DPI-unaware.**
   Reported symptom: every glyph, icon and hairline in the native window looked soft while other
   applications on the same screen were crisp. Measured from a screenshot, a one-pixel icon stem
