@@ -176,3 +176,64 @@ own families and bundles only what it draws itself.
 Comments/threads, inline images, tables, math (Block 10+ composition), sharing/people UI,
 chat, AI panels, telemetry of any kind, and any UI element that requires materializing more
 than the viewport (that is law L-2, and the UI obeys it too).
+
+## 10. Chrome parity — Home and writing view
+
+The page tokens in §8 are the source of truth for the document itself. This section adds the
+chrome around it. Values are quoted from quiet.md 0.1.13's own theme where a token exists and
+from its 0.1.14 Home screenshot where the chrome is drawn rather than themed; the distinction
+is stated rather than presented as pixel-exact parity.
+
+| Token | Value | Basis |
+| ----- | ----- | ----- |
+| sidebar width | 216 px | quiet.md Home rail at 1280 px window width |
+| writing-view breadcrumb row | 40 px | quiet.md document header height |
+| chrome collapse threshold | window < 860 px | page keeps a usable measure; no second toolbar row |
+| sidebar wash | `#c2d9ea` → `#d8e4d6` vertical | sampled from the Home screenshot; the real app blurs the wallpaper |
+| sidebar row / folder ink | `QUIET_MD_THEME.text` = `#1f2225` | §8 `text` |
+| active row / accent | `QUIET_MD_THEME.caret` = `#3a85f7`, 12% wash | §8 `caret` |
+| card surface / stack | `#ffffff` / `#f3f4f5`, radius 14 | Home card + stacked pages |
+| card grid | min 208 px, 20 px gutter | Home folder cards |
+
+`PixelSurface` reserves the sidebar and breadcrumb **before** computing `page_origin` and
+`canvas_clip`, so the paint point and the hit point remain the same arithmetic (U0/L-8). The
+toolbar, security dot and 24 px status strip stay visible — they are session facts, not
+decoration, and are not hidden for the sake of a screenshot. The writing-view rail is built
+from `DocumentChromeData`, a metadata-only type with no `Document`, `Spine`, `SegmentSource` or
+text buffer: it cannot widen the resident plaintext set. No wallpaper or desktop pixels are
+read to emulate the frosted effect (that would be an OS surface dependency with no security
+benefit); the two gradient colours are interpolated in the framebuffer instead.
+
+The quiet.md affordances that transfer safely are: folder rail, breadcrumb, search action, witness
+history, security panel, and the static `Ctrl+/` shortcut sheet. Those that do **not** travel
+are recorded here so they stay refused: multi-document tabs or an in-session document switcher
+(one document per window), a whole-document heading outline or note snippets (L-2: it would
+materialise more than the viewport), second `Editor`/`Document` instances, whiteboard/images/
+tables/math, downloadable fonts or CSS themes, and telemetry of any kind. Per-keystroke Markdown
+auto-formatting is also refused: it would put style inference on the allocation-free keystroke
+path that L-2 counts in CI, so headings, lists and quotes remain explicit one-transaction
+toolbar actions. Card previews are data-free line patterns, never decrypted note excerpts. Only
+the two §7/§8 paper themes (light and dark) exist; quiet.md's additional style packs would fork
+the single token table this spec pins. The sidebar opens the library on a *folder name* and then
+leaves the document session entirely; it never opens a second world-line beside the first.
+
+In-tree guards: `canvas::tests::quiet_chrome_tokens_match_the_drift_guarded_page_theme`,
+`canvas::tests::chrome_reserves_page_space_without_moving_the_hit_test_origin`,
+`canvas::tests::document_sidebar_uses_metadata_only_and_paints_inside_its_rect`, and
+`canvas::tests::home_sidebar_plus_is_not_swallowed_by_the_library_row`.
+
+### 10.1 Dark paper
+
+The tokens in §10 are sampled from quiet.md's **light** Home screen. They are correct over
+`QUIET_MD_THEME.bg_body` and wrong over `QUIET_MD_DARK_THEME.bg_body` (`#1A1A19`): `#1f2225` ink on
+that paper measures 1.09:1, which is not text. Anything painted over the page theme therefore
+selects ink through the `ink_for` / `muted_ink_for` / `accent_ink_for` / `faint_for` /
+`soft_fill_for` / `selection_for` helpers in `holonomy-gui/src/canvas.rs`, which resolve to the
+§10 tokens on light paper and to the theme's own `text` / `text_caption` / `line_border` /
+`code_bg` tokens on dark paper. The rail's frosted gradient is likewise light-paper only; dark
+paper paints `code_gutter` instead, because approximating quiet.md's blurred wallpaper would mean
+reading the user's desktop, which §10 already refuses.
+
+`chrome_ink_stays_readable_on_both_papers` fails if either paper drops below 7:1 (primary),
+4:1 (caption) or 3:1 (accent) contrast.
+

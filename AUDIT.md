@@ -68,6 +68,84 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-27 — D-101 — Bug hunt across the D-100 chrome: two user-visible defects and three latent ones.**
+  After D-100 landed on `main`, the whole app was re-read for defects rather than only the new
+  lines. CI was green throughout, so every finding below is a runtime/logic defect rather than a
+  build failure, and each got a regression test instead of a prose claim.
+  - **The shortcut sheet showed 4 of its 14 entries.** `render_shortcut_help` placed seven rows in
+    *two columns of `268 px`* inside a `560 px` panel, so ten entries were painted outside the
+    panel's clip and silently dropped. The grid is now derived from the panel width by
+    `shortcut_help_geometry` (one column below `520 px`, two above), and the sheet returns both its
+    panel and close rect. Pinned by `shortcut_sheet_shows_every_entry_inside_its_panel` at four
+    window sizes.
+  - **Chrome ink was invisible on dark paper.** The D-100 rail, breadcrumb and sheet reused
+    Home's *light* tokens (`HOME_INK #1f2225`, `HOME_MUTED`, `HOME_FAINT`, `HOME_SELECTION`,
+    `HOME_WASH`) over `QUIET_MD_DARK_THEME.bg_body #1a1a19` — a measured **1.09:1** contrast, i.e.
+    the folder rail was effectively blank in dark mode. All writing-view chrome now selects ink
+    through `ink_for`/`muted_ink_for`/`accent_ink_for`/`faint_for`/`soft_fill_for`/`selection_for`;
+    light paper still resolves to exactly the quoted quiet.md tokens. Pinned by
+    `chrome_ink_stays_readable_on_both_papers` (WCAG ratios, both themes) and
+    `dark_paper_rail_paints_inside_its_rect`.
+  - **The sheet was pointer-modal but not keyboard-modal.** With it open, typed characters reached
+    `app.press(...)` and edited the document underneath; the rail's `Shortcuts` row could also be
+    toggled shut over a live find/link bar. The sheet now swallows every key except `Esc`,
+    `Ctrl /`, and `Ctrl Q`/`Ctrl C` (quit, matching the pointer-modal behaviour), and opening it
+    from either the rail or `Ctrl /` clears an anchored find/link bar first.
+  - **New documents from the rail landed outside the library.** Home's `+` suggests a unique path
+    inside `HOLONOMY_NOTES_DIR`; the writing view's equivalent fell back to `notes.wavefunction`
+    in the process working directory, which Home then could not see. Both now share
+    `home_new_document_path(&home_library_root())`.
+  - **Documentation debt:** the Home token block carried two stacked doc comments (a `///` block
+    followed by `//`), which reads as a stray comment on the constant; it is one block now.
+  - **Also restored: `Ctrl+/` in the README.** D-100 removed that row from `README.md`'s shortcut
+    list while keeping the sheet, so the documented set and the shipped set disagreed; the README
+    documents it again.
+  - **Kept as designed:** the rail's gradient stays light-paper only — reading the user's wallpaper
+    to emulate quiet.md's real frosted glass would be an OS-surface dependency with no security
+    benefit — so dark paper paints the theme's own chrome colour instead (`docs/UI-SPEC.md` §10.1).
+  - **Found and deliberately not changed — `⋯` overflow menu can drop rows.** When the window is
+    too short for every collapsed toolbar action, the packing loop `break`s and the remaining
+    actions have no pointer target for that frame (`Scale`/theme/motion stay reachable by shortcut,
+    and undo/redo by `Ctrl Z`/`Ctrl Y`). Fixing it means re-deriving the menu height from actual
+    row packing, which cannot be verified in this sandbox (no Rust toolchain, no display), so it is
+    recorded here rather than shipped as an unexercised layout rewrite.
+
+- **2026-11-27 — D-100 — quiet.md chrome parity in both views, with the laws kept load-bearing.**
+  The user asked for the UI of [`s1dashu/quiet-md`](https://github.com/s1dashu/quiet-md) across
+  the writing view *and* Home, and asked explicitly that security and resource usage not be
+  traded away. `docs/UI-SPEC.md` §8 already made quiet.md's page tokens canon and OQ-13 already
+  decided that its code is source, not a dependency; this pass extends the quoted look to the
+  chrome without importing any of its machinery.
+  - **Built:** a 216 px frosted folder rail and a 40 px breadcrumb in the writing view; Home's
+    rail, stacked folder cards and library breadcrumb; quiet.md ink/accent tokens shared with
+    the drift-guarded `QUIET_MD_THEME`; a static `Ctrl+/` shortcut sheet (quiet.md's `⌘ /`).
+    Clicking a folder in the rail returns to Home with that folder selected, then leaves the
+    document session — no second file is open at once.
+  - **Attacked and answered.** *Can chrome widen the plaintext set?* No: `DocumentChromeData`
+    has no `Document`, `Spine`, `SegmentSource` or text buffer and is built only from file and
+    folder names, so the rail cannot read a sealed segment. *Can chrome move the caret away from
+    the glyph?* No: `PixelSurface::recompute_geometry` reserves rail and breadcrumb before
+    deriving `page_origin`/`canvas_clip`, and the existing L-8 caret-click test still passes.
+    *Can chrome add idle work?* No: all of it paints inside the existing `pending_paint ||
+    app.dirty()` branch, with no timer and no per-keystroke work. *Does it add a dependency,
+    network call, telemetry or desktop capture?* No: the frosted wash is interpolated in the
+    existing framebuffer; no wallpaper pixels are read. The security dot, status strip,
+    witness-history and wipe affordances remain visible rather than being hidden for a closer
+    screenshot.
+  - **Refused, with the reason recorded in `docs/UI-SPEC.md` §10:** multi-document tabs or an
+    in-session world-line switcher (one document per window), whole-document outlines or note
+    snippets (L-2), a second `Editor`/`Document`, whiteboard/images/tables/math, CSS themes or
+    downloaded fonts, telemetry, per-keystroke Markdown auto-formatting (L-2's allocation-free
+    keystroke gate), and extra style packs (one pinned token table). These are quiet.md features;
+    Holonomy's law wins where they conflict.
+  - **Evidence and its limit:** 47 `holonomy-gui` library tests pass locally, including four new
+    guards for token drift, hit-test origin, metadata-only painting inside the rail's rect and
+    the Home sidebar `+` hit order (which the map of the Home shell found was swallowed by the
+    library row); `cargo clippy -p holonomy-gui --all-targets -- -D warnings` is clean. A local
+    framebuffer render was inspected at 1280×800 for both screens. That is inspection, not the
+    screenshot-diff acceptance check §8 requires for a Block 6 gate, and no gate status changes
+    here: L-4/L-5 remain `spec`, and no law was promoted by editing prose.
+
 - **2026-11-26 — D-99 — Bug hunt: a committed style manifest could reopen with its runs gone.**
   `WorldLine`'s `validate_manifest_against_lengths` accepted list wire values that
   `holonomy_text::DocStyle::from_wire` rejects as a whole: a bullet or ordered run with `depth = 0`,

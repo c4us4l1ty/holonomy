@@ -36,6 +36,11 @@ use crate::store::{self, Document, HistorySearchHit};
 use crate::{App, Key, Keymap, Modifiers, SealWipeBridge, Surface};
 
 const STATUS_BAR_HEIGHT_PX: i32 = 24;
+// Chrome geometry quoted from quiet.md's own window: a ~216 px folder rail and a 40 px
+// breadcrumb row. Both collapse on narrow windows so the page keeps a usable measure.
+const DOC_SIDEBAR_W_PX: i32 = 216;
+const DOC_BREADCRUMB_H_PX: i32 = 40;
+const DOC_CHROME_MIN_WINDOW_PX: i32 = 860;
 const PAGE_PAD_X_PX: i32 = 44;
 const PAGE_PAD_TOP_PX: i32 = 24;
 const PAUSE_AUTOSAVE_MS: u64 = 1_500;
@@ -160,6 +165,26 @@ impl FrameBuffer {
                     *px = blend_pixel(*px, color.r, color.g, color.b, a255);
                 }
             }
+        }
+    }
+
+    /// Fills `rect` with a vertical two-colour wash. Used for the quiet.md-style frosted
+    /// sidebar: the real app blurs the wallpaper behind it, and reading that wallpaper here
+    /// would be an OS-surface dependency (and a screenshot of the user's desktop) for no
+    /// security benefit, so the same two colours are interpolated in the framebuffer instead.
+    fn fill_vertical_gradient(&mut self, rect: Rect, top: Rgba8, bottom: Rgba8, clip: Rect) {
+        let span = rect.h.max(1);
+        for y in rect.y..rect.y + rect.h {
+            let t = ((y - rect.y) * 255 / span) as u16;
+            let mix = |a: u8, b: u8| -> u8 {
+                ((u16::from(a) * (255 - t) + u16::from(b) * t + 127) / 255) as u8
+            };
+            let row = Rgba8::rgb(
+                mix(top.r, bottom.r),
+                mix(top.g, bottom.g),
+                mix(top.b, bottom.b),
+            );
+            self.fill_rect_clipped(Rect::new(rect.x, y, rect.w, 1), row, clip);
         }
     }
 
@@ -327,6 +352,8 @@ pub struct PixelSurface {
     page_origin_y: i32,
     page_measure_px: i32,
     canvas_clip: Rect,
+    sidebar_w: i32,
+    breadcrumb_h: i32,
     painted_clusters: usize,
     painted_selections: usize,
     caret_rect: Option<(i32, i32, i32, i32)>,
@@ -349,6 +376,8 @@ impl PixelSurface {
             page_origin_y: i32::from(theme.toolbar_height_px) + PAGE_PAD_TOP_PX,
             page_measure_px: i32::from(theme.page_max_width_px),
             canvas_clip: Rect::new(0, 0, i32::from(width), i32::from(height)),
+            sidebar_w: 0,
+            breadcrumb_h: 0,
             painted_clusters: 0,
             painted_selections: 0,
             caret_rect: None,
@@ -384,15 +413,40 @@ impl PixelSurface {
     fn recompute_geometry(&mut self, width: u16, height: u16) {
         let w = i32::from(width);
         let h = i32::from(height);
-        let top = i32::from(self.theme.toolbar_height_px);
+        // Reserve the chrome before computing the page: paint and hit-test share this one
+        // origin, so a click on the page still lands on the glyph that was drawn (L-8).
+        self.sidebar_w = if w >= DOC_CHROME_MIN_WINDOW_PX {
+            DOC_SIDEBAR_W_PX.min(w / 3)
+        } else {
+            0
+        };
+        self.breadcrumb_h = if self.sidebar_w > 0 {
+            DOC_BREADCRUMB_H_PX
+        } else {
+            0
+        };
+        let top = i32::from(self.theme.toolbar_height_px) + self.breadcrumb_h;
         let canvas_h = (h - top - STATUS_BAR_HEIGHT_PX).max(60);
+        let content_w = w - self.sidebar_w;
         let max_page = i32::from(self.theme.page_max_width_px);
-        let measure = (w - 2 * PAGE_PAD_X_PX).clamp(240, max_page);
-        let side_margin = ((w - measure) / 2).max(16);
+        let measure = (content_w - 2 * PAGE_PAD_X_PX).clamp(240, max_page);
+        let side_margin = ((content_w - measure) / 2).max(16);
         self.page_measure_px = measure;
-        self.page_origin_x = side_margin;
+        self.page_origin_x = self.sidebar_w + side_margin;
         self.page_origin_y = top + PAGE_PAD_TOP_PX;
-        self.canvas_clip = Rect::new(0, top, w, canvas_h);
+        self.canvas_clip = Rect::new(self.sidebar_w, top, content_w, canvas_h);
+    }
+
+    /// Width of the quiet.md-style folder rail, or `0` when the window is too narrow for it.
+    #[must_use]
+    pub const fn sidebar_width(&self) -> i32 {
+        self.sidebar_w
+    }
+
+    /// Height of the breadcrumb row above the page, or `0` when chrome is collapsed.
+    #[must_use]
+    pub const fn breadcrumb_height(&self) -> i32 {
+        self.breadcrumb_h
     }
 
     /// Width and height of the full window framebuffer in pixels.
@@ -1080,20 +1134,25 @@ fn draw_toolbar_button(
     if !disabled {
         match highlight {
             ButtonHighlight::Active => {
-                fb.fill_rounded_rect(rect, 7, HOME_WASH, clip);
-                fb.stroke_rounded_rect(rect, 7, Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 55), clip);
+                // `D-101`: an active pill used the light Home wash over dark paper, which read
+                // as a grey smudge; the wash follows the paper theme now.
+                let (fill, border) = if is_dark_theme(theme) {
+                    (
+                        Rgba8::rgba_pct(0x7a, 0xb0, 0xff, 18),
+                        Rgba8::rgba_pct(0x7a, 0xb0, 0xff, 55),
+                    )
+                } else {
+                    (HOME_WASH, Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 55))
+                };
+                fb.fill_rounded_rect(rect, 7, fill, clip);
+                fb.stroke_rounded_rect(rect, 7, border, clip);
             }
             ButtonHighlight::Mixed => {
                 fb.fill_rounded_rect(rect, 7, theme.code_bg, clip);
                 fb.stroke_rounded_rect(rect, 7, theme.line_border, clip);
             }
             ButtonHighlight::Off => {
-                let neutral = if is_dark_theme(theme) {
-                    Rgba8::rgb(0x2a, 0x2a, 0x29)
-                } else {
-                    HOME_CARD
-                };
-                fb.fill_rounded_rect(rect, 7, neutral, clip);
+                fb.fill_rounded_rect(rect, 7, soft_fill_for(theme), clip);
             }
         }
     }
@@ -2368,21 +2427,482 @@ where
 
 /// Visual tokens for the Home shell. They mirror the calm, low-contrast palette of the
 /// `quiet-md` inspiration while staying independent of the document parity theme.
-const HOME_SIDE_BG: Rgba8 = Rgba8::rgb(0xee, 0xf1, 0xf5);
-const HOME_CANVAS_BG: Rgba8 = Rgba8::rgb(0xf7, 0xf8, 0xfa);
+///
+/// Chrome palette is quoted from quiet.md's own theme tokens where they exist (caret ink and
+/// caption ink are `QUIET_MD_THEME.caret`/`.text_caption`); the frosted gradient is sampled from
+/// its Home screenshot because the sidebar paints over the user's wallpaper, which this surface
+/// cannot and must not read. No document plaintext enters any of these colours.
+///
+/// These are *light* tokens. Anything painted over the page theme must go through
+/// [`ink_for`]/[`muted_ink_for`]/[`accent_ink_for`]/[`faint_for`]/[`soft_fill_for`] instead.
+const HOME_SIDE_TOP: Rgba8 = Rgba8::rgb(0xc2, 0xd9, 0xea);
+const HOME_SIDE_BOTTOM: Rgba8 = Rgba8::rgb(0xd8, 0xe4, 0xd6);
+const HOME_CANVAS_BG: Rgba8 = Rgba8::rgb(0xff, 0xff, 0xff);
 const HOME_SURFACE: Rgba8 = Rgba8::rgb(0xff, 0xff, 0xff);
-const HOME_CARD: Rgba8 = Rgba8::rgb(0xf1, 0xf3, 0xf5);
-const HOME_TAB: Rgba8 = Rgba8::rgb(0xdc, 0xe0, 0xe5);
-const HOME_INK: Rgba8 = Rgba8::rgb(0x20, 0x23, 0x27);
-const HOME_MUTED: Rgba8 = Rgba8::rgb(0x77, 0x7c, 0x84);
-const HOME_FAINT: Rgba8 = Rgba8::rgb(0xd5, 0xd9, 0xde);
-const HOME_ACCENT: Rgba8 = Rgba8::rgb(0x2f, 0x6f, 0xeb);
-const HOME_WASH: Rgba8 = Rgba8::rgba_pct(0x2f, 0x6f, 0xeb, 12);
+const HOME_CARD: Rgba8 = Rgba8::rgb(0xf3, 0xf4, 0xf5);
+const HOME_TAB: Rgba8 = Rgba8::rgb(0xe1, 0xe4, 0xe7);
+const HOME_INK: Rgba8 = Rgba8::rgb(0x1f, 0x22, 0x25);
+const HOME_MUTED: Rgba8 = Rgba8::rgb(0x73, 0x74, 0x77);
+const HOME_FAINT: Rgba8 = Rgba8::rgb(0xe3, 0xe5, 0xe7);
+const HOME_ACCENT: Rgba8 = Rgba8::rgb(0x3a, 0x85, 0xf7);
+const HOME_WASH: Rgba8 = Rgba8::rgba_pct(0x3a, 0x85, 0xf7, 12);
+const HOME_SELECTION: Rgba8 = Rgba8::rgba_pct(0xff, 0xff, 0xff, 34);
 
 const HOME_SIDEBAR_W: i32 = 216;
-const HOME_CARD_MIN_W: i32 = 196;
+const HOME_CARD_MIN_W: i32 = 208;
 const HOME_CARD_H: i32 = 196;
 const HOME_GAP: i32 = 20;
+
+/// Chrome ink for surfaces that are painted over the *page* theme rather than over Home's fixed
+/// white library (`D-101`). The Home palette above is quoted from quiet.md's light Home screen,
+/// so reusing `HOME_INK` on `#1A1A19` dark paper produced ink at 1.09:1 contrast — effectively
+/// invisible. Every writing-view surface selects ink through these helpers instead.
+const HOME_ACCENT_ON_DARK: Rgba8 = Rgba8::rgb(0x7a, 0xb0, 0xff);
+
+/// Primary chrome ink for `theme`'s paper.
+#[inline]
+const fn ink_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        theme.text
+    } else {
+        HOME_INK
+    }
+}
+
+/// Secondary/caption chrome ink for `theme`'s paper.
+#[inline]
+const fn muted_ink_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        theme.text_caption
+    } else {
+        HOME_MUTED
+    }
+}
+
+/// Accent (shortcut keys, links) ink with enough contrast on `theme`'s paper.
+#[inline]
+const fn accent_ink_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        HOME_ACCENT_ON_DARK
+    } else {
+        HOME_ACCENT
+    }
+}
+
+/// Hairline/border token for `theme`'s paper.
+#[inline]
+const fn faint_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        theme.line_border
+    } else {
+        HOME_FAINT
+    }
+}
+
+/// Soft control fill (tabs, inactive pills) for `theme`'s paper.
+#[inline]
+const fn soft_fill_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        theme.code_bg
+    } else {
+        HOME_CARD
+    }
+}
+
+/// Selected-row / raised-control wash for `theme`'s paper.
+#[inline]
+const fn selection_for(theme: &PageTheme) -> Rgba8 {
+    if is_dark_theme(theme) {
+        Rgba8::rgba_pct(0xff, 0xff, 0xff, 10)
+    } else {
+        HOME_SELECTION
+    }
+}
+
+/// Everything the writing-view chrome may show: file names and folder names only. The type
+/// deliberately has no `Document`, `Spine`, `SegmentSource` or `String` of document bytes, so
+/// adding a sidebar cannot accidentally widen the resident plaintext set (law L-2).
+#[derive(Debug, Clone)]
+struct DocumentChromeData {
+    library_label: String,
+    folder_label: Option<String>,
+    document_label: String,
+    folders: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentChromeHit {
+    Home,
+    Folder(usize),
+    Find,
+    History,
+    Security,
+    Help,
+}
+
+fn document_chrome_data(doc_path: &Path, folders: Vec<String>) -> DocumentChromeData {
+    let document_label = doc_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("document")
+        .to_owned();
+    let folder_label = doc_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty() && *n != ".")
+        .map(str::to_owned);
+    DocumentChromeData {
+        library_label: home_library_label(),
+        folder_label,
+        document_label,
+        folders,
+    }
+}
+
+/// Draws the quiet.md-style folder rail beside the page. Paint stays inside `rect`; the only
+/// text drawn comes from [`DocumentChromeData`], which carries metadata, never document bytes.
+///
+/// The rail keeps quiet.md's frosted wash on light paper (`D-101`: the wash is quoted from the
+/// light Home screenshot). On dark paper it would be a bright slab next to `#1A1A19`, so it uses
+/// the theme's own chrome colours there and every ink token follows the paper underneath.
+fn render_document_sidebar(
+    fb: &mut FrameBuffer,
+    fonts: &FontSet,
+    theme: PageTheme,
+    rect: Rect,
+    data: &DocumentChromeData,
+) -> Vec<(Rect, DocumentChromeHit)> {
+    let mut hits = Vec::new();
+    if rect.w <= 0 || rect.h <= 0 {
+        return hits;
+    }
+    let dark = is_dark_theme(&theme);
+    let ink = ink_for(&theme);
+    let muted = muted_ink_for(&theme);
+    let accent = accent_ink_for(&theme);
+    let faint = faint_for(&theme);
+    let selection = selection_for(&theme);
+    if dark {
+        fb.fill_rect_clipped(rect, theme.code_gutter, rect);
+    } else {
+        fb.fill_vertical_gradient(rect, HOME_SIDE_TOP, HOME_SIDE_BOTTOM, rect);
+    }
+    fb.fill_rect_clipped(
+        Rect::new(rect.x + rect.w - 1, rect.y, 1, rect.h),
+        faint,
+        rect,
+    );
+
+    let x = rect.x + 16;
+    let inner = rect.w - 32;
+    draw_home_text(
+        fb,
+        fonts,
+        x,
+        rect.y + 32,
+        &home_fit_text(fonts, &data.library_label, 940, inner),
+        940,
+        ink,
+        rect,
+        true,
+    );
+
+    let home_row = Rect::new(x, rect.y + 54, inner, 34);
+    fb.fill_rounded_rect(home_row, 8, selection, rect);
+    draw_home_folder_icon(fb, x + 12, rect.y + 62, ink, rect);
+    draw_home_text(
+        fb,
+        fonts,
+        x + 38,
+        rect.y + 76,
+        "Home",
+        880,
+        ink,
+        rect,
+        false,
+    );
+    hits.push((home_row, DocumentChromeHit::Home));
+
+    draw_home_text(
+        fb,
+        fonts,
+        x,
+        rect.y + 122,
+        "My documents",
+        760,
+        muted,
+        rect,
+        false,
+    );
+
+    let actions_top = rect.y + rect.h - 96;
+    let mut sy = rect.y + 144;
+    for (idx, folder) in data.folders.iter().enumerate() {
+        if sy + 30 > actions_top - 52 {
+            break;
+        }
+        let row = Rect::new(x, sy - 8, inner, 30);
+        let active = data.folder_label.as_deref() == Some(folder.as_str());
+        if active {
+            fb.fill_rounded_rect(row, 7, selection, rect);
+        }
+        let icon_ink = if active { accent } else { muted };
+        draw_home_folder_icon(fb, x + 12, sy - 4, icon_ink, rect);
+        draw_home_text(
+            fb,
+            fonts,
+            x + 38,
+            sy + 12,
+            &home_fit_text(fonts, folder, 820, inner - 48),
+            820,
+            ink,
+            rect,
+            false,
+        );
+        hits.push((row, DocumentChromeHit::Folder(idx)));
+        sy += 32;
+    }
+
+    draw_home_text(
+        fb,
+        fonts,
+        x,
+        actions_top - 48,
+        "This document",
+        760,
+        muted,
+        rect,
+        false,
+    );
+    let doc_row = Rect::new(x, actions_top - 42, inner, 30);
+    fb.fill_rounded_rect(doc_row, 7, selection, rect);
+    draw_home_text(
+        fb,
+        fonts,
+        x + 12,
+        actions_top - 22,
+        &home_fit_text(fonts, &data.document_label, 820, inner - 24),
+        820,
+        ink,
+        rect,
+        true,
+    );
+
+    for (baseline, label, hit) in [
+        (actions_top + 18, "History", DocumentChromeHit::History),
+        (actions_top + 48, "Security", DocumentChromeHit::Security),
+        (
+            actions_top + 78,
+            "Shortcuts  Ctrl /",
+            DocumentChromeHit::Help,
+        ),
+    ] {
+        let row = Rect::new(x, baseline - 20, inner, 28);
+        draw_home_text(
+            fb,
+            fonts,
+            x + 8,
+            baseline,
+            label,
+            760,
+            ink,
+            rect,
+            false,
+        );
+        hits.push((row, hit));
+    }
+    hits
+}
+
+/// Breadcrumb row above the page: library \u{203A} folder \u{203A} file, plus a quiet search
+/// affordance. It is built from the path's metadata only; the page itself stays under
+/// [`PixelSurface`]. Inks follow the active paper theme (`D-101`).
+fn render_document_breadcrumb(
+    fb: &mut FrameBuffer,
+    fonts: &FontSet,
+    theme: PageTheme,
+    rect: Rect,
+    data: &DocumentChromeData,
+) -> Vec<(Rect, DocumentChromeHit)> {
+    let mut hits = Vec::new();
+    if rect.w <= 0 || rect.h <= 0 {
+        return hits;
+    }
+    let ink = ink_for(&theme);
+    let muted = muted_ink_for(&theme);
+    fb.fill_rect_clipped(rect, theme.bg_body, rect);
+    fb.fill_rect_clipped(
+        Rect::new(rect.x, rect.y + rect.h - 1, rect.w, 1),
+        theme.line_divider,
+        rect,
+    );
+    let mut x = rect.x + 20;
+    let baseline = rect.y + rect.h / 2 + 6;
+    let home_w = home_text_width(fonts, &data.library_label, 840).min(180);
+    draw_home_text(
+        fb,
+        fonts,
+        x,
+        baseline,
+        &home_fit_text(fonts, &data.library_label, 840, 180),
+        840,
+        muted,
+        rect,
+        false,
+    );
+    hits.push((
+        Rect::new(x - 4, rect.y + 4, home_w + 8, rect.h - 8),
+        DocumentChromeHit::Home,
+    ));
+    x += home_w + 12;
+
+    if let Some(folder) = &data.folder_label {
+        draw_home_text(
+            fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false,
+        );
+        x += 14;
+        let folder_shown = home_fit_text(fonts, folder, 840, 180);
+        draw_home_text(
+            fb,
+            fonts,
+            x,
+            baseline,
+            &folder_shown,
+            840,
+            muted,
+            rect,
+            false,
+        );
+        x += home_text_width(fonts, &folder_shown, 840) + 12;
+    }
+    draw_home_text(
+        fb, fonts, x, baseline, "\u{203A}", 840, muted, rect, false,
+    );
+    x += 14;
+    let space = (rect.x + rect.w - 108 - x).max(0);
+    draw_home_text(
+        fb,
+        fonts,
+        x,
+        baseline,
+        &home_fit_text(fonts, &data.document_label, 900, space),
+        900,
+        ink,
+        rect,
+        true,
+    );
+
+    let find = Rect::new(rect.x + rect.w - 64, rect.y + 6, 48, rect.h - 12);
+    draw_home_text(
+        fb,
+        fonts,
+        find.x + 10,
+        baseline,
+        "Find",
+        800,
+        muted,
+        find,
+        false,
+    );
+    hits.push((find, DocumentChromeHit::Find));
+    hits
+}
+
+/// Static shortcut sheet. It holds no document text and no live state, so it cannot add a
+/// plaintext exposure or an idle repaint; it is painted only on the frame that opens it.
+///
+/// `D-101`: the first layout placed seven rows in two columns of `268 px` inside a `560 px`
+/// panel, so ten of the fourteen entries were painted outside the panel and clipped away entirely
+/// (the user-visible sheet listed four shortcuts). The grid is now derived from the panel width
+/// and the row count, so it cannot silently overflow again.
+fn render_shortcut_help(fb: &mut FrameBuffer, fonts: &FontSet, theme: PageTheme) -> (Rect, Rect) {
+    let w = i32::from(fb.width);
+    let h = i32::from(fb.height);
+    let full = Rect::new(0, 0, w, h);
+    let ink = ink_for(&theme);
+    let muted = muted_ink_for(&theme);
+    let accent = accent_ink_for(&theme);
+
+    let rows: [(&str, &str); 14] = [
+        ("Ctrl Z / Y", "Undo / redo"),
+        ("Ctrl A", "Select all"),
+        ("Ctrl F", "Find and replace"),
+        ("Ctrl K", "Edit link"),
+        ("Ctrl S", "Save and witness"),
+        ("Ctrl H", "Witness history"),
+        ("Ctrl M", "Bookmark witness"),
+        ("Ctrl G", "Security panel"),
+        ("Ctrl L", "Emergency wipe"),
+        ("Ctrl Shift D", "Light / dark paper"),
+        ("Ctrl Shift H", "Return Home"),
+        ("Ctrl Alt + / -", "Display scale"),
+        ("Ctrl /", "This sheet"),
+        ("Ctrl Q", "Save and quit"),
+    ];
+
+    fb.fill_rect_clipped(full, Rgba8::rgba_pct(0x00, 0x00, 0x00, 22), full);
+    let (panel, cols, row_h) = shortcut_help_geometry(w, h, rows.len());
+    let per_col = rows.len().div_ceil(cols);
+    fb.fill_rounded_rect(panel, 16, theme.bg_body, full);
+    fb.stroke_rounded_rect(panel, 16, theme.line_border, full);
+    draw_home_text(
+        fb,
+        fonts,
+        panel.x + 24,
+        panel.y + 38,
+        "Keyboard shortcuts",
+        1_020,
+        ink,
+        panel,
+        true,
+    );
+    let col_w = (panel.w - 48) / cols;
+    for (i, (key, desc)) in rows.iter().enumerate() {
+        let col = (i / per_col) as i32;
+        let row = (i % per_col) as i32;
+        let rx = panel.x + 24 + col * col_w;
+        let ry = panel.y + 84 + row * row_h;
+        draw_home_text(fb, fonts, rx, ry, key, 780, accent, panel, true);
+        draw_home_text(fb, fonts, rx, ry + 15, desc, 760, muted, panel, false);
+    }
+    let close = Rect::new(panel.x + panel.w - 44, panel.y + 12, 28, 28);
+    draw_home_text(
+        fb,
+        fonts,
+        close.x + 8,
+        close.y + 20,
+        "\u{00D7}",
+        940,
+        muted,
+        close,
+        false,
+    );
+    (panel, close)
+}
+
+/// Panel and grid geometry for the shortcut sheet.
+///
+/// The original layout hard-coded seven `268 px` columns inside a `560 px` panel, so ten of the
+/// fourteen entries were painted outside the panel and clipped (`D-101`). Deriving the grid from
+/// the panel width means a layout change cannot silently drop entries again.
+fn shortcut_help_geometry(window_w: i32, window_h: i32, entries: usize) -> (Rect, usize, i32) {
+    const ROW_H: i32 = 34;
+    const HEADER_H: i32 = 84;
+    const FOOTER_H: i32 = 24;
+    let panel_w = 560.min((window_w - 32).max(280));
+    // Two columns need ~250 px each for a key plus its description; below that, one column.
+    let cols = if panel_w >= 520 { 2 } else { 1 };
+    let per_col = entries.div_ceil(cols).max(1) as i32;
+    let panel_h = (HEADER_H + per_col * ROW_H + FOOTER_H).min(window_h - 32);
+    let panel = Rect::new(
+        (window_w - panel_w).max(16) / 2,
+        (window_h - panel_h).max(16) / 2,
+        panel_w,
+        panel_h,
+    );
+    (panel, cols, ROW_H)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HomeHit {
@@ -2420,6 +2940,17 @@ fn home_library_root() -> PathBuf {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Header label for the library root. A directory name is public metadata (never document
+/// plaintext), so it can be painted without touching a sealed segment.
+fn home_library_label() -> String {
+    home_library_root()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("My documents")
+        .to_owned()
 }
 
 /// Suggests a non-existing filename inside the Home library so pressing Enter in a new-document
@@ -2516,14 +3047,18 @@ struct HomeState {
 }
 
 impl HomeState {
-    fn new() -> Self {
+    /// Opens Home with a folder already selected — the writing-view sidebar hands back a
+    /// folder *name* (metadata), never a document or a plaintext snippet.
+    fn with_folder(initial_folder: Option<&str>) -> Self {
         let root = home_library_root();
         let entries = enumerate_home_entries(&root);
         let folders = group_home_folders(&entries);
+        let active_folder = initial_folder
+            .and_then(|wanted| folders.iter().position(|folder| folder.name == wanted));
         Self {
             entries,
             folders,
-            active_folder: None,
+            active_folder,
             query: String::new(),
             search_focused: false,
             favorites: false,
@@ -2623,8 +3158,8 @@ fn render_home(
     let content = Rect::new(content_x, 0, w - content_x, h);
     let mut hits = Vec::new();
 
-    fb.fill_rect_clipped(full, HOME_SIDE_BG, full);
-    fb.fill_rect_clipped(content, HOME_CANVAS_BG, content);
+    fb.fill_rect_clipped(full, HOME_CANVAS_BG, full);
+    fb.fill_vertical_gradient(sidebar, HOME_SIDE_TOP, HOME_SIDE_BOTTOM, full);
     fb.fill_rect_clipped(Rect::new(sidebar.w - 1, 0, 1, h), HOME_FAINT, full);
 
     // Sidebar: Home, library folders, and a settings row pinned to the bottom.
@@ -2633,9 +3168,9 @@ fn render_home(
     let mut sy = 30;
     let home_row = Rect::new(side_pad, sy - 8, side_w, 36);
     if !state.favorites && state.active_folder.is_none() {
-        fb.fill_rounded_rect(home_row, 8, HOME_WASH, full);
+        fb.fill_rounded_rect(home_row, 8, HOME_SELECTION, full);
     }
-    draw_home_folder_icon(fb, side_pad + 12, sy, HOME_ACCENT, full);
+    draw_home_folder_icon(fb, side_pad + 12, sy, HOME_INK, full);
     draw_home_text(
         fb,
         fonts,
@@ -2651,7 +3186,7 @@ fn render_home(
     sy += 62;
 
     let lib_row = Rect::new(side_pad, sy - 8, side_w, 36);
-    fb.fill_rounded_rect(lib_row, 8, HOME_WASH, full);
+    fb.fill_rounded_rect(lib_row, 8, HOME_SELECTION, full);
     draw_home_text(
         fb,
         fonts,
@@ -2663,6 +3198,8 @@ fn render_home(
         full,
         false,
     );
+    // Push the row before the `+` so rev-order hit resolution reaches the smaller target.
+    hits.push((lib_row, HomeHit::MyDocuments));
     let plus_x = sidebar.w - side_pad - 22;
     draw_home_text(
         fb,
@@ -2671,12 +3208,11 @@ fn render_home(
         sy + 17,
         "+",
         1_040,
-        HOME_MUTED,
+        HOME_INK,
         full,
         false,
     );
     hits.push((Rect::new(plus_x - 4, sy - 6, 26, 28), HomeHit::NewDocument));
-    hits.push((lib_row, HomeHit::MyDocuments));
     sy += 42;
 
     for (idx, folder) in state.folders.iter().enumerate().take(14) {
@@ -2684,7 +3220,12 @@ fn render_home(
             break;
         }
         if Some(idx) == state.active_folder {
-            fb.fill_rounded_rect(Rect::new(side_pad, sy - 7, side_w, 30), 7, HOME_WASH, full);
+            fb.fill_rounded_rect(
+                Rect::new(side_pad, sy - 7, side_w, 30),
+                7,
+                HOME_SELECTION,
+                full,
+            );
         }
         draw_home_folder_icon(fb, side_pad + 14, sy - 2, HOME_MUTED, full);
         let label = home_fit_text(fonts, &folder.name, 840, side_w - 48);
@@ -2707,7 +3248,7 @@ fn render_home(
     }
 
     let settings = Rect::new(side_pad, h - 52, side_w, 34);
-    fb.fill_rounded_rect(settings, 8, HOME_WASH, full);
+    fb.fill_rounded_rect(settings, 8, HOME_SELECTION, full);
     draw_home_text(
         fb,
         fonts,
@@ -2721,10 +3262,23 @@ fn render_home(
     );
     hits.push((settings, HomeHit::Settings));
 
-    // Header: title, search field, quick actions.
+    // Header: quiet.md-style library breadcrumb, search field, quick actions.
     let header_x = content.x + 32;
+    let lib_label = home_library_label();
+    let breadcrumb = match state.active_folder.and_then(|idx| state.folders.get(idx)) {
+        Some(folder) => format!("{lib_label} \u{203A} {}", folder.name),
+        None => lib_label.clone(),
+    };
     draw_home_text(
-        fb, fonts, header_x, 46, "Home", 1_180, HOME_INK, content, true,
+        fb,
+        fonts,
+        header_x,
+        46,
+        &home_fit_text(fonts, &breadcrumb, 1_000, (content.w - 480).max(160)),
+        1_000,
+        HOME_INK,
+        content,
+        true,
     );
     let search_w = (content.w - 420).clamp(180, 380);
     let search_x = content.x + (content.w - search_w) / 2;
@@ -2796,6 +3350,24 @@ fn render_home(
         false,
     );
     hits.push((action_new, HomeHit::NewDocument));
+
+    if content.w >= 480 {
+        let action_menu = Rect::new(content.x + content.w - 100, 20, 32, 32);
+        fb.fill_rounded_rect(action_menu, 8, HOME_SURFACE, content);
+        fb.stroke_rounded_rect(action_menu, 8, HOME_FAINT, content);
+        draw_home_text(
+            fb,
+            fonts,
+            action_menu.x + 10,
+            43,
+            "...",
+            900,
+            HOME_MUTED,
+            action_menu,
+            false,
+        );
+        hits.push((action_menu, HomeHit::Settings));
+    }
 
     // Segmented tabs and library controls.
     let tabs_y = 84;
@@ -2979,7 +3551,7 @@ fn render_home_cards(
     if state.favorites || (state.query.is_empty() && state.folders.is_empty()) {
         let card = Rect::new(content.x + pad, top, available.min(560), 176);
         fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
-        fb.stroke_rounded_rect(card, 14, HOME_FAINT, content);
+        fb.stroke_rounded_rect(card, 14, HOME_TAB, content);
         draw_home_text(
             fb,
             fonts,
@@ -3044,34 +3616,54 @@ fn render_home_cards(
             break;
         }
         let card = Rect::new(x, y, card_w, HOME_CARD_H);
-        fb.fill_rounded_rect(card, 14, HOME_CARD, content);
-        // Stacked paper preview, echoing the folder cards in the reference shell.
+        fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
+        fb.stroke_rounded_rect(card, 14, HOME_TAB, content);
+        // A quiet.md folder card is a soft grey folder behind a stack of paper. The preview
+        // lines are seeded from the folder name and entry index — never from document bytes.
+        fb.fill_rounded_rect(
+            Rect::new(x + 13, y + 16, card_w - 26, 122),
+            10,
+            HOME_CARD,
+            card,
+        );
+        fb.fill_rounded_rect(
+            Rect::new(x + 13, y + 16, (card_w - 26) / 2, 22),
+            8,
+            HOME_CARD,
+            card,
+        );
         for layer in (0..3).rev() {
             let page = Rect::new(
-                x + 16 + layer * 5,
-                y + 20 - layer * 4,
-                card_w - 40 - layer * 10,
-                108,
+                x + 20 + layer * 6,
+                y + 24 - layer * 5,
+                card_w - 48 - layer * 12,
+                104,
             );
             fb.fill_rounded_rect(page, 7, HOME_SURFACE, card);
             fb.stroke_rounded_rect(page, 7, HOME_FAINT, card);
         }
-        let preview = Rect::new(x + 22, y + 26, card_w - 52, 86);
+        let preview = Rect::new(x + 26, y + 30, card_w - 60, 82);
         let seed = folder.entries.first().copied().unwrap_or(0) + folder.name.len();
         for line in 0..5i32 {
             let width = ((seed * 17 + line as usize * 29) % 61 + 28) as i32;
             fb.fill_rounded_rect(
                 Rect::new(
                     preview.x + 4 + (line % 3) * 3,
-                    preview.y + 12 + line * 15,
+                    preview.y + 10 + line * 13,
                     (preview.w - 16).min(width * preview.w / 100),
                     3,
                 ),
                 1,
-                if line == 0 { HOME_FAINT } else { HOME_TAB },
+                if line == 0 { HOME_MUTED } else { HOME_TAB },
                 preview,
             );
         }
+        fb.fill_rounded_rect(
+            Rect::new(preview.x + 4, preview.y + preview.h - 28, preview.w / 3, 20),
+            3,
+            HOME_TAB,
+            preview,
+        );
         let label = home_fit_text(fonts, &folder.name, 900, card_w - 28);
         draw_home_text(
             fb,
@@ -3176,7 +3768,7 @@ fn render_home_document_cards(
         }
         let card = Rect::new(x, y, card_w, 168);
         fb.fill_rounded_rect(card, 14, HOME_SURFACE, content);
-        fb.stroke_rounded_rect(card, 14, HOME_FAINT, content);
+        fb.stroke_rounded_rect(card, 14, HOME_TAB, content);
         fb.fill_rounded_rect(
             Rect::new(x + 14, y + 14, card_w - 28, 88),
             8,
@@ -3229,8 +3821,9 @@ fn render_home_document_cards(
 fn show_home(
     win: &mut ScaledWindow,
     fonts: &FontSet,
+    initial_folder: Option<&str>,
 ) -> Result<Option<(PathBuf, Document)>, Box<dyn std::error::Error>> {
-    let mut state = HomeState::new();
+    let mut state = HomeState::with_folder(initial_folder);
     let (mut w, mut h) = win.size();
     let mut dirty = true;
     let mut hits = Vec::new();
@@ -3952,6 +4545,8 @@ fn run_desktop_with_window(
 ) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
     let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px)?;
     let mut preselected = initial_path.map(PathBuf::from);
+    // Folder *name* selected in the writing-view sidebar, carried back to Home on return.
+    let mut home_folder: Option<String> = None;
 
     loop {
         let (doc_path, document) = if let Some(ref path) = preselected {
@@ -3961,13 +4556,21 @@ fn run_desktop_with_window(
             };
             chosen
         } else {
-            let Some(chosen) = show_home(&mut x11, &fonts)? else {
+            let Some(chosen) = show_home(&mut x11, &fonts, home_folder.as_deref())? else {
                 return Ok(DesktopEnd::Cancelled);
             };
             chosen
         };
         preselected = None;
-        let end = run_document_session(&mut x11, fonts.clone(), doc_path, document, deadman)?;
+        home_folder = None;
+        let end = run_document_session(
+            &mut x11,
+            fonts.clone(),
+            doc_path,
+            document,
+            deadman,
+            &mut home_folder,
+        )?;
         if end == DesktopEnd::GoHome {
             continue;
         }
@@ -3981,6 +4584,7 @@ fn run_document_session(
     doc_path: PathBuf,
     document: Document,
     deadman: Option<Duration>,
+    home_folder: &mut Option<String>,
 ) -> Result<DesktopEnd, Box<dyn std::error::Error>> {
     let arenas = SecretArenas::new();
     let mut canary_set = CanarySet::new(8, 256);
@@ -3998,6 +4602,17 @@ fn run_document_session(
     let spine = document.spine()?;
     let residency = ResidentSet::new(document.source(), store::BUDGET, store::SLACK)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+    // Folder names are metadata enumerated by Home; no document is opened or decrypted to
+    // paint the rail, and no snippet of the open document leaves its resident set.
+    let chrome_folders = {
+        let entries = enumerate_home_entries(&home_library_root());
+        group_home_folders(&entries)
+            .into_iter()
+            .map(|folder| folder.name)
+            .collect()
+    };
+    let chrome_data = document_chrome_data(&doc_path, chrome_folders);
 
     let (win_w, win_h) = x11.size();
     let initial_view = View::new(1_000, x11.dpi()).unwrap_or(View::IDENTITY);
@@ -4035,6 +4650,10 @@ fn run_document_session(
     let mut find_bar: Option<FindState> = None;
     let mut link_bar: Option<String> = None;
     let mut toolbar_hits: Vec<ToolbarHit> = Vec::new();
+    let mut sidebar_hits: Vec<(Rect, DocumentChromeHit)> = Vec::new();
+    let mut breadcrumb_hits: Vec<(Rect, DocumentChromeHit)> = Vec::new();
+    let mut help_close: Option<Rect> = None;
+    let mut show_help = false;
     let mut status_msg = String::new();
     let mut ime_preedit = Zeroizing::new(String::new());
     let mut last_click: Option<(Instant, i16, i16, u8)> = None;
@@ -4070,6 +4689,33 @@ fn run_document_session(
             }
 
             let theme = app.surface().theme();
+            let chrome_fonts = app.surface().fonts().clone();
+            let (cw, ch) = app.surface().window_size();
+            let bar_h = i32::from(theme.toolbar_height_px);
+            let (sw, sh) = {
+                let surface = app.surface();
+                (surface.sidebar_width(), surface.breadcrumb_height())
+            };
+            if sw > 0 {
+                let fb = app.surface_mut().framebuffer_mut();
+                sidebar_hits = render_document_sidebar(
+                    fb,
+                    &chrome_fonts,
+                    theme,
+                    Rect::new(0, bar_h, sw, i32::from(ch) - bar_h - STATUS_BAR_HEIGHT_PX),
+                    &chrome_data,
+                );
+                breadcrumb_hits = render_document_breadcrumb(
+                    fb,
+                    &chrome_fonts,
+                    theme,
+                    Rect::new(sw, bar_h, i32::from(cw) - sw, sh),
+                    &chrome_data,
+                );
+            } else {
+                sidebar_hits.clear();
+                breadcrumb_hits.clear();
+            }
             let metrics = app.editor().status_metrics();
             if history_drawer.is_none() && (idle_chrome_visible || reduced_motion) {
                 app.surface_mut().render_scrollbar(metrics);
@@ -4198,6 +4844,14 @@ fn run_document_session(
             }
 
             render_status_strip(app.surface_mut(), &left, &right);
+            if show_help {
+                let fonts = app.surface().fonts().clone();
+                help_close = Some(
+                    render_shortcut_help(app.surface_mut().framebuffer_mut(), &fonts, theme).1,
+                );
+            } else {
+                help_close = None;
+            }
 
             let (w, h) = app.surface().window_size();
             x11.present_argb(app.surface().pixels(), w, h)?;
@@ -4367,6 +5021,78 @@ fn run_document_session(
                         }
                     }
 
+                    if show_help {
+                        if help_close.is_some_and(|rect| rect.contains(px, py)) {
+                            show_help = false;
+                        }
+                        // The sheet is modal: no click behind it reaches the page or chrome.
+                        pending_paint = true;
+                        continue;
+                    }
+
+                    let chrome_hit = sidebar_hits
+                        .iter()
+                        .rev()
+                        .find(|(rect, _)| rect.contains(px, py))
+                        .copied()
+                        .or_else(|| {
+                            breadcrumb_hits
+                                .iter()
+                                .rev()
+                                .find(|(rect, _)| rect.contains(px, py))
+                                .copied()
+                        });
+                    if let Some((_, hit)) = chrome_hit {
+                        match hit {
+                            DocumentChromeHit::Home => {
+                                home_requested = true;
+                                quit = true;
+                            }
+                            DocumentChromeHit::Folder(idx) => {
+                                if let Some(folder) = chrome_data.folders.get(idx).cloned() {
+                                    *home_folder = Some(folder);
+                                    home_requested = true;
+                                    quit = true;
+                                }
+                            }
+                            DocumentChromeHit::Find if history_drawer.is_none() => {
+                                link_bar = None;
+                                find_bar = Some(FindState::Find {
+                                    needle: String::new(),
+                                    next_idx: 0,
+                                });
+                            }
+                            DocumentChromeHit::History => {
+                                history_drawer = if history_drawer.is_some() {
+                                    None
+                                } else {
+                                    let (lw, lh) = app.surface().logical_editor_extent();
+                                    let fonts = app.surface().fonts().clone();
+                                    let view = app.editor().view();
+                                    Some(build_history_state(&document, fonts, lw, lh, view))
+                                };
+                            }
+                            DocumentChromeHit::Security => {
+                                show_security = !show_security;
+                                if show_security {
+                                    verified_segments =
+                                        document.verify().ok().map(|r| r.segments_verified);
+                                    verified_at = verified_segments.map(|_| Instant::now());
+                                }
+                            }
+                            DocumentChromeHit::Help => {
+                                show_help = !show_help;
+                                if show_help {
+                                    find_bar = None;
+                                    link_bar = None;
+                                }
+                            }
+                            DocumentChromeHit::Find => {}
+                        }
+                        pending_paint = true;
+                        continue;
+                    }
+
                     if let Some(hit) = toolbar_hits
                         .iter()
                         .find(|h| h.rect.contains(px, py))
@@ -4524,6 +5250,9 @@ fn run_document_session(
                 }
                 DesktopEvent::MouseDrag { x, y } => {
                     idle_chrome_visible = true;
+                    if show_help {
+                        continue;
+                    }
                     if let Some(ref mut h) = history_drawer {
                         if h.scrubbing {
                             if let Some((_, HistoryButton::ScrubTrack(track))) = history_hits
@@ -4566,6 +5295,25 @@ fn run_document_session(
                 }
                 DesktopEvent::Key { key, modifiers } => {
                     idle_chrome_visible = true;
+                    // `D-101`: typing with the sheet open edited the *document* underneath it.
+                    // The sheet swallows every key except its own dismissals and quit, so it is
+                    // modal for the keyboard as well as the pointer.
+                    if show_help {
+                        if matches!(key, Key::Escape) {
+                            show_help = false;
+                        } else if modifiers.control && !modifiers.alt {
+                            match key {
+                                Key::Character('/') => show_help = false,
+                                Key::Character('q' | 'Q' | 'c' | 'C') => {
+                                    show_help = false;
+                                    quit = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        pending_paint = true;
+                        continue;
+                    }
                     if modifiers.control && modifiers.alt {
                         let steps = match key {
                             Key::Character('=' | '+') => Some(1),
@@ -4583,6 +5331,15 @@ fn run_document_session(
                     }
                     if modifiers.control && !modifiers.alt {
                         match key {
+                            Key::Character('/') => {
+                                show_help = true;
+                                // `D-101`: opening the sheet over an anchored find/link bar left
+                                // the bar live underneath it; the sheet is the only overlay now.
+                                find_bar = None;
+                                link_bar = None;
+                                pending_paint = true;
+                                continue;
+                            }
                             Key::Character('q') => {
                                 quit = true;
                                 continue;
@@ -4732,6 +5489,8 @@ fn run_document_session(
                     }
 
                     if key == Key::Escape {
+                        // The sheet is dismissed by the modal key guard above, so reaching here
+                        // means it is closed and `Escape` belongs to the layers beneath.
                         if let Some(ref mut h) = history_drawer {
                             if h.bookmark_input.take().is_some() || h.search_input.take().is_some()
                             {
@@ -6037,5 +6796,212 @@ mod tests {
         assert_ne!(first, second);
         assert!(!second.exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn quiet_chrome_tokens_match_the_drift_guarded_page_theme() {
+        assert_eq!(HOME_ACCENT, QUIET_MD_THEME.caret);
+        assert_eq!(HOME_INK, QUIET_MD_THEME.text);
+        assert_eq!(HOME_MUTED, QUIET_MD_THEME.text_caption);
+        assert_eq!(HOME_SURFACE, QUIET_MD_THEME.bg_body);
+        assert_eq!(DOC_SIDEBAR_W_PX, HOME_SIDEBAR_W);
+        assert_eq!(
+            DOC_BREADCRUMB_H_PX,
+            i32::from(QUIET_MD_THEME.toolbar_height_px)
+        );
+    }
+
+    #[test]
+    fn chrome_reserves_page_space_without_moving_the_hit_test_origin() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
+        let wide = PixelSurface::new(fonts.clone(), View::IDENTITY, 1_280, 800);
+        assert_eq!(wide.sidebar_width(), DOC_SIDEBAR_W_PX);
+        assert_eq!(wide.breadcrumb_height(), DOC_BREADCRUMB_H_PX);
+        let (ox, oy) = wide.page_origin();
+        assert!(ox > wide.sidebar_width());
+        assert!(oy > i32::from(QUIET_MD_THEME.toolbar_height_px));
+        let mapped = wide.canvas_point(ox as i16, oy as i16).expect("page point");
+        assert_eq!(mapped.x.sixtyfourths(), 0);
+        assert_eq!(mapped.y.sixtyfourths(), 0);
+        assert!(wide.canvas_point(10, 200).is_none());
+
+        let narrow = PixelSurface::new(fonts, View::IDENTITY, 700, 600);
+        assert_eq!(narrow.sidebar_width(), 0);
+        assert_eq!(narrow.breadcrumb_height(), 0);
+    }
+
+    #[test]
+    fn document_sidebar_uses_metadata_only_and_paints_inside_its_rect() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
+        let mut fb = FrameBuffer::new(1_280, 800, HOME_CANVAS_BG);
+        let before = fb.pixels.clone();
+        let rect = Rect::new(0, 40, DOC_SIDEBAR_W_PX, 736);
+        let data = DocumentChromeData {
+            library_label: "My documents".to_owned(),
+            folder_label: Some("Journal".to_owned()),
+            document_label: "notes.wavefunction".to_owned(),
+            folders: vec!["Journal".to_owned(), "Field Notes".to_owned()],
+        };
+        let hits = render_document_sidebar(&mut fb, &fonts, QUIET_MD_THEME, rect, &data);
+        assert!(hits.iter().any(|(_, h)| *h == DocumentChromeHit::Home));
+        assert!(hits
+            .iter()
+            .any(|(_, h)| matches!(h, DocumentChromeHit::Folder(_))));
+        assert!(hits.iter().any(|(_, h)| *h == DocumentChromeHit::History));
+        assert!(hits.iter().any(|(_, h)| *h == DocumentChromeHit::Security));
+        assert!(hits.iter().any(|(_, h)| *h == DocumentChromeHit::Help));
+        for (_, hit) in &hits {
+            assert!(
+                hit != &DocumentChromeHit::Find,
+                "no search icon in the rail"
+            );
+        }
+
+        for y in 0..i32::from(fb.height) {
+            for x in 0..i32::from(fb.width) {
+                if rect.contains(x, y) {
+                    continue;
+                }
+                let i = (y as usize) * usize::from(fb.width) + x as usize;
+                assert_eq!(
+                    fb.pixels[i], before[i],
+                    "rail painted outside its rect at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn home_sidebar_plus_is_not_swallowed_by_the_library_row() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
+        let mut fb = FrameBuffer::new(1_120, 780, HOME_CANVAS_BG);
+        let state = HomeState {
+            entries: Vec::new(),
+            folders: Vec::new(),
+            active_folder: None,
+            query: String::new(),
+            search_focused: false,
+            favorites: false,
+            manual_order: false,
+            list_view: false,
+            settings_open: false,
+        };
+        let hits = render_home(&mut fb, &fonts, &state, 100);
+        let plus = hits
+            .iter()
+            .find(|(_, hit)| *hit == HomeHit::NewDocument)
+            .map(|(rect, _)| *rect)
+            .expect("new-document target");
+        let resolved = hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(plus.x + plus.w / 2, plus.y + plus.h / 2))
+            .map(|(_, hit)| *hit);
+        assert_eq!(resolved, Some(HomeHit::NewDocument));
+    }
+
+    /// WCAG relative-luminance contrast ratio, used only by these regression tests.
+    fn contrast_ratio(a: Rgba8, b: Rgba8) -> f64 {
+        fn channel(value: u8) -> f64 {
+            let c = f64::from(value) / 255.0;
+            if c <= 0.039_28 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(c: Rgba8) -> f64 {
+            0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+        }
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// `D-101`: the chrome ink helpers used to be the Home-only light palette, so the rail,
+    /// breadcrumb and shortcut sheet were ~1.1:1 ink on `#1A1A19` dark paper — invisible.
+    #[test]
+    fn chrome_ink_stays_readable_on_both_papers() {
+        for theme in [QUIET_MD_THEME, QUIET_MD_DARK_THEME] {
+            assert!(
+                contrast_ratio(ink_for(&theme), theme.bg_body) >= 7.0,
+                "primary chrome ink too low on {theme:?}"
+            );
+            assert!(
+                contrast_ratio(muted_ink_for(&theme), theme.bg_body) >= 4.0,
+                "caption chrome ink too low on {theme:?}"
+            );
+            assert!(
+                contrast_ratio(accent_ink_for(&theme), theme.bg_body) >= 3.0,
+                "accent chrome ink too low on {theme:?}"
+            );
+        }
+        // Light paper keeps exactly the quoted quiet.md tokens.
+        assert_eq!(ink_for(&QUIET_MD_THEME), HOME_INK);
+        assert_eq!(muted_ink_for(&QUIET_MD_THEME), HOME_MUTED);
+        assert_eq!(accent_ink_for(&QUIET_MD_THEME), HOME_ACCENT);
+        assert_eq!(ink_for(&QUIET_MD_DARK_THEME), QUIET_MD_DARK_THEME.text);
+    }
+
+    /// `D-101`: seven `268 px` columns overflowed the `560 px` sheet, so only 4 of the 14
+    /// shortcuts were visible. Every entry must now land inside the panel at small and large
+    /// window sizes alike.
+    #[test]
+    fn shortcut_sheet_shows_every_entry_inside_its_panel() {
+        const ENTRIES: usize = 14;
+        for (w, h) in [(1_120, 780), (1_280, 800), (760, 520), (1_920, 1_080)] {
+            let (panel, cols, row_h) = shortcut_help_geometry(w, h, ENTRIES);
+            let per_col = ENTRIES.div_ceil(cols);
+            let col_w = (panel.w - 48) / cols as i32;
+            for i in 0..ENTRIES {
+                let col = (i / per_col) as i32;
+                let row = (i % per_col) as i32;
+                let rx = panel.x + 24 + col * col_w;
+                let ry = panel.y + 84 + row * row_h;
+                assert!(
+                    rx + 200 <= panel.x + panel.w,
+                    "entry {i} runs past the panel at {w}x{h}"
+                );
+                assert!(
+                    ry + 15 <= panel.y + panel.h,
+                    "entry {i} falls below the panel at {w}x{h}"
+                );
+            }
+            assert!(panel.x >= 0 && panel.y >= 0, "panel starts off-screen at {w}x{h}");
+            assert!(
+                panel.x + panel.w <= w && panel.y + panel.h <= h,
+                "panel overflows the window at {w}x{h}"
+            );
+        }
+        // A narrow window needs the single-column fallback rather than clipped columns.
+        assert_eq!(shortcut_help_geometry(480, 600, ENTRIES).1, 1);
+        assert_eq!(shortcut_help_geometry(1_120, 780, ENTRIES).1, 2);
+    }
+
+    /// `D-101`: the rail keeps quiet.md's light wash, which is wrong on `#1A1A19` paper. The
+    /// dark paper rail must use theme chrome and still never paint outside its rect.
+    #[test]
+    fn dark_paper_rail_paints_inside_its_rect() {
+        let fonts = FontSet::embedded(QUIET_MD_THEME.body_size_px).expect("embedded fonts");
+        let mut fb = FrameBuffer::new(1_280, 800, QUIET_MD_DARK_THEME.bg_body);
+        let before = fb.pixels.clone();
+        let rect = Rect::new(0, 40, DOC_SIDEBAR_W_PX, 736);
+        let data = DocumentChromeData {
+            library_label: "My documents".to_owned(),
+            folder_label: Some("Journal".to_owned()),
+            document_label: "notes.wavefunction".to_owned(),
+            folders: vec!["Journal".to_owned(), "Field Notes".to_owned()],
+        };
+        let hits = render_document_sidebar(&mut fb, &fonts, QUIET_MD_DARK_THEME, rect, &data);
+        assert!(hits.iter().any(|(_, h)| *h == DocumentChromeHit::Home));
+        for y in 0..i32::from(fb.height) {
+            for x in 0..i32::from(fb.width) {
+                if rect.contains(x, y) {
+                    continue;
+                }
+                let i = (y as usize) * usize::from(fb.width) + x as usize;
+                assert_eq!(fb.pixels[i], before[i], "dark rail painted outside its rect");
+            }
+        }
     }
 }
