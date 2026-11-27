@@ -817,11 +817,22 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("recent.txt");
         write_owner_only(&file, b"/home/someone/private-project/notes.wavefunction\n");
-        let mode = std::fs::metadata(&file).expect("written").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "preference files must be owner-only, got {mode:o}");
+        let mode = std::fs::metadata(&file)
+            .expect("written")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "preference files must be owner-only, got {mode:o}"
+        );
         // Overwriting must not widen it either.
         write_owner_only(&file, b"second\n");
-        let mode = std::fs::metadata(&file).expect("rewritten").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&file)
+            .expect("rewritten")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(
             std::fs::read_to_string(&file).expect("readable"),
