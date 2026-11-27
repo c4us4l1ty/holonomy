@@ -152,7 +152,10 @@ impl NativeHome {
         };
         let timeout = match timeout {
             Ok(timeout) => timeout,
-            Err(error) => { self.status = error.to_string(); return; }
+            Err(error) => {
+                self.status = error.to_string();
+                return;
+            }
         };
         if self.path.trim().is_empty() {
             self.status = "Choose a document path.".into();
@@ -261,7 +264,11 @@ impl NativeHome {
             cx.notify();
             return;
         }
-        if self.session.as_ref().is_some_and(|session| session.activity().is_err()) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.activity().is_err())
+        {
             self.wipe(cx);
             cx.stop_propagation();
             cx.notify();
@@ -1059,7 +1066,9 @@ fn main() {
 // Saving cannot silently drop text that still belongs to the platform's composition. Refuse
 // until the IME commits/cancels rather than guessing at a commit and later inserting it twice.
 fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
-    if preedit.is_empty() { Ok(()) } else {
+    if preedit.is_empty() {
+        Ok(())
+    } else {
         Err("Finish or cancel the current text composition before continuing.".into())
     }
 }

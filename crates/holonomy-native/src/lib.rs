@@ -175,7 +175,10 @@ impl Session {
     pub fn apply(&mut self, intent: Intent) -> Result<()> {
         self.activity()?;
         if matches!(intent, Intent::SetView(view) if view != holonomy_eye::View::IDENTITY) {
-            return Err("Native view transforms are not qualified; device scaling is handled by GPUI.".into());
+            return Err(
+                "Native view transforms are not qualified; device scaling is handled by GPUI."
+                    .into(),
+            );
         }
         if let Some(history) = self.history.as_mut() {
             if !matches!(
@@ -657,11 +660,15 @@ pub fn utf16_range_bytes(
 /// Parses an explicitly configured dead-man timeout. Invalid or zero values are errors rather
 /// than silently disabling an operator-requested safety mechanism.
 pub fn parse_deadman_timeout(value: Option<&str>) -> Result<Option<Duration>> {
-    value.map(|text| {
-        let milliseconds = text.parse::<u64>().ok().filter(|&ms| ms > 0)
-            .ok_or("HOLONOMY_DEADMAN_MS must be a positive integer number of milliseconds")?;
-        Ok(Duration::from_millis(milliseconds))
-    }).transpose()
+    value
+        .map(|text| {
+            let milliseconds =
+                text.parse::<u64>().ok().filter(|&ms| ms > 0).ok_or(
+                    "HOLONOMY_DEADMAN_MS must be a positive integer number of milliseconds",
+                )?;
+            Ok(Duration::from_millis(milliseconds))
+        })
+        .transpose()
 }
 
 fn require_durability() -> Result<()> {
@@ -707,18 +714,26 @@ mod tests {
     fn refused_close_preserves_pending_text_and_allows_retry() {
         let fixture = Fixture::new();
         let mut session = fixture.session();
-        session.apply(Intent::Type("keep the unsaved text".into())).unwrap();
+        session
+            .apply(Intent::Type("keep the unsaved text".into()))
+            .unwrap();
         let held = fixture.0.with_extension("held");
         std::fs::rename(&fixture.0, &held).unwrap();
         let refusal = session.prepare_close();
         std::fs::rename(&held, &fixture.0).unwrap();
         assert!(refusal.is_err());
         assert!(session.dirty());
-        assert_eq!(session.editor.frame().unwrap().text(), "keep the unsaved text");
+        assert_eq!(
+            session.editor.frame().unwrap().text(),
+            "keep the unsaved text"
+        );
         session.prepare_close().unwrap();
         drop(session);
         let mut reopened = Session::open(&fixture.0, b"native fixture passphrase").unwrap();
-        assert_eq!(reopened.editor.frame().unwrap().text(), "keep the unsaved text");
+        assert_eq!(
+            reopened.editor.frame().unwrap().text(),
+            "keep the unsaved text"
+        );
     }
 
     #[test]
@@ -738,9 +753,13 @@ mod tests {
     fn native_paint_cannot_accept_an_unapplied_hit_test_transform() {
         let fixture = Fixture::new();
         let mut session = fixture.session();
-        assert!(session.apply(Intent::SetView(holonomy_eye::View::new(2_000, 96).unwrap())).is_err());
+        assert!(session
+            .apply(Intent::SetView(holonomy_eye::View::new(2_000, 96).unwrap()))
+            .is_err());
         assert_eq!(session.editor.view(), holonomy_eye::View::IDENTITY);
-        assert!(session.apply(Intent::SetView(holonomy_eye::View::IDENTITY)).is_ok());
+        assert!(session
+            .apply(Intent::SetView(holonomy_eye::View::IDENTITY))
+            .is_ok());
     }
 
     #[test]
@@ -851,7 +870,10 @@ mod input_tests {
     #[test]
     fn explicit_invalid_deadman_configuration_never_disables_protection() {
         assert!(parse_deadman_timeout(None).unwrap().is_none());
-        assert_eq!(parse_deadman_timeout(Some("1500")).unwrap(), Some(Duration::from_millis(1500)));
+        assert_eq!(
+            parse_deadman_timeout(Some("1500")).unwrap(),
+            Some(Duration::from_millis(1500))
+        );
         for value in ["", "0", "-1", "NaN", "1.5", "18446744073709551616"] {
             assert!(parse_deadman_timeout(Some(value)).is_err());
         }
