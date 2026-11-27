@@ -1836,8 +1836,14 @@ impl X11Window {
     }
 
     fn drain_incoming(&mut self) -> Result<(), X11Error> {
+        // Bound the reads, not the buffer: an X server under load (or a peer that keeps sending
+        // events while the loop is behind) must not be able to grow `rbuf` without limit just
+        // because the socket never returns `WouldBlock`. At most this many bytes are taken per
+        // call; the leftover stays queued in the socket for the next one, so nothing is dropped
+        // and the loop still makes progress — one event is 32 bytes.
+        const MAX_READS_PER_DRAIN: usize = 64;
         let mut tmp = [0u8; 4_096];
-        loop {
+        for _ in 0..MAX_READS_PER_DRAIN {
             match self.stream.read(&mut tmp) {
                 Ok(0) => {
                     return Err(X11Error::Io(std::io::Error::new(
