@@ -87,6 +87,11 @@ pub fn overlay(owner: &NativeHome, cx: &mut Context<NativeHome>) -> Option<AnyEl
                 })));
         }
         Menu::More => {
+            panel = panel.child(button("menu-settings", "Settings").justify_start().on_click(cx.listener(|this, _, _, cx| {
+                this.home_menu = None; this.open_settings(cx); cx.notify();
+            }))).child(button("menu-theme", if owner.dark { "Light appearance" } else { "Dark appearance" }).justify_start().on_click(cx.listener(|this, _, _, cx| {
+                this.dark = !this.dark; this.home_menu = None; cx.notify();
+            })));
             panel = panel.child(button("menu-manage", "Manage workspace").justify_start().on_click(cx.listener(|this, _, _, cx| {
                 this.home_menu = None; this.open_settings(cx); if this.settings_page.is_some() { this.settings_page = Some(3); } cx.notify();
             }))).child(button("menu-refresh", "Refresh folder").justify_start().on_click(cx.listener(|this, _, _, cx| {

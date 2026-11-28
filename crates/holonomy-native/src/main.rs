@@ -202,6 +202,9 @@ impl NativeHome {
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         if !composition_ready(&self.preedit, &mut self.status) { return; }
+        self.home_menu = None;
+        self.search_open = false;
+        self.folder_create = false;
         self.settings_page = Some(0);
         cx.notify();
     }
@@ -1651,124 +1654,33 @@ impl Render for NativeHome {
             );
         }
         if sidebar_width > 0. {
-            shell = shell.child(
-                div()
-                    .w(px(sidebar_width))
-                    .h_full()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .bg(rgb(palette.rail))
-                    .px_3()
-                    .py_4()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .px_2()
-                            .pb_6()
-                            .child("Holonomy"),
-                    )
-                    .child(
-                        button("rail-home", "Overview")
-                            .justify_start()
-                            .h(px(36.))
-                            .px_3()
-                            .bg(rgb(if self.screen == Screen::Home {
-                                palette.selected
-                            } else {
-                                palette.rail
-                            }))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.session.is_some() {
-                                    this.home();
-                                } else {
-                                    this.cancel_unlock();
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        button("rail-new", "+  New document")
-                            .justify_start()
-                            .h(px(36.))
-                            .px_3()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_document(true);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        button("rail-open", "Open document")
-                            .justify_start()
-                            .h(px(36.))
-                            .px_3()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_document(false);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .mt_4()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(button("library-up", "Up").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if let Some(parent) =
-                                        this.library.folder.parent().map(Path::to_path_buf)
-                                    {
-                                        this.library.navigate(&parent);
-                                    }
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("library-refresh", "Refresh").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.library.refresh();
-                                    cx.notify();
-                                },
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .px_3()
-                            .text_size(px(12.))
-                            .text_color(rgb(muted))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(self.library.folder.to_string_lossy().into_owned()),
-                    )
-                    .child(library_list)
-                    .child(
-                        div()
-                            .px_3()
-                            .text_size(px(11.))
-                            .text_color(rgb(muted))
-                            .child(self.library.notice.clone()),
-                    )
-                    .child(
-                        div()
-                            .border_t_1()
-                            .border_color(rgb(palette.border))
-                            .pt_3()
-                            .px_3()
-                            .text_size(px(11.))
-                            .text_color(rgb(muted))
-                            .child(
-                                button("rail-settings", "Settings")
-                                    .justify_start()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.open_settings(cx);
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            );
+            shell = shell.child(div().w(px(sidebar_width)).h_full().flex_shrink_0().flex().flex_col()
+                .bg(rgb(palette.rail)).px_3().py_2().gap_1()
+                .child(div().h(px(32.)).flex().items_center().justify_end().gap_2()
+                    .child(button("rail-new", "+").on_click(cx.listener(|this, _, _, cx| {
+                        this.home_menu = Some(home::Menu::New); cx.notify();
+                    })))
+                    .child(button("rail-collapse", "|").on_click(cx.listener(|this, _, _, cx| {
+                        this.sidebar_hidden = true; this.sidebar_forced = false; cx.notify();
+                    }))))
+                .child(button("rail-home", self.library.folder.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .justify_start().h(px(30.)).bg(rgb(palette.selected)).on_click(cx.listener(|this, _, _, cx| {
+                        if this.session.is_some() { this.home(); } else { this.cancel_unlock(); }
+                        cx.notify();
+                    })))
+                .child(div().h(px(24.)).flex().items_center().justify_between()
+                    .child(button("library-up", "Up").on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(parent) = this.library.folder.parent().map(Path::to_path_buf) { this.library.navigate(&parent); }
+                        cx.notify();
+                    })))
+                    .child(button("library-refresh", "Refresh").on_click(cx.listener(|this, _, _, cx| {
+                        this.library.refresh(); cx.notify();
+                    }))))
+                .child(library_list)
+                .child(div().text_size(px(11.)).text_color(rgb(muted)).child(self.library.notice.clone()))
+                .child(button("rail-settings", "Settings").justify_start().on_click(cx.listener(|this, _, _, cx| {
+                    this.open_settings(cx); cx.notify();
+                }))));
         }
         let workspace = shell.child(
             div()
@@ -1779,24 +1691,22 @@ impl Render for NativeHome {
                 .flex_col()
                 .child(
                     div()
-                        .min_h(px(52.))
-                        .py_2()
+                        .min_h(px(40.))
+                        .py_1()
                         .flex_wrap()
                         .gap_2()
                         .flex_shrink_0()
-                        .px_6()
+                        .px_4()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .border_b_1()
-                        .border_color(rgb(palette.border))
                         .child(
                             button(
                                 "toggle-sidebar",
                                 if sidebar_width > 0. {
-                                    "Hide sidebar"
+                                    "|"
                                 } else {
-                                    "Sidebar"
+                                    "|>"
                                 },
                             )
                             .on_click(cx.listener(
@@ -1830,6 +1740,7 @@ impl Render for NativeHome {
                         .child(
                             div()
                                 .flex_1()
+                                .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
                                 .min_w_0()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
@@ -1867,25 +1778,6 @@ impl Render for NativeHome {
                                 .child(button("header-more", "...").on_click(cx.listener(|this, _, _, cx| {
                                     this.home_menu = if this.home_menu == Some(home::Menu::More) { None } else { Some(home::Menu::More) }; cx.notify();
                                 })))
-                                .child(button("header-settings", "Settings").on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.open_settings(cx);
-                                        cx.notify();
-                                    },
-                                )))
-                                .child(button("header-open", "Open").on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.begin_document(false);
-                                        cx.notify();
-                                    },
-                                )))
-                                .child(
-                                    button("theme", if self.dark { "Light" } else { "Dark" })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.dark = !this.dark;
-                                            cx.notify();
-                                        })),
-                                ),
                         )
                         .child(chrome::controls(ink, cx)),
                 )

@@ -68,9 +68,9 @@ library_click() {
   xdotool mousemove --window "$window" "$x" "$y" click 1
   sleep 0.4
 }
-library_click 70 300
-library_click 28 232
-library_click 90 342
+library_click 70 126
+library_click 28 90
+library_click 90 168
 timeout 10 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
 printf %s 'native smoke passphrase' | xclip -selection clipboard
 xdotool key ctrl+v Return
