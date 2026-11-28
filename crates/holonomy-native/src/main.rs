@@ -61,6 +61,10 @@ struct NativeHome {
     bounds: Bounds<Pixels>,
     dragging: bool,
     show_history: bool,
+    sidebar_hidden: bool,
+    sidebar_forced: bool,
+    show_settings: bool,
+    show_formatting: bool,
 }
 
 fn button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::Stateful<gpui::Div> {
@@ -156,6 +160,10 @@ impl NativeHome {
             bounds: Bounds::default(),
             dragging: false,
             show_history: false,
+            sidebar_hidden: false,
+            sidebar_forced: false,
+            show_settings: false,
+            show_formatting: false,
         }
     }
 
@@ -786,7 +794,8 @@ impl Render for NativeHome {
         let palette = design::Palette::new(self.dark);
         let (bg, panel, ink, muted) = (palette.page, palette.page, palette.ink, palette.muted);
         let viewport = window.viewport_size();
-        let sidebar_width = design::sidebar_width(f32::from(viewport.width));
+        let sidebar_width = design::visible_sidebar_width(f32::from(viewport.width), self.sidebar_hidden, self.sidebar_forced);
+        let toolbar = self.session.as_ref().map(Session::toolbar);
         let mut body = div()
             .id("workspace")
             .flex_1()
@@ -1011,22 +1020,29 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
-                            .child(button("bold", "B").on_click(cx.listener(|this, _, _, cx| {
+                            .child(button("bold", style_label("B", toolbar.as_ref().map(|t| &t.bold)))
+                                .bg(rgb(if toolbar.as_ref().is_some_and(|t| matches!(t.bold, TriState::Uniform(true))) { palette.selected } else { palette.page })).on_click(cx.listener(|this, _, _, cx| {
                                 this.format(0);
                                 cx.notify();
                             })))
                             .child(
-                                button("italic", "I").on_click(cx.listener(|this, _, _, cx| {
+                                button("italic", style_label("I", toolbar.as_ref().map(|t| &t.italic)))
+                                .bg(rgb(if toolbar.as_ref().is_some_and(|t| matches!(t.italic, TriState::Uniform(true))) { palette.selected } else { palette.page })).on_click(cx.listener(|this, _, _, cx| {
                                     this.format(1);
                                     cx.notify();
                                 })),
                             )
-                            .child(button("underline", "U").on_click(cx.listener(
+                            .child(button("underline", style_label("U", toolbar.as_ref().map(|t| &t.underline)))
+                                .bg(rgb(if toolbar.as_ref().is_some_and(|t| matches!(t.underline, TriState::Uniform(true))) { palette.selected } else { palette.page })).on_click(cx.listener(
                                 |this, _, _, cx| {
                                     this.format(2);
                                     cx.notify();
                                 },
                             )))
+                            .child(button("format-toggle", if self.show_formatting { "Formatting ▴" } else { "Formatting ▾" }).on_click(cx.listener(|this, _, _, cx| {
+                                this.show_formatting = !this.show_formatting;
+                                cx.notify();
+                            })))
                             .child(button("find", "Find").on_click(cx.listener(
                                 |this, _, _, cx| {
                                     if !this.composition_ready() {
@@ -1100,7 +1116,9 @@ impl Render for NativeHome {
                         },
                     )));
                 }
-                body = body.child(formatting);
+                if self.show_formatting {
+                    body = body.child(formatting);
+                }
                 if self.screen != Screen::Editor {
                     body = body.child(format!(
                         "{} · Enter confirms · Escape cancels",
@@ -1402,7 +1420,10 @@ impl Render for NativeHome {
                             .px_3()
                             .text_size(px(11.))
                             .text_color(rgb(muted))
-                            .child("Private by design"),
+                            .child(button("rail-settings", "⚙  Settings").justify_start().on_click(cx.listener(|this, _, _, cx| {
+                                this.show_settings = !this.show_settings;
+                                cx.notify();
+                            }))),
                     ),
             );
         }
@@ -1423,6 +1444,16 @@ impl Render for NativeHome {
                         .justify_between()
                         .border_b_1()
                         .border_color(rgb(palette.border))
+                        .child(button("toggle-sidebar", if sidebar_width > 0. { "◧" } else { "☰" }).on_click(cx.listener(|this, _, window, cx| {
+                            if design::sidebar_width(f32::from(window.viewport_size().width)) == 0. {
+                                this.sidebar_forced = !this.sidebar_forced;
+                                this.sidebar_hidden = false;
+                            } else {
+                                this.sidebar_hidden = !this.sidebar_hidden;
+                                this.sidebar_forced = false;
+                            }
+                            cx.notify();
+                        })))
                         .child(
                             button("workspace-home", "Holonomy  ›").on_click(cx.listener(
                                 |this, _, _, cx| {
@@ -1459,6 +1490,14 @@ impl Render for NativeHome {
                             div()
                                 .flex()
                                 .gap_2()
+                                .child(button("header-new", "+").on_click(cx.listener(|this, _, _, cx| {
+                                    this.begin_document(true);
+                                    cx.notify();
+                                })))
+                                .child(button("header-settings", "Settings").on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_settings = !this.show_settings;
+                                    cx.notify();
+                                })))
                                 .child(button("header-open", "Open").on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.begin_document(false);
@@ -1474,6 +1513,23 @@ impl Render for NativeHome {
                                 ),
                         ),
                 )
+                .children(self.show_settings.then(|| div().px_6().py_3().bg(rgb(palette.rail)).flex().flex_col().gap_2()
+                    .child(div().flex().items_center().justify_between().child("Workspace settings")
+                        .child(button("close-settings", "Close").on_click(cx.listener(|this, _, _, cx| {
+                            this.show_settings = false;
+                            cx.notify();
+                        }))))
+                    .child(div().flex().flex_wrap().gap_2()
+                        .child(button("settings-theme", if self.dark { "Appearance: Dark" } else { "Appearance: Light" }).on_click(cx.listener(|this, _, _, cx| {
+                            this.dark = !this.dark;
+                            cx.notify();
+                        })))
+                        .child(button("settings-toolbar", if self.show_formatting { "Extra formatting: shown" } else { "Extra formatting: hidden" }).on_click(cx.listener(|this, _, _, cx| {
+                            this.show_formatting = !this.show_formatting;
+                            cx.notify();
+                        }))))
+                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Preferences last for this session. No document text or previews are stored in settings."))
+                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Shortcuts: Ctrl/Cmd+S save · Ctrl/Cmd+F find · Ctrl/Cmd+Shift+T theme · Ctrl/Cmd+Shift+Escape emergency wipe"))))
                 .child(body)
                 .child(
                     div()
@@ -1663,6 +1719,15 @@ fn main() {
     });
 }
 
+// Mixed selections must not look uniformly enabled. The dot communicates mixed state
+// without copying selected document text into the framework text cache.
+fn style_label(label: &str, state: Option<&TriState<bool>>) -> String {
+    match state {
+        Some(TriState::Mixed) => format!("{label} ·"),
+        _ => label.into(),
+    }
+}
+
 // Every visible format control maps to an undoable engine patch, not Markdown insertion.
 fn formatting_presets() -> Vec<(&'static str, &'static str, StylePatch)> {
     let mut result = Vec::new();
@@ -1737,6 +1802,13 @@ fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_style_label_does_not_claim_uniform_formatting() {
+        assert_eq!(style_label("B", Some(&TriState::Mixed)), "B ·");
+        assert_eq!(style_label("B", Some(&TriState::Uniform(true))), "B");
+        assert_eq!(style_label("B", None), "B");
+    }
+
     #[test]
     fn toolbar_presets_have_unique_ids_and_clear_is_a_real_reset() {
         let presets = formatting_presets();

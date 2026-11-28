@@ -58,9 +58,28 @@ pub fn sidebar_width(width: f32) -> f32 {
     }
 }
 
+/// An explicit rail toggle on compact windows must work, while retaining writing space.
+pub fn visible_sidebar_width(width: f32, hidden: bool, forced: bool) -> f32 {
+    if hidden {
+        0.
+    } else if forced && sidebar_width(width) == 0. {
+        (width * 0.4).clamp(0., 224.)
+    } else {
+        sidebar_width(width)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_sidebar_can_be_explicitly_opened_and_closed() {
+        assert_eq!(visible_sidebar_width(480., false, false), 0.);
+        assert_eq!(visible_sidebar_width(480., false, true), 192.);
+        assert_eq!(visible_sidebar_width(1200., true, true), 0.);
+        assert_eq!(visible_sidebar_width(1200., false, false), 256.);
+    }
 
     #[test]
     fn narrow_layout_prioritizes_the_writing_surface() {
