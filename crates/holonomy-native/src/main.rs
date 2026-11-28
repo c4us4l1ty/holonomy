@@ -12,7 +12,10 @@ use holonomy_native::{BoxRect, SecretInput, Session, VectorFrame};
 use holonomy_shell::{Intent, Move};
 use holonomy_text::{StylePatch, TriState};
 use std::path::Path;
-use std::sync::{mpsc, Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
 use std::time::Duration;
 use zeroize::Zeroize;
 
@@ -28,7 +31,9 @@ enum Screen {
 struct UnlockWorker(Arc<AtomicBool>);
 
 impl Drop for UnlockWorker {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 struct PendingUnlock {
@@ -58,17 +63,48 @@ struct NativeHome {
 }
 
 fn button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::Stateful<gpui::Div> {
-    div().id(id).cursor_pointer().flex().items_center().justify_center()
-        .flex_shrink_0().h(px(design::TOOL_HEIGHT)).px_2().rounded_md()
-        .text_size(px(12.)).hover(|style| style.bg(gpui::rgba(0x88888818)))
+    div()
+        .id(id)
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .h(px(design::TOOL_HEIGHT))
+        .px_2()
+        .rounded_md()
+        .text_size(px(12.))
+        .hover(|style| style.bg(gpui::rgba(0x88888818)))
         .child(label.into())
 }
 
-fn field(id: &'static str, label: String, active: bool, palette: design::Palette) -> gpui::Stateful<gpui::Div> {
-    div().id(id).cursor_text().flex().items_center().w_full().min_w_0()
-        .h(px(design::CONTROL_HEIGHT + 8.)).flex_shrink_0().px_3().rounded_lg().border_1()
-        .border_color(rgb(if active { palette.muted } else { palette.border }))
-        .bg(rgb(palette.page)).text_size(px(14.)).overflow_hidden().child(label)
+fn field(
+    id: &'static str,
+    label: String,
+    active: bool,
+    palette: design::Palette,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .cursor_text()
+        .flex()
+        .items_center()
+        .w_full()
+        .min_w_0()
+        .h(px(design::CONTROL_HEIGHT + 8.))
+        .flex_shrink_0()
+        .px_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(if active {
+            palette.muted
+        } else {
+            palette.border
+        }))
+        .bg(rgb(palette.page))
+        .text_size(px(14.))
+        .overflow_hidden()
+        .child(label)
 }
 
 impl NativeHome {
@@ -120,13 +156,19 @@ impl NativeHome {
     }
 
     fn begin_document(&mut self, create: bool) {
-        if !self.composition_ready() { return; }
+        if !self.composition_ready() {
+            return;
+        }
         if self.session.is_some() {
             self.home();
-            if self.session.is_some() { return; }
+            if self.session.is_some() {
+                return;
+            }
         }
         self.create = create;
-        if create { self.path.clear(); }
+        if create {
+            self.path.clear();
+        }
         self.passphrase.zeroize();
         self.editing_path = true;
         self.screen = Screen::Unlock;
@@ -144,7 +186,8 @@ impl NativeHome {
     // its later platform commit into a different destination or move its insertion point.
     fn composition_ready(&mut self) -> bool {
         if self.pending_unlock.is_some() {
-            self.status = "Unlocking securely… You can cancel while the derivation finishes.".into();
+            self.status =
+                "Unlocking securely… You can cancel while the derivation finishes.".into();
             return false;
         }
         composition_ready(&self.preedit, &mut self.status)
@@ -218,7 +261,8 @@ impl NativeHome {
             return;
         }
         if self.unlock_worker_active.swap(true, Ordering::AcqRel) {
-            self.status = "The cancelled derivation is still clearing. Please wait a moment.".into();
+            self.status =
+                "The cancelled derivation is still clearing. Please wait a moment.".into();
             return;
         }
         let worker = UnlockWorker(Arc::clone(&self.unlock_worker_active));
@@ -228,33 +272,54 @@ impl NativeHome {
         let path = self.path.clone();
         let create = self.create;
         let (sender, receiver) = mpsc::sync_channel(1);
-        match std::thread::Builder::new().name("holonomy-unlock".into()).spawn(move || {
-            let _worker = worker;
-            let result = holonomy_native::prepare_document(Path::new(&path), passphrase.as_bytes(), create);
-            drop(passphrase);
-            let _ = sender.send(result);
-        }) {
+        match std::thread::Builder::new()
+            .name("holonomy-unlock".into())
+            .spawn(move || {
+                let _worker = worker;
+                let result = holonomy_native::prepare_document(
+                    Path::new(&path),
+                    passphrase.as_bytes(),
+                    create,
+                );
+                drop(passphrase);
+                let _ = sender.send(result);
+            }) {
             Ok(_) => {
                 self.pending_unlock = Some(PendingUnlock { receiver, timeout });
-                self.status = if create { "Preparing encryption…" } else { "Unlocking securely…" }.into();
+                self.status = if create {
+                    "Preparing encryption…"
+                } else {
+                    "Unlocking securely…"
+                }
+                .into();
             }
             Err(error) => self.status = format!("Could not start unlock worker: {error}"),
         }
     }
 
     fn poll_unlock(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = &self.pending_unlock else { return; };
+        let Some(pending) = &self.pending_unlock else {
+            return;
+        };
         let result = match pending.receiver.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => Err("Unlock worker stopped. Please retry.".into()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("Unlock worker stopped. Please retry.".into())
+            }
         };
-        let timeout = self.pending_unlock.take().and_then(|pending| pending.timeout);
+        let timeout = self
+            .pending_unlock
+            .take()
+            .and_then(|pending| pending.timeout);
         let result = result.and_then(|prepared| {
             let document = prepared.finish().map_err(|error| error.to_string())?;
-            let mut session = Session::from_document(Path::new(&self.path), document).map_err(|error| error.to_string())?;
+            let mut session = Session::from_document(Path::new(&self.path), document)
+                .map_err(|error| error.to_string())?;
             if let Some(timeout) = timeout {
-                session.set_deadman(timeout).map_err(|error| error.to_string())?;
+                session
+                    .set_deadman(timeout)
+                    .map_err(|error| error.to_string())?;
             }
             Ok(session)
         });
@@ -277,7 +342,9 @@ impl NativeHome {
         self.preedit.zeroize();
         self.passphrase.zeroize();
         self.screen = Screen::Home;
-        self.status = "Cancelled. Any in-flight derivation clears its temporary secret when it finishes.".into();
+        self.status =
+            "Cancelled. Any in-flight derivation clears its temporary secret when it finishes."
+                .into();
     }
 
     fn format(&mut self, kind: u8) {
@@ -379,7 +446,9 @@ impl NativeHome {
             return;
         }
         if self.pending_unlock.is_some() {
-            if key == "escape" { self.cancel_unlock(); }
+            if key == "escape" {
+                self.cancel_unlock();
+            }
             cx.stop_propagation();
             cx.notify();
             return;
@@ -543,7 +612,9 @@ impl NativeHome {
     }
 
     fn commit_text(&mut self, text: &str) {
-        if self.pending_unlock.is_some() { return; }
+        if self.pending_unlock.is_some() {
+            return;
+        }
         if let Some(session) = &self.session {
             if let Err(error) = session.activity() {
                 self.status = error.to_string();
@@ -580,6 +651,9 @@ impl NativeHome {
     }
 
     fn pointer(&mut self, position: gpui::Point<Pixels>, extend: bool) {
+        if !self.composition_ready() {
+            return;
+        }
         let x = f32::from(position.x - self.bounds.origin.x) - 24.;
         let y = f32::from(position.y - self.bounds.origin.y) - 24.;
         if let Some(session) = &mut self.session {
@@ -656,8 +730,16 @@ impl Render for NativeHome {
         let palette = design::Palette::new(self.dark);
         let (bg, panel, ink, muted) = (palette.page, palette.page, palette.ink, palette.muted);
         let sidebar_width = design::sidebar_width(f32::from(window.viewport_size().width));
-        let mut body = div().id("workspace").flex_1().min_h_0().min_w_0()
-            .flex().flex_col().gap_4().px_6().py_4();
+        let mut body = div()
+            .id("workspace")
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .px_6()
+            .py_4();
         match self.screen {
             Screen::Home => {
                 body = body.max_w(px(760.)).w_full().mx_auto().justify_center()
@@ -710,104 +792,124 @@ impl Render for NativeHome {
                         )
                     })
                     .unwrap_or_default();
-                body = body.child(div().flex().items_center().gap_2()
-                    .child(div().flex_1().min_w_0().text_size(px(14.)).overflow_hidden().child(title))
-                    .child(div().text_size(px(11.)).text_color(rgb(muted)).child("Encrypted · Local only"))).child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_1().py_2().border_b_1().border_color(rgb(palette.border))
-                        .child(
-                            button("home", "Home").on_click(cx.listener(|this, _, _, cx| {
-                                this.home();
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            button("save", "Save").on_click(cx.listener(|this, _, _, cx| {
-                                this.save();
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            button("undo", "↶ Undo").on_click(cx.listener(|this, _, _, cx| {
-                                this.apply(Intent::Undo);
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            button("redo", "↷ Redo").on_click(cx.listener(|this, _, _, cx| {
-                                this.apply(Intent::Redo);
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            button("bold", "B").on_click(cx.listener(|this, _, _, cx| {
+                body = body
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .overflow_hidden()
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(muted))
+                                    .child("Encrypted · Local only"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(rgb(palette.border))
+                            .child(button("home", "Home").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.home();
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("save", "Save").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.save();
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("undo", "↶ Undo").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.apply(Intent::Undo);
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("redo", "↷ Redo").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.apply(Intent::Redo);
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("bold", "B").on_click(cx.listener(|this, _, _, cx| {
                                 this.format(0);
                                 cx.notify();
-                            })),
-                        )
-                        .child(button("italic", "I").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.format(1);
-                                cx.notify();
-                            },
-                        )))
-                        .child(button("underline", "U").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.format(2);
-                                cx.notify();
-                            },
-                        )))
-                        .child(
-                            button("find", "Find").on_click(cx.listener(|this, _, _, cx| {
-                                if !this.composition_ready() {
+                            })))
+                            .child(
+                                button("italic", "I").on_click(cx.listener(|this, _, _, cx| {
+                                    this.format(1);
                                     cx.notify();
-                                    return;
-                                }
-                                this.screen = Screen::Find;
-                                this.query.zeroize();
-                                this.search_index = 0;
-                                cx.notify();
-                            })),
-                        )
-                        .child(button("history", "History").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if !this.composition_ready() {
+                                })),
+                            )
+                            .child(button("underline", "U").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.format(2);
                                     cx.notify();
-                                    return;
-                                }
-                                this.show_history = !this.show_history;
-                                cx.notify();
-                            },
-                        )))
-                        .child(button("bookmark", "Bookmark").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if !this.composition_ready() {
+                                },
+                            )))
+                            .child(button("find", "Find").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if !this.composition_ready() {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.screen = Screen::Find;
+                                    this.query.zeroize();
+                                    this.search_index = 0;
                                     cx.notify();
-                                    return;
-                                }
-                                this.query.zeroize();
-                                this.screen = Screen::Bookmark;
-                                cx.notify();
-                            },
-                        )))
-                        .child(button("verify", "Verify").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(s) = &this.session {
-                                    let result = s.verify();
-                                    this.report(result, "World-line authenticated.");
-                                }
-                                cx.notify();
-                            },
-                        )))
-                        .child(button("wipe", "Emergency wipe").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.wipe(cx);
-                                cx.notify();
-                            },
-                        ))),
-                );
+                                },
+                            )))
+                            .child(button("history", "History").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if !this.composition_ready() {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.show_history = !this.show_history;
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("bookmark", "Bookmark").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if !this.composition_ready() {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.query.zeroize();
+                                    this.screen = Screen::Bookmark;
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("verify", "Verify").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(s) = &this.session {
+                                        let result = s.verify();
+                                        this.report(result, "World-line authenticated.");
+                                    }
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("wipe", "Emergency wipe").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.wipe(cx);
+                                    cx.notify();
+                                },
+                            ))),
+                    );
                 if self.screen != Screen::Editor {
                     body = body.child(format!(
                         "{} · Enter confirms · Escape cancels",
@@ -907,7 +1009,9 @@ impl Render for NativeHome {
                         .min_h_0()
                         .overflow_hidden()
                         .bg(rgb(panel))
-                        .w_full().max_w(px(design::DOCUMENT_WIDTH)).mx_auto()
+                        .w_full()
+                        .max_w(px(design::DOCUMENT_WIDTH))
+                        .mx_auto()
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -987,36 +1091,178 @@ impl Render for NativeHome {
         )
         .absolute()
         .size_full();
-        let mut shell = div().size_full().flex().bg(rgb(bg)).text_color(rgb(ink))
-            .text_size(px(14.)).track_focus(&self.focus).on_key_down(cx.listener(Self::key)).child(input);
+        let mut shell = div()
+            .size_full()
+            .flex()
+            .bg(rgb(bg))
+            .text_color(rgb(ink))
+            .text_size(px(14.))
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key))
+            .child(input);
         if sidebar_width > 0. {
-            shell = shell.child(div().w(px(sidebar_width)).h_full().flex_shrink_0().flex().flex_col()
-                .bg(rgb(palette.rail)).px_3().py_4().gap_2()
-                .child(div().flex().items_center().gap_3().px_2().pb_6()
-                    .child(div().size(px(28.)).rounded_lg().bg(rgb(palette.primary)).text_color(rgb(palette.on_primary)).flex().items_center().justify_center().child("h"))
-                    .child("Holonomy"))
-                .child(button("rail-home", "All documents").justify_start().h(px(36.)).px_3().bg(rgb(palette.selected))
-                    .on_click(cx.listener(|this,_,_,cx| { if this.session.is_some() { this.home(); } else { this.cancel_unlock(); } cx.notify(); })))
-                .child(button("rail-new", "+  New document").justify_start().h(px(36.)).px_3()
-                    .on_click(cx.listener(|this,_,_,cx| { this.begin_document(true); cx.notify(); })))
-                .child(button("rail-open", "Open document").justify_start().h(px(36.)).px_3()
-                    .on_click(cx.listener(|this,_,_,cx| { this.begin_document(false); cx.notify(); })))
-                .child(div().mt_6().px_3().text_size(px(11.)).text_color(rgb(muted)).child("WORKSPACE"))
-                .child(div().px_3().text_size(px(12.)).text_color(rgb(muted)).child("Encrypted files stay on your device."))
-                .child(div().flex_1())
-                .child(div().border_t_1().border_color(rgb(palette.border)).pt_3().px_3().text_size(px(11.)).text_color(rgb(muted)).child("Private by design")));
+            shell = shell.child(
+                div()
+                    .w(px(sidebar_width))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(palette.rail))
+                    .px_3()
+                    .py_4()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .px_2()
+                            .pb_6()
+                            .child(
+                                div()
+                                    .size(px(28.))
+                                    .rounded_lg()
+                                    .bg(rgb(palette.primary))
+                                    .text_color(rgb(palette.on_primary))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child("h"),
+                            )
+                            .child("Holonomy"),
+                    )
+                    .child(
+                        button("rail-home", "All documents")
+                            .justify_start()
+                            .h(px(36.))
+                            .px_3()
+                            .bg(rgb(palette.selected))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.session.is_some() {
+                                    this.home();
+                                } else {
+                                    this.cancel_unlock();
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        button("rail-new", "+  New document")
+                            .justify_start()
+                            .h(px(36.))
+                            .px_3()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_document(true);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        button("rail-open", "Open document")
+                            .justify_start()
+                            .h(px(36.))
+                            .px_3()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_document(false);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .mt_6()
+                            .px_3()
+                            .text_size(px(11.))
+                            .text_color(rgb(muted))
+                            .child("WORKSPACE"),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .text_size(px(12.))
+                            .text_color(rgb(muted))
+                            .child("Encrypted files stay on your device."),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .border_t_1()
+                            .border_color(rgb(palette.border))
+                            .pt_3()
+                            .px_3()
+                            .text_size(px(11.))
+                            .text_color(rgb(muted))
+                            .child("Private by design"),
+                    ),
+            );
         }
-        shell.child(div().flex_1().min_w_0().h_full().flex().flex_col()
-            .child(div().h(px(52.)).flex_shrink_0().px_6().flex().items_center().justify_between().border_b_1().border_color(rgb(palette.border))
-                .child(button("workspace-home", "Workspace").on_click(cx.listener(|this,_,_,cx| { if this.session.is_some() { this.home(); } else { this.cancel_unlock(); } cx.notify(); })))
-                .child(div().flex().gap_2()
-                    .child(button("header-open", "Open").on_click(cx.listener(|this,_,_,cx| { this.begin_document(false); cx.notify(); })))
-                    .child(button("theme", if self.dark { "Light" } else { "Dark" }).on_click(cx.listener(|this,_,_,cx| { this.dark = !this.dark; cx.notify(); })))))
-            .child(body)
-            .child(div().h(px(30.)).flex_shrink_0().px_6().flex().items_center().justify_between().gap_3().text_size(px(11.)).text_color(rgb(muted))
-                .child(div().flex_1().min_w_0().overflow_hidden().child(self.status.clone()))
-                .child(format!("{:.2}× · Local workspace", window.scale_factor()))))
-
+        shell.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(52.))
+                        .flex_shrink_0()
+                        .px_6()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .border_b_1()
+                        .border_color(rgb(palette.border))
+                        .child(button("workspace-home", "Workspace").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if this.session.is_some() {
+                                    this.home();
+                                } else {
+                                    this.cancel_unlock();
+                                }
+                                cx.notify();
+                            },
+                        )))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(button("header-open", "Open").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.begin_document(false);
+                                        cx.notify();
+                                    },
+                                )))
+                                .child(
+                                    button("theme", if self.dark { "Light" } else { "Dark" })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.dark = !this.dark;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+                .child(body)
+                .child(
+                    div()
+                        .h(px(30.))
+                        .flex_shrink_0()
+                        .px_6()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .text_size(px(11.))
+                        .text_color(rgb(muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(self.status.clone()),
+                        )
+                        .child(format!("{:.2}× · Local workspace", window.scale_factor())),
+                ),
+        )
     }
 }
 
@@ -1078,7 +1324,9 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_unlock.is_some() { return; }
+        if self.pending_unlock.is_some() {
+            return;
+        }
         let range = range.unwrap_or(0..self.preedit.encode_utf16().count());
         if !self.preedit.replace_utf16(range, text) {
             self.status =
@@ -1098,7 +1346,9 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_unlock.is_some() { return; }
+        if self.pending_unlock.is_some() {
+            return;
+        }
         let range = range.unwrap_or(0..self.preedit.encode_utf16().count());
         if !self.preedit.replace_utf16(range, text) {
             self.status = "Composition range is unsupported or exceeds the 4096-byte limit.".into();

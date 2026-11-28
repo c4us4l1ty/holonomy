@@ -147,8 +147,13 @@ pub struct PreparedDocument {
 }
 
 enum PreparedKind {
-    Create { params: KdfParamsRecord, salt: [u8; holonomy_seal::DERIVE_SALT_BYTES] },
-    Open { header: LineHeader },
+    Create {
+        params: KdfParamsRecord,
+        salt: [u8; holonomy_seal::DERIVE_SALT_BYTES],
+    },
+    Open {
+        header: LineHeader,
+    },
 }
 
 impl PreparedDocument {
@@ -159,11 +164,20 @@ impl PreparedDocument {
         Self::create_input(path, &input, params)
     }
 
-    fn create_input(path: &Path, passphrase: &PassphraseInput, params: KdfParamsRecord) -> Result<Self, StoreError> {
+    fn create_input(
+        path: &Path,
+        passphrase: &PassphraseInput,
+        params: KdfParamsRecord,
+    ) -> Result<Self, StoreError> {
         let salt = generate_kdf_salt().map_err(|_| StoreError::Params)?;
-        let keys = passphrase.with_bytes(|bytes| MasterKeys::prepare_with(bytes, &salt, &params))
+        let keys = passphrase
+            .with_bytes(|bytes| MasterKeys::prepare_with(bytes, &salt, &params))
             .map_err(|_| StoreError::Params)?;
-        Ok(Self { path: path.to_path_buf(), keys, kind: PreparedKind::Create { params, salt } })
+        Ok(Self {
+            path: path.to_path_buf(),
+            keys,
+            kind: PreparedKind::Create { params, salt },
+        })
     }
 
     /// Reads the public header and performs the memory-hard derivation, without exposing keys.
@@ -174,9 +188,14 @@ impl PreparedDocument {
 
     fn open_input(path: &Path, passphrase: &PassphraseInput) -> Result<Self, StoreError> {
         let header = LineHeader::read(path).map_err(map_open)?;
-        let keys = passphrase.with_bytes(|bytes| MasterKeys::prepare_with(bytes, &header.salt, &header.kdf_params))
+        let keys = passphrase
+            .with_bytes(|bytes| MasterKeys::prepare_with(bytes, &header.salt, &header.kdf_params))
             .map_err(|_| StoreError::Refused)?;
-        Ok(Self { path: path.to_path_buf(), keys, kind: PreparedKind::Open { header } })
+        Ok(Self {
+            path: path.to_path_buf(),
+            keys,
+            kind: PreparedKind::Open { header },
+        })
     }
 
     /// Installs locked capabilities on the calling thread and authenticates the world-line.
@@ -185,15 +204,18 @@ impl PreparedDocument {
         let keys = self.keys.finish(None);
         let line = match self.kind {
             PreparedKind::Create { params, salt } => {
-                let (capsule, dem) = create_capsule_for(keys.unwrap_key(), None).map_err(|_| StoreError::Params)?;
-                let header = LineHeader::new(params, salt, capsule).map_err(|error| StoreError::Line(error.to_string()))?;
+                let (capsule, dem) =
+                    create_capsule_for(keys.unwrap_key(), None).map_err(|_| StoreError::Params)?;
+                let header = LineHeader::new(params, salt, capsule)
+                    .map_err(|error| StoreError::Line(error.to_string()))?;
                 WorldLine::create(&self.path, header, dem).map_err(map_open)?
             }
             PreparedKind::Open { header } => {
                 if LineHeader::read(&self.path).map_err(map_open)?.epoch_id() != header.epoch_id() {
                     return Err(StoreError::Refused);
                 }
-                let dem = open_capsule_for(keys.unwrap_key(), &header.capsule, None).map_err(|_| StoreError::Refused)?;
+                let dem = open_capsule_for(keys.unwrap_key(), &header.capsule, None)
+                    .map_err(|_| StoreError::Refused)?;
                 let opened = WorldLine::open(&self.path, dem).map_err(map_open)?;
                 if opened.header().epoch_id() != header.epoch_id() {
                     return Err(StoreError::Refused);
@@ -201,7 +223,13 @@ impl PreparedDocument {
                 opened
             }
         };
-        Ok(Document { line: Rc::new(RefCell::new(Line { path: self.path, keys, line })) })
+        Ok(Document {
+            line: Rc::new(RefCell::new(Line {
+                path: self.path,
+                keys,
+                line,
+            })),
+        })
     }
 }
 
@@ -1052,11 +1080,17 @@ mod prepared_document_tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("holonomy-prepared-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))))
+            Self(std::env::temp_dir().join(format!(
+                "holonomy-prepared-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )))
         }
     }
     impl Drop for Fixture {
-        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     #[test]
@@ -1074,15 +1108,25 @@ mod prepared_document_tests {
     #[test]
     fn worker_open_is_byte_compatible_and_changed_epoch_is_refused() {
         let fixture = Fixture::new();
-        drop(Document::create_with(&fixture.0, b"prepared document passphrase", test_params()).unwrap());
+        drop(
+            Document::create_with(&fixture.0, b"prepared document passphrase", test_params())
+                .unwrap(),
+        );
         let path = fixture.0.clone();
-        let prepared = std::thread::spawn(move || PreparedDocument::open(&path, b"prepared document passphrase").unwrap()).join().unwrap();
+        let prepared = std::thread::spawn(move || {
+            PreparedDocument::open(&path, b"prepared document passphrase").unwrap()
+        })
+        .join()
+        .unwrap();
         let document = prepared.finish().unwrap();
         assert_eq!(document.path(), fixture.0);
         drop(document);
         let prepared = PreparedDocument::open(&fixture.0, b"prepared document passphrase").unwrap();
         std::fs::remove_file(&fixture.0).unwrap();
-        drop(Document::create_with(&fixture.0, b"prepared document passphrase", test_params()).unwrap());
+        drop(
+            Document::create_with(&fixture.0, b"prepared document passphrase", test_params())
+                .unwrap(),
+        );
         assert!(matches!(prepared.finish(), Err(StoreError::Refused)));
     }
 

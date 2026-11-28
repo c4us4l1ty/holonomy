@@ -19,10 +19,18 @@ type Core = Editor<DocumentSink, DocumentSource, FontSet>;
 
 /// Runs only the worker-safe authentication preparation. The editor and locked capabilities
 /// are installed later on the UI thread; unsupported durability is refused before KDF work.
-pub fn prepare_document(path: &Path, passphrase: &[u8], create: bool) -> std::result::Result<store::PreparedDocument, String> {
+pub fn prepare_document(
+    path: &Path,
+    passphrase: &[u8],
+    create: bool,
+) -> std::result::Result<store::PreparedDocument, String> {
     require_durability().map_err(|error| error.to_string())?;
-    if create { store::PreparedDocument::create(path, passphrase) } else { store::PreparedDocument::open(path, passphrase) }
-        .map_err(|error| error.to_string())
+    if create {
+        store::PreparedDocument::create(path, passphrase)
+    } else {
+        store::PreparedDocument::open(path, passphrase)
+    }
+    .map_err(|error| error.to_string())
 }
 
 /// A glyph's closed contours, already positioned in logical viewport coordinates.

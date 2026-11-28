@@ -22,18 +22,40 @@ pub struct Palette {
 impl Palette {
     pub fn new(dark: bool) -> Self {
         if dark {
-            Self { page: 0x1c1c1c, rail: 0x181818, ink: 0xfafafa, muted: 0xa3a3a3,
-                border: 0x333333, selected: 0x262626, primary: 0xe5e5e5, on_primary: 0x171717 }
+            Self {
+                page: 0x1c1c1c,
+                rail: 0x181818,
+                ink: 0xfafafa,
+                muted: 0xa3a3a3,
+                border: 0x333333,
+                selected: 0x262626,
+                primary: 0xe5e5e5,
+                on_primary: 0x171717,
+            }
         } else {
-            Self { page: 0xffffff, rail: 0xf5f5f5, ink: 0x171717, muted: 0x737373,
-                border: 0xe5e5e5, selected: 0xebebeb, primary: 0x171717, on_primary: 0xfafafa }
+            Self {
+                page: 0xffffff,
+                rail: 0xf5f5f5,
+                ink: 0x171717,
+                muted: 0x737373,
+                border: 0xe5e5e5,
+                selected: 0xebebeb,
+                primary: 0x171717,
+                on_primary: 0xfafafa,
+            }
         }
     }
 }
 
 /// Narrow windows keep the document usable instead of shrinking it behind a fixed rail.
 pub fn sidebar_width(width: f32) -> f32 {
-    if width >= 1000. { 224. } else if width >= 760. { 184. } else { 0. }
+    if width >= 1000. {
+        224.
+    } else if width >= 760. {
+        184.
+    } else {
+        0.
+    }
 }
 
 #[cfg(test)]
