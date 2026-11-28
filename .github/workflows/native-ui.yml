@@ -64,8 +64,7 @@ jobs:
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
-          cargo build --locked -p holonomy-native --features native-ui
-          cargo build --locked -p holonomy-gui --bin holonomy-gui
+          cargo build --locked -p holonomy-native -p holonomy-gui --bin holonomy-native --bin holonomy-gui --features holonomy-native/native-ui
       - name: Exercise actual native input, encrypted save and reopen under Xvfb
         if: runner.os == 'Linux'
         shell: bash
