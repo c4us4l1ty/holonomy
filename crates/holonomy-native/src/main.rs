@@ -778,23 +778,110 @@ impl Render for NativeHome {
                 } else {
                     self.status.clone()
                 };
-                body = body.w_full().max_w(px(design::FORM_WIDTH + 48.)).mx_auto().justify_center()
-                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("ENCRYPTED DOCUMENT"))
-                    .child(div().text_size(px(28.)).child(if self.create { "Make space for a new idea." } else { "Welcome back." }))
-                    .child(div().text_size(px(13.)).text_color(rgb(muted)).child(if self.create { "Choose a location and a strong passphrase." } else { "Your document stays private. Unlock it to begin." }))
-                    .child(div().mt_4().text_size(px(12.)).child("Document location"))
-                    .child(field("path", if self.path.is_empty() { "/home/you/Documents/notes.wavefunction".into() } else { self.path.clone() }, self.editing_path && !busy, palette)
-                        .on_click(cx.listener(|this,_,_,cx| { if this.composition_ready() { this.editing_path = true; } cx.notify(); })))
-                    .child(div().text_size(px(12.)).child("Passphrase"))
-                    .child(field("passphrase", if self.passphrase.is_empty() { "Enter your passphrase".into() } else { "•".repeat(self.passphrase.chars().count().min(64)) }, !self.editing_path && !busy, palette)
-                        .on_click(cx.listener(|this,_,_,cx| { if this.composition_ready() { this.editing_path = false; } cx.notify(); })))
-                    .child(div().flex().justify_between().items_center().mt_2()
-                        .child(button("cancel", "Cancel").h(px(design::CONTROL_HEIGHT))
-                            .on_click(cx.listener(|this,_,_,cx| { this.cancel_unlock(); cx.notify(); })))
-                        .child(button("unlock", if busy { "Working securely…" } else if self.create { "Create document" } else { "Unlock document" })
-                            .h(px(design::CONTROL_HEIGHT)).px_4().bg(rgb(palette.primary)).text_color(rgb(palette.on_primary))
-                            .on_click(cx.listener(|this,_,_,cx| { this.unlock(); cx.notify(); }))))
-                    .child(div().text_size(px(11.)).text_color(rgb(muted)).child(form_hint));
+                body =
+                    body.w_full()
+                        .max_w(px(design::FORM_WIDTH + 48.))
+                        .mx_auto()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(muted))
+                                .child("ENCRYPTED DOCUMENT"),
+                        )
+                        .child(div().text_size(px(28.)).child(if self.create {
+                            "Make space for a new idea."
+                        } else {
+                            "Welcome back."
+                        }))
+                        .child(div().text_size(px(13.)).text_color(rgb(muted)).child(
+                            if self.create {
+                                "Choose a location and a strong passphrase."
+                            } else {
+                                "Your document stays private. Unlock it to begin."
+                            },
+                        ))
+                        .child(div().mt_4().text_size(px(12.)).child("Document location"))
+                        .child(
+                            field(
+                                "path",
+                                if self.path.is_empty() {
+                                    "/home/you/Documents/notes.wavefunction".into()
+                                } else {
+                                    self.path.clone()
+                                },
+                                self.editing_path && !busy,
+                                palette,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.composition_ready() {
+                                    this.editing_path = true;
+                                }
+                                cx.notify();
+                            })),
+                        )
+                        .child(div().text_size(px(12.)).child("Passphrase"))
+                        .child(
+                            field(
+                                "passphrase",
+                                if self.passphrase.is_empty() {
+                                    "Enter your passphrase".into()
+                                } else {
+                                    "•".repeat(self.passphrase.chars().count().min(64))
+                                },
+                                !self.editing_path && !busy,
+                                palette,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.composition_ready() {
+                                    this.editing_path = false;
+                                }
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .mt_2()
+                                .child(
+                                    button("cancel", "Cancel")
+                                        .h(px(design::CONTROL_HEIGHT))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cancel_unlock();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    button(
+                                        "unlock",
+                                        if busy {
+                                            "Working securely…"
+                                        } else if self.create {
+                                            "Create document"
+                                        } else {
+                                            "Unlock document"
+                                        },
+                                    )
+                                    .h(px(design::CONTROL_HEIGHT))
+                                    .px_4()
+                                    .bg(rgb(palette.primary))
+                                    .text_color(rgb(palette.on_primary))
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.unlock();
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(muted))
+                                .child(form_hint),
+                        );
             }
             Screen::Editor | Screen::Find | Screen::Bookmark => {
                 let title = self
