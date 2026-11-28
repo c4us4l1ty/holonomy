@@ -1757,13 +1757,16 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
-                            .child(button("rail-collapse", "").w(px(28.)).child(chrome::icon(5, ink)).on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.sidebar_hidden = true;
-                                    this.sidebar_forced = false;
-                                    cx.notify();
-                                },
-                            ))),
+                            .child(
+                                button("rail-collapse", "")
+                                    .w(px(28.))
+                                    .child(chrome::icon(5, ink))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar_hidden = true;
+                                        this.sidebar_forced = false;
+                                        cx.notify();
+                                    })),
+                            ),
                     )
                     .child(
                         button(
@@ -1846,9 +1849,10 @@ impl Render for NativeHome {
                         .items_center()
                         .justify_between()
                         .child(
-                            button("toggle-sidebar", "").w(px(28.)).child(chrome::icon(5, ink))
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
+                            button("toggle-sidebar", "")
+                                .w(px(28.))
+                                .child(chrome::icon(5, ink))
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     if design::sidebar_width(f32::from(
                                         window.viewport_size().width,
                                     )) == 0.
@@ -1860,8 +1864,7 @@ impl Render for NativeHome {
                                         this.sidebar_forced = false;
                                     }
                                     cx.notify();
-                                },
-                            )),
+                                })),
                         )
                         .child(
                             button("workspace-home", "Holonomy  ›").on_click(cx.listener(
@@ -1913,39 +1916,48 @@ impl Render for NativeHome {
                                         cx.notify();
                                     },
                                 )))
-                                .child(button("header-view", "").w(px(28.)).child(chrome::icon(4, ink)).on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.home_menu = if this.home_menu == Some(home::Menu::View)
-                                        {
-                                            None
-                                        } else {
-                                            Some(home::Menu::View)
-                                        };
-                                        cx.notify();
-                                    },
-                                )))
-                                .child(button("header-search", "").w(px(28.)).child(chrome::icon(3, ink)).on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        if this.composition_ready() {
-                                            this.search_open = true;
-                                            this.folder_create = false;
-                                            this.library_filter.clear();
-                                            this.library_selection = 0;
-                                        }
-                                        cx.notify();
-                                    },
-                                )))
-                                .child(button("header-more", "").w(px(28.)).child(chrome::icon(6, ink)).on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.home_menu = if this.home_menu == Some(home::Menu::More)
-                                        {
-                                            None
-                                        } else {
-                                            Some(home::Menu::More)
-                                        };
-                                        cx.notify();
-                                    },
-                                ))),
+                                .child(
+                                    button("header-view", "")
+                                        .w(px(28.))
+                                        .child(chrome::icon(4, ink))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.home_menu =
+                                                if this.home_menu == Some(home::Menu::View) {
+                                                    None
+                                                } else {
+                                                    Some(home::Menu::View)
+                                                };
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    button("header-search", "")
+                                        .w(px(28.))
+                                        .child(chrome::icon(3, ink))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if this.composition_ready() {
+                                                this.search_open = true;
+                                                this.folder_create = false;
+                                                this.library_filter.clear();
+                                                this.library_selection = 0;
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    button("header-more", "")
+                                        .w(px(28.))
+                                        .child(chrome::icon(6, ink))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.home_menu =
+                                                if this.home_menu == Some(home::Menu::More) {
+                                                    None
+                                                } else {
+                                                    Some(home::Menu::More)
+                                                };
+                                            cx.notify();
+                                        })),
+                                ),
                         )
                         .child(chrome::controls(ink, cx)),
                 )

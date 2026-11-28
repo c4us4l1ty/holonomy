@@ -20,10 +20,14 @@ pub fn cards(owner: &NativeHome, cx: &mut Context<NativeHome>) -> gpui::Div {
         cards = cards.flex_col();
     }
     for (index, entry) in entries.into_iter().enumerate() {
-        let name = if entry.directory { entry.path.file_name() } else { entry.path.file_stem() }
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let name = if entry.directory {
+            entry.path.file_name()
+        } else {
+            entry.path.file_stem()
+        }
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
         let mut card = div()
             .id(("home-card", index))
             .cursor_pointer()
