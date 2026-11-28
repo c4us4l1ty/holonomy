@@ -1,37 +1,33 @@
 holonomy — experimental, not production-ready
 
-This is an UNSIGNED, UNPUBLISHED-BY-DEFAULT release archive bundle for:
-  - x86_64 Linux (glibc, X11 GUI + TUI/CLI)
-  - aarch64 macOS (Cocoa GUI + TUI/CLI, unnotarized)
-  - x86_64 Windows (Win32 GUI + TUI/CLI)
+This archive is unsigned. It is not a production release or installer. Read the
+bundled README.md and docs/GATES.md in the source checkout before relying on it.
+Do not use sensitive or irreplaceable documents.
 
-Before you rely on it in any way, read the "What is real, and what is not" table in the
-bundled README.md (share/doc/holonomy/README.md after unpacking). In particular:
+The first production target is being planned for Linux x86_64, but no Linux
+configuration is production-qualified yet. macOS and Windows archives, when
+provided, are experimental; Windows currently refuses encrypted editing because
+its storage durability primitives are not qualified.
 
-  * Three laws in docs/GATES.md are gated (L-1 lifetime scale, L-2 eyes-only residency,
-    L-8 one geometry); the remaining laws (L-3..L-7, L-9 cross-machine, L-10) remain open
-    ("spec") pending hardware power-loss, OS/hardware wipe, and multi-machine qualification.
-  * Unsaved edits are lost until a save commits. Ctrl+S, the 1.5 s autosave and quit all
-    seal what is open, but a crash before a save loses the open buffer.
-  * One document, one window, one caret. OpenType GDEF/GSUB/GPOS shaping and UAX #9 BiDi
-    run over embedded Inter & JetBrains Mono fonts; platform IME composition remains open.
-  * The emergency wipe reports the reaper's own measured outcome and exits non-zero when
-    it cannot confirm one. That is a receipt for the arenas the editor registered, not proof
-    of complete plaintext coverage.
+Important limits:
+  * Four laws (L-1, L-2, L-8, L-9) are gated under their documented test scopes;
+    L-3 through L-7 and L-10 remain open. See docs/GATES.md for exact claims.
+  * The default desktop is GPUI. It does not promise autosave: use Ctrl+S and
+    verify success. See share/doc/holonomy/docs/LINUX-SAVE-RECOVERY.md in Linux
+    bundles for refusal and recovery guidance. Unsaved edits can be lost on crash.
+    A successful software
+    test does not prove physical power-loss safety.
+  * A reported emergency wipe covers registered arenas, not every plaintext
+    copy, GPU surface, OS or external application. Full wipe qualification is open.
+  * IME, accessibility and native desktop feature parity remain incomplete.
+  * Deleted content remains encrypted in history until explicit compaction.
 
-Run it:
-  ./bin/holonomy notes.wavefunction        # TUI editor (Ctrl+R history, Ctrl+G panel, Ctrl+S save)
-  ./bin/holonomy-gui notes.wavefunction    # GPUI desktop (keep holonomy-native beside this launcher)
+Run it (keep holonomy-native beside holonomy-gui):
+  ./bin/holonomy-gui notes.wavefunction    # experimental GPUI desktop
+  ./bin/holonomy notes.wavefunction        # terminal editor
   ./bin/holonomy verify notes.wavefunction
   ./bin/holonomy compact src.wavefunction dst.wavefunction
 
-The binaries are not signed or notarized: verify the .sha256 file against how you obtained
-the archive.
-
+SHA-256 checksums detect corruption but are not independent signatures. The old
+pixel frontend requires explicit HOLONOMY_LEGACY_GUI=1.
 Project: https://github.com/c4us4l1ty/holonomy — licence MIT OR Apache-2.0.
-
-DESKTOP MIGRATION NOTICE: the desktop launcher now starts the bundled GPUI companion.
-The old pixel renderer requires explicit HOLONOMY_LEGACY_GUI=1. GPUI is experimental:
-Windows encrypted persistence is refused, full IME/accessibility/feature parity and
-GPU/suspend/USB qualification remain open. No autosave guarantee is made for GPUI;
-use Ctrl+S and verify saves. Use test documents until the documented gates close.

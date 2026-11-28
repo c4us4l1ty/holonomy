@@ -759,6 +759,26 @@ mod tests {
     }
 
     #[test]
+    fn reopening_after_abandoning_unsaved_edits_preserves_last_witness() {
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session
+            .apply(Intent::Type("committed text".into()))
+            .unwrap();
+        session.save().unwrap();
+        session
+            .apply(Intent::Type(" unsaved suffix".into()))
+            .unwrap();
+        assert!(session.dirty());
+        // Dropping a session is not a crash simulation, but does test that no implicit
+        // close-time save turns an uncommitted buffer into a claimed durable witness.
+        drop(session);
+        let mut reopened = Session::open(&fixture.0, b"native fixture passphrase").unwrap();
+        assert_eq!(reopened.editor.frame().unwrap().text(), "committed text");
+        reopened.verify().unwrap();
+    }
+
+    #[test]
     fn repeated_wipe_preserves_the_entire_verification_result() {
         let fixture = Fixture::new();
         let mut session = fixture.session();

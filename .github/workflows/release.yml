@@ -73,6 +73,8 @@ jobs:
           install -m 755 target/release/holonomy-native "${root}/bin/holonomy-native"
           cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY.md README.md "${root}/share/doc/holonomy/"
           cp LICENSES/*.txt "${root}/share/doc/holonomy/LICENSES/"
+          mkdir -p "${root}/share/doc/holonomy/docs"
+          cp docs/LINUX-SAVE-RECOVERY.md docs/LINUX-RELEASE-PLAN.md "${root}/share/doc/holonomy/docs/"
           cp packaging/README-RELEASE.txt "${root}/README-RELEASE.txt"
           tar --owner=0 --group=0 --numeric-owner --sort=name -C target/package \
             -czf "target/package/${STEM}.tar.gz" "${STEM}"

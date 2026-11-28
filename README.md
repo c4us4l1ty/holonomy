@@ -149,6 +149,12 @@ security panel — the part you actually run, as
 law reads `spec` in `GATES.md`; that column is the honest one and nothing is promoted to `gated`
 without a measurement in CI.
 
+## Linux-first release plan
+
+The first production target is Linux x86_64 with GPUI; no configuration is
+production-qualified yet. See [`docs/LINUX-RELEASE-PLAN.md`](docs/LINUX-RELEASE-PLAN.md)
+for the release checklist, outstanding decisions and evidence required.
+
 ## What works today
 
 **Experimental, not production-ready.** Do not rely on the current build for sensitive or
@@ -196,9 +202,10 @@ verification` when a ghost survived — and **exits 1**. That is a receipt about
 editor registered, not a proof of complete coverage; see the row below.
 
 A **seal** is the unit of durability: when the 16 KiB buffer fills, its bytes are appended to the
-world-line and witnessed, so text is on disk once it has sealed. The open buffer and any structural
-edits (mid-segment insertions, cuts, or post-save undos) are committed by `Ctrl+S`, by an autosave
-1.5 s after typing stops, and on quit (`RECORD_MANIFEST` + Witness v2, OQ-29 / OQ-30).
+world-line and witnessed, so text is on disk once it has sealed. In the legacy editor, the open buffer and structural edits (mid-segment insertions, cuts, or
+post-save undos) are committed by `Ctrl+S`, by an autosave 1.5 s after typing stops, and on quit
+(`RECORD_MANIFEST` + Witness v2, OQ-29 / OQ-30). The default GPUI desktop makes **no autosave
+guarantee**: use `Ctrl+S` and confirm success; save-before-close can refuse to close.
 
 **Deleting text removes it from the document; only compaction removes its ciphertext from the
 log.** An append-only world-line keeps prior segments by design (OQ-14): saving after a deletion

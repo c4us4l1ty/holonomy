@@ -63,12 +63,13 @@ held=true
 xdotool key ctrl+q
 sleep 1
 kill -0 "$app_pid"
-xdotool getwindowname "$window" | grep -F 'native-smoke.wavefunction'
+xdotool getwindowname "$window" | grep -F 'SAVE FAILED'
 mv "$held_path" "$HOLONOMY_NATIVE_SMOKE_PATH"
 held=false
 xdotool key ctrl+q
 sleep 1
 kill -0 "$app_pid"
+xdotool getwindowname "$window" | grep -F 'SAVE FAILED'
 import -window "$window" native-refused-save.png
 # Only an explicit emergency wipe discards the pending text. Reopen below must still see the
 # previous committed version, never a partial or silently advanced save.
@@ -86,6 +87,32 @@ timeout 20 tail --pid="$app_pid" -f /dev/null
 wait "$app_pid"
 app_pid=''
 fixture verify
+
+# Reopen the actual GPUI binary, add an unsaved suffix and kill the process abruptly.
+# An independent authenticated reopen must recover the earlier explicitly saved text,
+# not the uncommitted suffix. This is a process-crash test, not a power-cut test.
+target/debug/holonomy-gui "$HOLONOMY_NATIVE_SMOKE_PATH" &
+app_pid=$!
+window=$(timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' | head -1)
+xdotool windowfocus --sync "$window"
+xdotool key Tab
+xdotool type --clearmodifiers --delay 35 'native smoke passphrase'
+xdotool key Return
+timeout 45 xdotool search --sync --onlyvisible --name 'native-smoke.wavefunction' >/dev/null
+xdotool key ctrl+End
+xdotool type --clearmodifiers --delay 35 ' unsaved after reopen'
+# Require the editor to report pending edits before killing it; no save or close is requested.
+timeout 45 xdotool search --sync --onlyvisible --name 'native-smoke.wavefunction.*unsaved' >/dev/null
+kill -KILL "$app_pid"
+# wait must observe SIGKILL, not an earlier exit or a clean shutdown.
+set +e
+wait "$app_pid"
+crash_status=$?
+set -e
+[[ "$crash_status" -eq 137 ]]
+app_pid=''
+fixture verify
+echo "HOLONOMY_NATIVE_CRASH_RECOVERY committed_text=verified unsaved_suffix=absent signal=SIGKILL physical_power_loss=not_tested"
 
 # At 200%, exercise REAL calibrated create, not the cheap test key schedule. A theme
 # repaint while the title is still Working proves the window processes input during KDF.
