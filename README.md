@@ -1,3 +1,43 @@
+## One-command Linux desktop (no source build)
+
+```sh
+git pull origin main
+./holonomy notes.wavefunction
+```
+
+Or run `./holonomy` for Home. This downloads the source-matched **experimental**
+Linux x86_64 desktop once, verifies its SHA-256, caches it under `target/`, and runs
+GPUI. Subsequent launches use the cache: no Cargo, GCC, compiler settings, GitHub
+login, or development packages. Python 3 and Git are required for this checkout
+launcher; standard desktop graphics libraries/drivers are still required. It never
+runs sudo, installs system packages, or silently switches to the old renderer.
+
+Publication is gated on encrypted runtime tests of the **exact downloadable binaries**
+in Fedora 44 and 45 containers, at 100% and 200%, using X11/Xvfb and software Vulkan.
+This is a concrete compatibility test, **not a guarantee for every GPU, Wayland session,
+Fedora variant, or future system update**. Test logs record installed package versions.
+The fixture harness runs without Cargo or GCC in those Fedora containers and is never
+included in the downloadable bundle. Real-monitor visual approval remains outstanding.
+
+The first download needs internet; cached launches do not. A new desktop-source revision
+needs its matching bundle; if qualification/publication has not finished, the launcher
+reports this instead of compiling, choosing an older version, or changing toolchains.
+Documentation-only pulls reuse the previous matching desktop build. Checksums detect
+corruption but are not independent cryptographic signatures. Use test documents.
+
+On a fresh checkout the bootstrap also creates `target/release/holonomy-gui` and its
+companion as links, restoring the familiar command:
+
+```sh
+./target/release/holonomy-gui notes.wavefunction
+```
+
+It does not overwrite existing source-built executables or unrelated links. If you
+already have those, **use `./holonomy notes.wavefunction`** to reliably select the
+source-matched downloaded build. The source-build helper below remains available,
+but is **not** required by the prebuilt launcher. Your old Cargo compiler overrides
+have no effect on downloaded builds.
+
 ## Desktop UI: GPUI
 
 The normal desktop entry points (`holonomy-gui` and `holonomy gui`) now launch the
@@ -8,7 +48,7 @@ and its GPUI companion, or use:
 scripts/run-desktop.sh /absolute/path/notes.wavefunction
 ```
 
-### After pulling main
+### Building from source (optional)
 
 Rust/Cargo via rustup is required; `rust-toolchain.toml` selects the pinned toolchain.
 On Ubuntu/Debian, install the native build dependencies once:

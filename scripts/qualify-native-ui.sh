@@ -2,7 +2,14 @@
 # Run under Xvfb with the binaries already built. Test-only fixture uses the debug key schedule.
 set -euxo pipefail
 : "${HOLONOMY_NATIVE_SMOKE_PATH:?explicit smoke fixture path required}"
-cargo test --locked -p holonomy-native --lib ui_smoke_fixture::create -- --exact --ignored
+fixture() {
+  if [[ -n "${HOLONOMY_NATIVE_FIXTURE_BIN:-}" ]]; then
+    "$HOLONOMY_NATIVE_FIXTURE_BIN" "ui_smoke_fixture::$1" --exact --ignored
+  else
+    cargo test --locked -p holonomy-native --lib "ui_smoke_fixture::$1" -- --exact --ignored
+  fi
+}
+fixture create
 app_pid=''
 held_path="${HOLONOMY_NATIVE_SMOKE_PATH}.held-$$"
 held=false
@@ -71,4 +78,4 @@ xdotool key ctrl+q
 timeout 20 tail --pid="$app_pid" -f /dev/null
 wait "$app_pid"
 app_pid=''
-cargo test --locked -p holonomy-native --lib ui_smoke_fixture::verify -- --exact --ignored
+fixture verify

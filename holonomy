@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# No build, no compiler configuration, no automatic package installation.
+exec python3 "$(dirname "$0")/scripts/desktop-launch.py" "$@"
