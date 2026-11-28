@@ -3,42 +3,132 @@
 use super::{button, chrome, design, NativeHome};
 use gpui::{div, prelude::*, px, rgb, AnyElement, Context, Window};
 
-const CATEGORIES: [&str; 6] = ["General", "Appearance", "Shortcuts", "Documents", "Privacy", "About"];
+const CATEGORIES: [&str; 6] = [
+    "General",
+    "Appearance",
+    "Shortcuts",
+    "Documents",
+    "Privacy",
+    "About",
+];
 
-fn row(title: &str, description: &str, control: impl IntoElement, palette: design::Palette) -> gpui::Div {
-    div().w_full().flex().flex_wrap().items_center().justify_between().gap_3().p_4()
-        .border_b_1().border_color(rgb(palette.border))
-        .child(div().flex_1().min_w(px(160.)).flex().flex_col().gap_1()
-            .child(title.to_string())
-            .child(div().text_size(px(12.)).text_color(rgb(palette.muted)).child(description.to_string())))
+fn row(
+    title: &str,
+    description: &str,
+    control: impl IntoElement,
+    palette: design::Palette,
+) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .p_4()
+        .border_b_1()
+        .border_color(rgb(palette.border))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(160.))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(title.to_string())
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(palette.muted))
+                        .child(description.to_string()),
+                ),
+        )
         .child(control)
 }
 
 fn group(title: &str, rows: Vec<gpui::Div>, palette: design::Palette) -> gpui::Div {
-    div().w_full().flex().flex_col().gap_2().mb_6()
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .mb_6()
         .child(div().px_1().text_size(px(13.)).child(title.to_string()))
-        .child(div().rounded_xl().overflow_hidden().bg(rgb(palette.rail))
-            .border_1().border_color(rgb(palette.border)).children(rows))
+        .child(
+            div()
+                .rounded_xl()
+                .overflow_hidden()
+                .bg(rgb(palette.rail))
+                .border_1()
+                .border_color(rgb(palette.border))
+                .children(rows),
+        )
 }
 
-pub fn render(owner: &mut NativeHome, window: &mut Window, cx: &mut Context<NativeHome>) -> AnyElement {
+pub fn render(
+    owner: &mut NativeHome,
+    window: &mut Window,
+    cx: &mut Context<NativeHome>,
+) -> AnyElement {
     let palette = design::Palette::new(owner.dark);
     let page = owner.settings_page.unwrap_or(0).min(CATEGORIES.len() - 1);
     let compact = f32::from(window.viewport_size().width) < 640.;
-    let mut rail = div().flex().flex_col().gap_1().p_3().w(px(224.)).h_full()
-        .flex_shrink_0().bg(rgb(palette.rail))
-        .child(button("settings-back", "<  Back").justify_start().on_click(cx.listener(|this, _, _, cx| this.close_settings(cx))))
+    let mut rail = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .w(px(224.))
+        .h_full()
+        .flex_shrink_0()
+        .bg(rgb(palette.rail))
+        .child(
+            button("settings-back", "<  Back")
+                .justify_start()
+                .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx))),
+        )
         .child(div().px_2().py_3().child("Settings"));
     for (index, label) in CATEGORIES.iter().enumerate() {
-        rail = rail.child(div().id(("settings-category", index)).cursor_pointer().px_3().py_2().rounded_md()
-            .bg(rgb(if page == index { palette.selected } else { palette.rail })).child(*label)
-            .on_click(cx.listener(move |this, _, _, cx| { this.settings_page = Some(index); cx.notify(); })));
+        rail = rail.child(
+            div()
+                .id(("settings-category", index))
+                .cursor_pointer()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(if page == index {
+                    palette.selected
+                } else {
+                    palette.rail
+                }))
+                .child(*label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings_page = Some(index);
+                    cx.notify();
+                })),
+        );
     }
-    if compact { rail = rail.w_full().h_auto().flex_row().flex_wrap(); }
-    let mut column = div().w_full().max_w(px(660.)).mx_auto().flex().flex_col()
+    if compact {
+        rail = rail.w_full().h_auto().flex_row().flex_wrap();
+    }
+    let mut column = div()
+        .w_full()
+        .max_w(px(660.))
+        .mx_auto()
+        .flex()
+        .flex_col()
         .child(div().text_size(px(22.)).mb_6().child(CATEGORIES[page]));
     if let Some(error) = &owner.save_failure {
-        column = column.child(group("Save failed — document retained", vec![row("Changes are not confirmed durable", error, div().child("Return to document"), palette)], palette));
+        column = column.child(group(
+            "Save failed — document retained",
+            vec![row(
+                "Changes are not confirmed durable",
+                error,
+                div().child("Return to document"),
+                palette,
+            )],
+            palette,
+        ));
     }
     match page {
         0 => {
@@ -67,11 +157,52 @@ pub fn render(owner: &mut NativeHome, window: &mut Window, cx: &mut Context<Nati
             ], palette));
         }
         2 => {
-            let command = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
-            let rows = [("New document", "N"), ("Open document", "O"), ("Open / close Settings", ","), ("Close application (save guarded)", "Q"), ("Save document", "S"), ("Undo", "Z"), ("Redo", "Shift+Z"), ("Find in document", "F"), ("Bold / Italic / Underline", "B / I / U"), ("Toggle dark mode", "Shift+T"), ("Emergency wipe", "Shift+Escape")]
-                .into_iter().map(|(label, key)| row(label, "", div().px_3().py_1().rounded_md().border_1().border_color(rgb(palette.border)).child(format!("{command}  {key}")), palette)).collect();
-            column = column.child(group("App and documents", rows, palette))
-                .child(group("Navigation", vec![row("Return from Settings", "Restores the document or form you left, without closing it.", div().child("Escape"), palette)], palette));
+            let command = if cfg!(target_os = "macos") {
+                "Cmd"
+            } else {
+                "Ctrl"
+            };
+            let rows = [
+                ("New document", "N"),
+                ("Open document", "O"),
+                ("Open / close Settings", ","),
+                ("Close application (save guarded)", "Q"),
+                ("Save document", "S"),
+                ("Undo", "Z"),
+                ("Redo", "Shift+Z"),
+                ("Find in document", "F"),
+                ("Bold / Italic / Underline", "B / I / U"),
+                ("Toggle dark mode", "Shift+T"),
+                ("Emergency wipe", "Shift+Escape"),
+            ]
+            .into_iter()
+            .map(|(label, key)| {
+                row(
+                    label,
+                    "",
+                    div()
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .child(format!("{command}  {key}")),
+                    palette,
+                )
+            })
+            .collect();
+            column = column
+                .child(group("App and documents", rows, palette))
+                .child(group(
+                    "Navigation",
+                    vec![row(
+                        "Return from Settings",
+                        "Restores the document or form you left, without closing it.",
+                        div().child("Escape"),
+                        palette,
+                    )],
+                    palette,
+                ));
         }
         3 => {
             column = column.child(group("Folders", vec![
@@ -92,20 +223,88 @@ pub fn render(owner: &mut NativeHome, window: &mut Window, cx: &mut Context<Nati
             ], palette));
         }
         _ => {
-            column = column.child(div().flex().flex_col().items_center().gap_3().py_6()
-                .child(div().text_size(px(32.)).child("Holonomy"))
-                .child(format!("Version {} · Experimental", env!("CARGO_PKG_VERSION")))
-                .child(div().text_color(rgb(palette.muted)).child("Local encrypted documents. Native vector text.")))
-                .child(group("Project", vec![row("Project page", "github.com/c4us4l1ty/holonomy", div().child("Holonomy"), palette), row("Design attribution", "Quiet MD · MIT. See bundled THIRD-PARTY-NOTICES.txt.", div().child("Open source"), palette)], palette));
+            column = column
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_3()
+                        .py_6()
+                        .child(div().text_size(px(32.)).child("Holonomy"))
+                        .child(format!(
+                            "Version {} · Experimental",
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .child(
+                            div()
+                                .text_color(rgb(palette.muted))
+                                .child("Local encrypted documents. Native vector text."),
+                        ),
+                )
+                .child(group(
+                    "Project",
+                    vec![
+                        row(
+                            "Project page",
+                            "github.com/c4us4l1ty/holonomy",
+                            div().child("Holonomy"),
+                            palette,
+                        ),
+                        row(
+                            "Design attribution",
+                            "Quiet MD · MIT. See bundled THIRD-PARTY-NOTICES.txt.",
+                            div().child("Open source"),
+                            palette,
+                        ),
+                    ],
+                    palette,
+                ));
         }
     }
-    let content = div().flex_1().min_w_0().min_h_0().h_full().flex().flex_col()
-        .child(div().h(px(40.)).flex_shrink_0().flex().items_center()
-            .child(div().flex_1().h_full().on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move()))
-            .child(chrome::controls(palette.ink, cx)))
-        .child(div().id("settings-scroll").flex_1().min_h_0().overflow_y_scroll().px_6().py_4().child(column));
-    let mut root = div().size_full().flex().bg(rgb(palette.page)).text_color(rgb(palette.ink)).text_size(px(14.))
-        .track_focus(&owner.focus).on_key_down(cx.listener(NativeHome::key));
-    if compact { root = root.flex_col(); }
+    let content = div()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(40.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            window.start_window_move()
+                        }),
+                )
+                .child(chrome::controls(palette.ink, cx)),
+        )
+        .child(
+            div()
+                .id("settings-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px_6()
+                .py_4()
+                .child(column),
+        );
+    let mut root = div()
+        .size_full()
+        .flex()
+        .bg(rgb(palette.page))
+        .text_color(rgb(palette.ink))
+        .text_size(px(14.))
+        .track_focus(&owner.focus)
+        .on_key_down(cx.listener(NativeHome::key));
+    if compact {
+        root = root.flex_col();
+    }
     root.child(rail).child(content).into_any_element()
 }

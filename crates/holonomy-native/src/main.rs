@@ -1,11 +1,11 @@
 //! Opt-in GPUI editor: native vector glyphs, with the existing encrypted session underneath.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod design;
 mod chrome;
+mod design;
+mod home;
 mod library;
 mod settings;
-mod home;
 
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgb, size, App, Application, Bounds, Context,
@@ -201,7 +201,9 @@ impl NativeHome {
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
-        if !composition_ready(&self.preedit, &mut self.status) { return; }
+        if !composition_ready(&self.preedit, &mut self.status) {
+            return;
+        }
         self.home_menu = None;
         self.search_open = false;
         self.folder_create = false;
@@ -504,7 +506,9 @@ impl NativeHome {
 
     fn wipe(&mut self, cx: &mut Context<Self>) {
         self.settings_page = None;
-        self.search_open = false; self.folder_create = false; self.home_menu = None;
+        self.search_open = false;
+        self.folder_create = false;
+        self.home_menu = None;
         self.library_filter.clear();
 
         let cancelled_worker = self.pending_unlock.take().is_some()
@@ -557,7 +561,11 @@ impl NativeHome {
             mods.control
         };
         if command && key == "," {
-            if self.settings_page.is_some() { self.close_settings(cx); } else { self.open_settings(cx); }
+            if self.settings_page.is_some() {
+                self.close_settings(cx);
+            } else {
+                self.open_settings(cx);
+            }
             cx.stop_propagation();
             cx.notify();
             return;
@@ -575,47 +583,90 @@ impl NativeHome {
         }
         if command && key == "j" && self.settings_page.is_none() {
             if self.composition_ready() {
-                self.search_open = true; self.folder_create = false;
-                self.library_filter.clear(); self.library_selection = 0;
+                self.search_open = true;
+                self.folder_create = false;
+                self.library_filter.clear();
+                self.library_selection = 0;
             }
-            cx.stop_propagation(); cx.notify(); return;
+            cx.stop_propagation();
+            cx.notify();
+            return;
         }
         if key == "escape" && self.home_menu.is_some() {
-            self.home_menu = None; cx.stop_propagation(); cx.notify(); return;
+            self.home_menu = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
         }
         if self.search_open || self.folder_create {
             if !self.preedit.is_empty() {
-                if command { self.composition_ready(); cx.stop_propagation(); cx.notify(); }
+                if command {
+                    self.composition_ready();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
                 return;
             }
             if command && key == "v" {
                 if let Some(item) = cx.read_from_clipboard() {
-                    if let Some(mut text) = item.text() { self.commit_text(&text); text.zeroize(); }
+                    if let Some(mut text) = item.text() {
+                        self.commit_text(&text);
+                        text.zeroize();
+                    }
                 }
-                cx.stop_propagation(); cx.notify(); return;
+                cx.stop_propagation();
+                cx.notify();
+                return;
             }
             match key {
-                "escape" => { self.search_open = false; self.folder_create = false; self.library_filter.clear(); self.preedit.zeroize(); }
-                "backspace" if self.preedit.is_empty() => { self.library_filter.pop(); self.library_selection = 0; }
+                "escape" => {
+                    self.search_open = false;
+                    self.folder_create = false;
+                    self.library_filter.clear();
+                    self.preedit.zeroize();
+                }
+                "backspace" if self.preedit.is_empty() => {
+                    self.library_filter.pop();
+                    self.library_selection = 0;
+                }
                 "up" => self.library_selection = self.library_selection.saturating_sub(1),
                 "down" => self.library_selection = self.library_selection.saturating_add(1),
                 "enter" if self.preedit.is_empty() => {
                     if self.folder_create {
                         match self.library.create_folder(&self.library_filter) {
-                            Ok(()) => { self.folder_create = false; self.library_filter.clear(); self.status = "Folder created.".into(); }
+                            Ok(()) => {
+                                self.folder_create = false;
+                                self.library_filter.clear();
+                                self.status = "Folder created.".into();
+                            }
                             Err(error) => self.status = error.to_string(),
                         }
                     } else {
-                        let entries = self.library.visible_entries(&self.library_filter, self.hide_hidden, self.sort_descending);
-                        if let Some(entry) = entries.get(self.library_selection.min(entries.len().min(20).saturating_sub(1))).cloned() {
-                            self.search_open = false; self.library_filter.clear(); self.open_library_entry(&entry);
+                        let entries = self.library.visible_entries(
+                            &self.library_filter,
+                            self.hide_hidden,
+                            self.sort_descending,
+                        );
+                        if let Some(entry) = entries
+                            .get(
+                                self.library_selection
+                                    .min(entries.len().min(20).saturating_sub(1)),
+                            )
+                            .cloned()
+                        {
+                            self.search_open = false;
+                            self.library_filter.clear();
+                            self.open_library_entry(&entry);
                         }
                     }
                 }
                 _ => {}
             }
-            if command || matches!(key, "escape" | "backspace" | "up" | "down" | "enter") { cx.stop_propagation(); }
-            cx.notify(); return;
+            if command || matches!(key, "escape" | "backspace" | "up" | "down" | "enter") {
+                cx.stop_propagation();
+            }
+            cx.notify();
+            return;
         }
         if self.settings_page.is_some() {
             if key == "escape" {
@@ -834,12 +885,16 @@ impl NativeHome {
     }
 
     fn commit_text(&mut self, text: &str) {
-        if self.settings_page.is_some() { return; }
+        if self.settings_page.is_some() {
+            return;
+        }
         if self.search_open || self.folder_create {
             if self.library_filter.len().saturating_add(text.len()) <= 255 {
                 self.library_filter.push_str(text);
                 self.library_selection = 0;
-            } else { self.status = "Search/folder input exceeds 255 bytes.".into(); }
+            } else {
+                self.status = "Search/folder input exceeds 255 bytes.".into();
+            }
             return;
         }
 
@@ -975,7 +1030,11 @@ impl Render for NativeHome {
             },
         ));
         if self.settings_page.is_some() {
-            window.set_window_title(if self.save_failure.is_some() { "Holonomy Settings · SAVE FAILED" } else { "Holonomy Settings" });
+            window.set_window_title(if self.save_failure.is_some() {
+                "Holonomy Settings · SAVE FAILED"
+            } else {
+                "Holonomy Settings"
+            });
             return settings::render(self, window, cx);
         }
         let palette = design::Palette::new(self.dark);
@@ -1623,7 +1682,12 @@ impl Render for NativeHome {
             .flex()
             .flex_col()
             .gap_1();
-        for (index, entry) in self.library.visible_entries("", self.hide_hidden, self.sort_descending).iter().enumerate() {
+        for (index, entry) in self
+            .library
+            .visible_entries("", self.hide_hidden, self.sort_descending)
+            .iter()
+            .enumerate()
+        {
             let entry = entry.clone();
             let selected = self
                 .session
@@ -1669,33 +1733,99 @@ impl Render for NativeHome {
             );
         }
         if sidebar_width > 0. {
-            shell = shell.child(div().w(px(sidebar_width)).h_full().flex_shrink_0().flex().flex_col()
-                .bg(rgb(palette.rail)).px_3().py_2().gap_1()
-                .child(div().h(px(32.)).flex().items_center().justify_end().gap_2()
-                    .child(button("rail-new", "+").on_click(cx.listener(|this, _, _, cx| {
-                        this.home_menu = Some(home::Menu::New); cx.notify();
-                    })))
-                    .child(button("rail-collapse", "|").on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_hidden = true; this.sidebar_forced = false; cx.notify();
-                    }))))
-                .child(button("rail-home", self.library.folder.file_name().unwrap_or_default().to_string_lossy().into_owned())
-                    .justify_start().h(px(30.)).bg(rgb(palette.selected)).on_click(cx.listener(|this, _, _, cx| {
-                        if this.session.is_some() { this.home(); } else { this.cancel_unlock(); }
-                        cx.notify();
-                    })))
-                .child(div().h(px(24.)).flex().items_center().justify_between()
-                    .child(button("library-up", "Up").on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(parent) = this.library.folder.parent().map(Path::to_path_buf) { this.library.navigate(&parent); }
-                        cx.notify();
-                    })))
-                    .child(button("library-refresh", "Refresh").on_click(cx.listener(|this, _, _, cx| {
-                        this.library.refresh(); cx.notify();
-                    }))))
-                .child(library_list)
-                .child(div().text_size(px(11.)).text_color(rgb(muted)).child(self.library.notice.clone()))
-                .child(button("rail-settings", "Settings").justify_start().on_click(cx.listener(|this, _, _, cx| {
-                    this.open_settings(cx); cx.notify();
-                }))));
+            shell = shell.child(
+                div()
+                    .w(px(sidebar_width))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(palette.rail))
+                    .px_3()
+                    .py_2()
+                    .gap_1()
+                    .child(
+                        div()
+                            .h(px(32.))
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(button("rail-new", "+").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.home_menu = Some(home::Menu::New);
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("rail-collapse", "|").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.sidebar_hidden = true;
+                                    this.sidebar_forced = false;
+                                    cx.notify();
+                                },
+                            ))),
+                    )
+                    .child(
+                        button(
+                            "rail-home",
+                            self.library
+                                .folder
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
+                        .justify_start()
+                        .h(px(30.))
+                        .bg(rgb(palette.selected))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.session.is_some() {
+                                this.home();
+                            } else {
+                                this.cancel_unlock();
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        div()
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(button("library-up", "Up").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(parent) =
+                                        this.library.folder.parent().map(Path::to_path_buf)
+                                    {
+                                        this.library.navigate(&parent);
+                                    }
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("library-refresh", "Refresh").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.library.refresh();
+                                    cx.notify();
+                                },
+                            ))),
+                    )
+                    .child(library_list)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(muted))
+                            .child(self.library.notice.clone()),
+                    )
+                    .child(
+                        button("rail-settings", "Settings")
+                            .justify_start()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_settings(cx);
+                                cx.notify();
+                            })),
+                    ),
+            );
         }
         let workspace = shell.child(
             div()
@@ -1718,11 +1848,7 @@ impl Render for NativeHome {
                         .child(
                             button(
                                 "toggle-sidebar",
-                                if sidebar_width > 0. {
-                                    "|"
-                                } else {
-                                    "|>"
-                                },
+                                if sidebar_width > 0. { "|" } else { "|>" },
                             )
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
@@ -1755,7 +1881,9 @@ impl Render for NativeHome {
                         .child(
                             div()
                                 .flex_1()
-                                .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+                                .on_mouse_down(MouseButton::Left, |_, window, _| {
+                                    window.start_window_move()
+                                })
                                 .min_w_0()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
@@ -1779,20 +1907,48 @@ impl Render for NativeHome {
                                 .gap_2()
                                 .child(button("header-new", "+").on_click(cx.listener(
                                     |this, _, _, cx| {
-                                        this.home_menu = if this.home_menu == Some(home::Menu::New) { None } else { Some(home::Menu::New) };
+                                        this.home_menu = if this.home_menu == Some(home::Menu::New)
+                                        {
+                                            None
+                                        } else {
+                                            Some(home::Menu::New)
+                                        };
                                         cx.notify();
                                     },
                                 )))
-                                .child(button("header-view", "View").on_click(cx.listener(|this, _, _, cx| {
-                                    this.home_menu = if this.home_menu == Some(home::Menu::View) { None } else { Some(home::Menu::View) }; cx.notify();
-                                })))
-                                .child(button("header-search", "Search").on_click(cx.listener(|this, _, _, cx| {
-                                    if this.composition_ready() { this.search_open = true; this.folder_create = false; this.library_filter.clear(); this.library_selection = 0; }
-                                    cx.notify();
-                                })))
-                                .child(button("header-more", "...").on_click(cx.listener(|this, _, _, cx| {
-                                    this.home_menu = if this.home_menu == Some(home::Menu::More) { None } else { Some(home::Menu::More) }; cx.notify();
-                                })))
+                                .child(button("header-view", "View").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.home_menu = if this.home_menu == Some(home::Menu::View)
+                                        {
+                                            None
+                                        } else {
+                                            Some(home::Menu::View)
+                                        };
+                                        cx.notify();
+                                    },
+                                )))
+                                .child(button("header-search", "Search").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        if this.composition_ready() {
+                                            this.search_open = true;
+                                            this.folder_create = false;
+                                            this.library_filter.clear();
+                                            this.library_selection = 0;
+                                        }
+                                        cx.notify();
+                                    },
+                                )))
+                                .child(button("header-more", "...").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.home_menu = if this.home_menu == Some(home::Menu::More)
+                                        {
+                                            None
+                                        } else {
+                                            Some(home::Menu::More)
+                                        };
+                                        cx.notify();
+                                    },
+                                ))),
                         )
                         .child(chrome::controls(ink, cx)),
                 )
@@ -1829,7 +1985,14 @@ impl Render for NativeHome {
                         ),
                 ),
         );
-        div().relative().size_full().text_color(rgb(ink)).text_size(px(14.)).child(workspace).children(home::overlay(self, cx)).into_any_element()
+        div()
+            .relative()
+            .size_full()
+            .text_color(rgb(ink))
+            .text_size(px(14.))
+            .child(workspace)
+            .children(home::overlay(self, cx))
+            .into_any_element()
     }
 }
 
