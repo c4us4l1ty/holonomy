@@ -46,7 +46,7 @@ class DesktopBootstrapTests(unittest.TestCase):
         for attack in ('corrupt', 'empty', 'path', 'link'):
             with self.subTest(attack=attack), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
-                archive, checksum = self.bundle(root, ['../escape', 'holonomy-gui'] if attack == 'path' else None,
+                archive, checksum = self.bundle(root, ['../escape', 'holonomy-gui', 'THIRD-PARTY-NOTICES.txt'] if attack == 'path' else None,
                                                 symlink=attack == 'link')
                 if attack == 'corrupt':
                     checksum.write_text('0' * 64)
@@ -58,6 +58,31 @@ class DesktopBootstrapTests(unittest.TestCase):
                     launcher.unpack_verified(archive, checksum, output)
                 self.assertEqual(list(output.iterdir()), [])
                 self.assertFalse((root / 'escape').exists())
+
+    def test_total_unpacked_size_and_extra_headers_are_rejected_before_writing(self):
+        for attack in ('total-size', 'extra-header'):
+            with self.subTest(attack=attack), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                names = sorted(launcher.MEMBERS)
+                if attack == 'extra-header':
+                    names.append('unexpected')
+                archive, checksum = self.bundle(root, names)
+                output = root / 'output'
+                output.mkdir()
+                limit = 8 if attack == 'total-size' else launcher.MAX_UNPACKED
+                with mock.patch.object(launcher, 'MAX_UNPACKED', limit):
+                    with self.assertRaises(ValueError):
+                        launcher.unpack_verified(archive, checksum, output)
+                self.assertEqual(list(output.iterdir()), [])
+
+    def test_help_needs_neither_a_display_nor_a_download(self):
+        with mock.patch.object(launcher.sys, 'argv', ['holonomy', '--help']), \
+                mock.patch.object(launcher.platform, 'system', side_effect=AssertionError('unexpected platform probe')), \
+                mock.patch.object(launcher, 'install') as install, \
+                mock.patch('sys.stdout', new_callable=io.StringIO) as output:
+            launcher.main()
+        install.assert_not_called()
+        self.assertIn('Usage:', output.getvalue())
 
     def test_install_is_source_matched_atomic_and_cached(self):
         with tempfile.TemporaryDirectory() as temp:

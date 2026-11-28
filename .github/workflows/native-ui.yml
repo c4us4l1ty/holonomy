@@ -188,6 +188,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: holonomy-native-preview-ubuntu-latest
@@ -205,8 +208,39 @@ jobs:
             --title "Experimental GPUI desktop ${GITHUB_SHA:0:12}" \
             --notes "Source-matched Linux x86_64 development build. The exact executables passed encrypted runtime smoke tests on Fedora 44 and 45 under Xvfb/software Vulkan, including 200% scale. Not a hardware/Wayland/security/visual certification. No compiler is required to run. Runtime graphics libraries/drivers are still required. Use test documents. Checksums detect corruption, not an independent signature. Install/run from the matching checkout with ./holonomy." \
             holonomy-linux-x86_64.tar.gz holonomy-linux-x86_64.tar.gz.sha256
+      - name: Verify anonymous public download through the actual bootstrap
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          python3 - <<'PYTHON' 2>&1 | tee native-public-download.log
+          import hashlib
+          import importlib.util
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          spec = importlib.util.spec_from_file_location("desktop_launch", "scripts/desktop-launch.py")
+          launcher = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(launcher)
+          # No GH_TOKEN or authorization header: exercise the same public URLs as the user.
+          assert "GH_TOKEN" not in os.environ
+          with tempfile.TemporaryDirectory() as temp:
+              cache = launcher.install(Path(temp), os.environ["GITHUB_SHA"])
+              for name in launcher.MEMBERS:
+                  downloaded = hashlib.sha256((cache / name).read_bytes()).digest()
+                  original = hashlib.sha256((Path("bundle") / name).read_bytes()).digest()
+                  assert downloaded == original, name
+              subprocess.run([str(cache / "holonomy-gui"), "--help"], check=True)
+          print("HOLONOMY_PUBLIC_BOOTSTRAP verified=true anonymous=true source_matched=true")
+          PYTHON
+      - name: Preserve public bootstrap evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ui-publication
+          path: native-public-download.log
   bridge:
-    needs: [qualify, fedora]
+    needs: [qualify, fedora, publish-desktop]
     if: always() && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
