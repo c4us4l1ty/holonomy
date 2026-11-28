@@ -10,7 +10,7 @@ use gpui::{
 };
 use holonomy_native::{BoxRect, SecretInput, Session, VectorFrame};
 use holonomy_shell::{Intent, Move};
-use holonomy_text::{StylePatch, TriState};
+use holonomy_text::{Alignment, Heading, ListKind, StylePatch, TriState};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -356,7 +356,10 @@ impl NativeHome {
             match kind {
                 0 => patch.bold = Some(!matches!(toolbar.bold, TriState::Uniform(true))),
                 1 => patch.italic = Some(!matches!(toolbar.italic, TriState::Uniform(true))),
-                _ => patch.underline = Some(!matches!(toolbar.underline, TriState::Uniform(true))),
+                2 => patch.underline = Some(!matches!(toolbar.underline, TriState::Uniform(true))),
+                3 => patch.strikethrough = Some(!matches!(toolbar.strikethrough, TriState::Uniform(true))),
+                4 => patch.code_span = Some(!matches!(toolbar.code_span, TriState::Uniform(true))),
+                _ => return,
             }
             self.apply(Intent::Format(patch));
         }
@@ -1035,6 +1038,21 @@ impl Render for NativeHome {
                                 },
                             ))),
                     );
+                let mut formatting = div().flex().flex_wrap().items_center().gap_1()
+                    .py_2().border_b_1().border_color(rgb(palette.border));
+                for (id, label, kind) in [("strike", "Strike", 3), ("code-span", "Code", 4)] {
+                    formatting = formatting.child(button(id, label).on_click(cx.listener(move |this, _, _, cx| {
+                        this.format(kind);
+                        cx.notify();
+                    })));
+                }
+                for (id, label, patch) in formatting_presets() {
+                    formatting = formatting.child(button(id, label).on_click(cx.listener(move |this, _, _, cx| {
+                        this.apply(Intent::Format(patch.clone()));
+                        cx.notify();
+                    })));
+                }
+                body = body.child(formatting);
                 if self.screen != Screen::Editor {
                     body = body.child(format!(
                         "{} · Enter confirms · Escape cancels",
@@ -1255,17 +1273,6 @@ impl Render for NativeHome {
                             .gap_3()
                             .px_2()
                             .pb_6()
-                            .child(
-                                div()
-                                    .size(px(28.))
-                                    .rounded_lg()
-                                    .bg(rgb(palette.primary))
-                                    .text_color(rgb(palette.on_primary))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child("h"),
-                            )
                             .child("Holonomy"),
                     )
                     .child(
@@ -1320,7 +1327,8 @@ impl Render for NativeHome {
                             .px_3()
                             .text_size(px(12.))
                             .text_color(rgb(muted))
-                            .child("Encrypted files stay on your device."),
+                            .overflow_hidden().whitespace_nowrap().text_ellipsis()
+                            .child(self.session.as_ref().map(|s| format!("▤  {}", s.path().file_name().unwrap_or_default().to_string_lossy())).unwrap_or_else(|| "No document open".into())),
                     )
                     .child(div().flex_1())
                     .child(
@@ -1352,7 +1360,7 @@ impl Render for NativeHome {
                         .justify_between()
                         .border_b_1()
                         .border_color(rgb(palette.border))
-                        .child(button("workspace-home", "Workspace").on_click(cx.listener(
+                        .child(button("workspace-home", "Holonomy  ›").on_click(cx.listener(
                             |this, _, _, cx| {
                                 if this.session.is_some() {
                                     this.home();
@@ -1362,6 +1370,8 @@ impl Render for NativeHome {
                                 cx.notify();
                             },
                         )))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                            .child(self.session.as_ref().map(|s| s.path().file_name().unwrap_or_default().to_string_lossy().into_owned()).unwrap_or_else(|| "Workspace".into())))
                         .child(
                             div()
                                 .flex()
@@ -1564,6 +1574,29 @@ fn main() {
         .detach();
         cx.activate(true);
     });
+}
+
+// Every visible format control maps to an undoable engine patch, not Markdown insertion.
+fn formatting_presets() -> Vec<(&'static str, &'static str, StylePatch)> {
+    let mut result = Vec::new();
+    for (id, label, heading) in [("body-text", "Text", Heading::None), ("heading-1", "H1", Heading::H1), ("heading-2", "H2", Heading::H2)] {
+        let mut patch = StylePatch::new();
+        patch.heading = Some(heading);
+        result.push((id, label, patch));
+    }
+    for (id, label, alignment) in [("align-start", "Left", Alignment::Start), ("align-center", "Center", Alignment::Center), ("align-end", "Right", Alignment::End)] {
+        let mut patch = StylePatch::new();
+        patch.alignment = Some(alignment);
+        result.push((id, label, patch));
+    }
+    let mut bullet = StylePatch::new();
+    bullet.list = Some(ListKind::Bullet { depth: 1 });
+    result.push(("bullet-list", "• List", bullet));
+    let mut plain = StylePatch::new();
+    plain.list = Some(ListKind::None);
+    result.push(("no-list", "No list", plain));
+    result.push(("clear-format", "Clear format", StylePatch::clear_all()));
+    result
 }
 
 // Forms do not inherit the document editor's clipboard shortcuts. Route paste explicitly

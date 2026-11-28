@@ -23,12 +23,12 @@ impl Palette {
     pub fn new(dark: bool) -> Self {
         if dark {
             Self {
-                page: 0x1c1c1c,
-                rail: 0x181818,
+                page: 0x1e1e1e,
+                rail: 0x252827,
                 ink: 0xfafafa,
                 muted: 0xa3a3a3,
                 border: 0x333333,
-                selected: 0x262626,
+                selected: 0x343735,
                 primary: 0xe5e5e5,
                 on_primary: 0x171717,
             }
@@ -50,7 +50,7 @@ impl Palette {
 /// Narrow windows keep the document usable instead of shrinking it behind a fixed rail.
 pub fn sidebar_width(width: f32) -> f32 {
     if width >= 1000. {
-        224.
+        256.
     } else if width >= 760. {
         184.
     } else {
@@ -66,7 +66,7 @@ mod tests {
     fn narrow_layout_prioritizes_the_writing_surface() {
         assert_eq!(sidebar_width(480.), 0.);
         assert_eq!(sidebar_width(800.), 184.);
-        assert_eq!(sidebar_width(1200.), 224.);
+        assert_eq!(sidebar_width(1200.), 256.);
         assert!(CONTROL_HEIGHT > TOOL_HEIGHT);
         assert!(FORM_WIDTH < DOCUMENT_WIDTH);
         for dark in [false, true] {
