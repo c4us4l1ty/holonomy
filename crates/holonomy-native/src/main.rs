@@ -184,15 +184,22 @@ impl NativeHome {
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.settings_window {
-            if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
                 return;
             }
         }
         let owner = cx.entity();
         let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
-        match cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |window, cx| {
-            cx.new(|cx| settings::SettingsWindow::new(owner, window, cx))
-        }) {
+        match cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            |window, cx| cx.new(|cx| settings::SettingsWindow::new(owner, window, cx)),
+        ) {
             Ok(handle) => self.settings_window = Some(handle),
             Err(error) => self.status = format!("Could not open settings: {error}"),
         }
@@ -629,7 +636,11 @@ impl NativeHome {
                     if self.screen == Screen::Find {
                         self.find();
                     } else if self.screen == Screen::Link {
-                        let target = if self.query.is_empty() { None } else { Some(self.query.to_string()) };
+                        let target = if self.query.is_empty() {
+                            None
+                        } else {
+                            Some(self.query.to_string())
+                        };
                         self.apply(Intent::SetLink(target));
                         self.query.zeroize();
                         self.screen = Screen::Editor;
@@ -1117,19 +1128,31 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
-                            .child(button("typography-menu", typography_label(toolbar.as_ref())).on_click(cx.listener(|this, _, _, cx| {
-                                this.show_typography = !this.show_typography;
-                                cx.notify();
-                            })))
-                            .child(button("size-down", "−").on_click(cx.listener(|this, _, _, cx| {
-                                this.resize_text(-100);
-                                cx.notify();
-                            })))
-                            .child(div().px_2().text_size(px(12.)).child(text_size_label(toolbar.as_ref())))
-                            .child(button("size-up", "+").on_click(cx.listener(|this, _, _, cx| {
-                                this.resize_text(100);
-                                cx.notify();
-                            })))
+                            .child(
+                                button("typography-menu", typography_label(toolbar.as_ref()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_typography = !this.show_typography;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(button("size-down", "−").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.resize_text(-100);
+                                    cx.notify();
+                                },
+                            )))
+                            .child(
+                                div()
+                                    .px_2()
+                                    .text_size(px(12.))
+                                    .child(text_size_label(toolbar.as_ref())),
+                            )
+                            .child(button("size-up", "+").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.resize_text(100);
+                                    cx.notify();
+                                },
+                            )))
                             .child(
                                 button("bold", style_label("B", toolbar.as_ref().map(|t| &t.bold)))
                                     .bg(rgb(
@@ -1204,13 +1227,15 @@ impl Render for NativeHome {
                                     },
                                 )),
                             )
-                            .child(button("link", "Link").on_click(cx.listener(|this, _, _, cx| {
-                                if this.composition_ready() {
-                                    this.query.zeroize();
-                                    this.screen = Screen::Link;
-                                }
-                                cx.notify();
-                            })))
+                            .child(button("link", "Link").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if this.composition_ready() {
+                                        this.query.zeroize();
+                                        this.screen = Screen::Link;
+                                    }
+                                    cx.notify();
+                                },
+                            )))
                             .child(button("find", "Find").on_click(cx.listener(
                                 |this, _, _, cx| {
                                     if !this.composition_ready() {
@@ -1231,17 +1256,39 @@ impl Render for NativeHome {
                             ))),
                     );
                 if self.show_typography {
-                    let mut chooser = div().flex().flex_wrap().gap_2().p_3().rounded_lg().bg(rgb(palette.rail));
-                    for (id, label, family) in [("font-sans", "Sans serif", FontFamily::Sans), ("font-serif", "Serif", FontFamily::Serif), ("font-mono", "Monospace", FontFamily::Mono)] {
-                        chooser = chooser.child(button(id, label).on_click(cx.listener(move |this, _, _, cx| {
-                            let mut patch = StylePatch::new(); patch.family = Some(family);
-                            this.apply(Intent::Format(patch)); cx.notify();
-                        })));
+                    let mut chooser = div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(palette.rail));
+                    for (id, label, family) in [
+                        ("font-sans", "Sans serif", FontFamily::Sans),
+                        ("font-serif", "Serif", FontFamily::Serif),
+                        ("font-mono", "Monospace", FontFamily::Mono),
+                    ] {
+                        chooser = chooser.child(button(id, label).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                let mut patch = StylePatch::new();
+                                patch.family = Some(family);
+                                this.apply(Intent::Format(patch));
+                                cx.notify();
+                            },
+                        )));
                     }
-                    for (index, (_, label, patch)) in formatting_presets().into_iter().take(3).enumerate() {
-                        chooser = chooser.child(div().id(("typography-heading", index)).child(button("choose-heading", label)).on_click(cx.listener(move |this, _, _, cx| {
-                            this.apply(Intent::Format(patch.clone())); cx.notify();
-                        })));
+                    for (index, (_, label, patch)) in
+                        formatting_presets().into_iter().take(3).enumerate()
+                    {
+                        chooser = chooser.child(
+                            div()
+                                .id(("typography-heading", index))
+                                .child(button("choose-heading", label))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.apply(Intent::Format(patch.clone()));
+                                    cx.notify();
+                                })),
+                        );
                     }
                     body = body.child(chooser);
                 }
@@ -1699,16 +1746,31 @@ impl Render for NativeHome {
                         .justify_between()
                         .border_b_1()
                         .border_color(rgb(palette.border))
-                        .child(button("toggle-sidebar", if sidebar_width > 0. { "Hide sidebar" } else { "Sidebar" }).on_click(cx.listener(|this, _, window, cx| {
-                            if design::sidebar_width(f32::from(window.viewport_size().width)) == 0. {
-                                this.sidebar_forced = !this.sidebar_forced;
-                                this.sidebar_hidden = false;
-                            } else {
-                                this.sidebar_hidden = !this.sidebar_hidden;
-                                this.sidebar_forced = false;
-                            }
-                            cx.notify();
-                        })))
+                        .child(
+                            button(
+                                "toggle-sidebar",
+                                if sidebar_width > 0. {
+                                    "Hide sidebar"
+                                } else {
+                                    "Sidebar"
+                                },
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    if design::sidebar_width(f32::from(
+                                        window.viewport_size().width,
+                                    )) == 0.
+                                    {
+                                        this.sidebar_forced = !this.sidebar_forced;
+                                        this.sidebar_hidden = false;
+                                    } else {
+                                        this.sidebar_hidden = !this.sidebar_hidden;
+                                        this.sidebar_forced = false;
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        )
                         .child(
                             button("workspace-home", "Holonomy  ›").on_click(cx.listener(
                                 |this, _, _, cx| {
@@ -1745,14 +1807,18 @@ impl Render for NativeHome {
                             div()
                                 .flex()
                                 .gap_2()
-                                .child(button("header-new", "+").on_click(cx.listener(|this, _, _, cx| {
-                                    this.begin_document(true);
-                                    cx.notify();
-                                })))
-                                .child(button("header-settings", "Settings").on_click(cx.listener(|this, _, _, cx| {
-                                    this.open_settings(cx);
-                                    cx.notify();
-                                })))
+                                .child(button("header-new", "+").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.begin_document(true);
+                                        cx.notify();
+                                    },
+                                )))
+                                .child(button("header-settings", "Settings").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.open_settings(cx);
+                                        cx.notify();
+                                    },
+                                )))
                                 .child(button("header-open", "Open").on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.begin_document(false);
@@ -1938,7 +2004,9 @@ fn main() {
                 window.on_window_should_close(cx, move |_, cx| {
                     weak.update(cx, |this, cx| {
                         let saved = this.save();
-                        if saved { this.close_settings(cx); }
+                        if saved {
+                            this.close_settings(cx);
+                        }
                         cx.notify();
                         saved
                     })
@@ -2027,7 +2095,12 @@ fn formatting_presets() -> Vec<(&'static str, &'static str, StylePatch)> {
 // Forms do not inherit the document editor's clipboard shortcuts. Route paste explicitly
 // through their bounded input path, never as a document edit or a partial field insertion.
 fn form_paste(screen: Screen, command: bool, key: &str) -> bool {
-    command && key == "v" && matches!(screen, Screen::Unlock | Screen::Find | Screen::Bookmark | Screen::Link)
+    command
+        && key == "v"
+        && matches!(
+            screen,
+            Screen::Unlock | Screen::Find | Screen::Bookmark | Screen::Link
+        )
 }
 
 fn append_path(path: &mut String, text: &str) -> bool {
