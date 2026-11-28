@@ -724,7 +724,10 @@ impl Render for NativeHome {
         window.set_window_title(&self.session.as_ref().map_or_else(
             || {
                 if self.pending_unlock.is_some() {
-                    format!("Holonomy Native - Working - {}", if self.dark { "Dark" } else { "Light" })
+                    format!(
+                        "Holonomy Native - Working - {}",
+                        if self.dark { "Dark" } else { "Light" }
+                    )
                 } else {
                     "Holonomy Native".to_string()
                 }
@@ -768,6 +771,13 @@ impl Render for NativeHome {
             }
             Screen::Unlock => {
                 let busy = self.pending_unlock.is_some();
+                let form_hint = if busy {
+                    "Deriving your encryption key. Escape cancels.".to_string()
+                } else if self.status.is_empty() {
+                    "Tab to switch fields · Enter to continue".to_string()
+                } else {
+                    self.status.clone()
+                };
                 body = body.w_full().max_w(px(design::FORM_WIDTH + 48.)).mx_auto().justify_center()
                     .child(div().text_size(px(12.)).text_color(rgb(muted)).child("ENCRYPTED DOCUMENT"))
                     .child(div().text_size(px(28.)).child(if self.create { "Make space for a new idea." } else { "Welcome back." }))
@@ -784,9 +794,7 @@ impl Render for NativeHome {
                         .child(button("unlock", if busy { "Working securely…" } else if self.create { "Create document" } else { "Unlock document" })
                             .h(px(design::CONTROL_HEIGHT)).px_4().bg(rgb(palette.primary)).text_color(rgb(palette.on_primary))
                             .on_click(cx.listener(|this,_,_,cx| { this.unlock(); cx.notify(); }))))
-                    .child(div().text_size(px(11.)).text_color(rgb(muted)).child(if busy {
-                        "Deriving your encryption key. This window remains available; Escape cancels."
-                    } else { "Tab to switch fields · Enter to continue" }));
+                    .child(div().text_size(px(11.)).text_color(rgb(muted)).child(form_hint));
             }
             Screen::Editor | Screen::Find | Screen::Bookmark => {
                 let title = self
@@ -1146,11 +1154,15 @@ impl Render for NativeHome {
                             .child("Holonomy"),
                     )
                     .child(
-                        button("rail-home", "All documents")
+                        button("rail-home", "Overview")
                             .justify_start()
                             .h(px(36.))
                             .px_3()
-                            .bg(rgb(palette.selected))
+                            .bg(rgb(if self.screen == Screen::Home {
+                                palette.selected
+                            } else {
+                                palette.rail
+                            }))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.session.is_some() {
                                     this.home();
