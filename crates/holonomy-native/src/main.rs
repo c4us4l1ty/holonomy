@@ -1757,7 +1757,7 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
-                            .child(button("rail-collapse", "|").on_click(cx.listener(
+                            .child(button("rail-collapse", "").w(px(28.)).child(chrome::icon(5, ink)).on_click(cx.listener(
                                 |this, _, _, cx| {
                                     this.sidebar_hidden = true;
                                     this.sidebar_forced = false;
@@ -1846,10 +1846,7 @@ impl Render for NativeHome {
                         .items_center()
                         .justify_between()
                         .child(
-                            button(
-                                "toggle-sidebar",
-                                if sidebar_width > 0. { "|" } else { "|>" },
-                            )
+                            button("toggle-sidebar", "").w(px(28.)).child(chrome::icon(5, ink))
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
                                     if design::sidebar_width(f32::from(
@@ -1916,7 +1913,7 @@ impl Render for NativeHome {
                                         cx.notify();
                                     },
                                 )))
-                                .child(button("header-view", "View").on_click(cx.listener(
+                                .child(button("header-view", "").w(px(28.)).child(chrome::icon(4, ink)).on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.home_menu = if this.home_menu == Some(home::Menu::View)
                                         {
@@ -1927,7 +1924,7 @@ impl Render for NativeHome {
                                         cx.notify();
                                     },
                                 )))
-                                .child(button("header-search", "Search").on_click(cx.listener(
+                                .child(button("header-search", "").w(px(28.)).child(chrome::icon(3, ink)).on_click(cx.listener(
                                     |this, _, _, cx| {
                                         if this.composition_ready() {
                                             this.search_open = true;
@@ -1938,7 +1935,7 @@ impl Render for NativeHome {
                                         cx.notify();
                                     },
                                 )))
-                                .child(button("header-more", "...").on_click(cx.listener(
+                                .child(button("header-more", "").w(px(28.)).child(chrome::icon(6, ink)).on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.home_menu = if this.home_menu == Some(home::Menu::More)
                                         {

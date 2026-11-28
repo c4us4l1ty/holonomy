@@ -84,7 +84,11 @@ xdotool type --clearmodifiers --delay 35 ' pending'
 [[ ! -e "$held_path" ]]
 mv "$HOLONOMY_NATIVE_SMOKE_PATH" "$held_path"
 held=true
-xdotool key ctrl+q
+# Exercise the actual top-right close control; it must use the same save fence as Ctrl+Q.
+window_width=$(xdotool getwindowgeometry --shell "$window" | sed -n 's/^WIDTH=//p')
+close_x=$(awk "BEGIN {printf \"%.0f\", $window_width - 32 * $GPUI_X11_SCALE_FACTOR}")
+close_y=$(awk "BEGIN {printf \"%.0f\", 20 * $GPUI_X11_SCALE_FACTOR}")
+xdotool mousemove --window "$window" "$close_x" "$close_y" click 1
 sleep 1
 kill -0 "$app_pid"
 xdotool getwindowname "$window" | grep -F 'SAVE FAILED'
