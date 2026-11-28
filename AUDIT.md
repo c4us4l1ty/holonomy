@@ -3495,3 +3495,19 @@ is introduced. Add sorting/filtering/refresh/limit/missing-folder/symlink regres
 Move history/bookmark/verify into expanded formatting to reduce primary-toolbar clutter;
 emergency wipe remains directly available. Complete the reference design as an opaque,
 platform-neutral encrypted workspace, not a claim of translucency or Markdown feature parity.
+
+### 2026-11-26 — Dedicated settings window and richer toolbar
+
+Replace inline Settings with a distinct GPUI native window and category rail/grouped cards.
+Reuse/focus the existing window, replace closed handles on reopen, and retain only a weak
+workspace handle in Settings. Settings observes owner state for live theme/control updates.
+Editor close paths close the auxiliary window only after save succeeds; emergency wipe is
+routed to the owner even when Settings owns keyboard focus. No document content input is
+registered in Settings. Runtime checks assert distinct window IDs, singleton behavior,
+Escape dismissal and reopen.
+
+Add family/style chooser, bounded relative text-size controls, and vector-rendered Link
+form routed through bounded/IME/worker guards and the engine SetLink transaction. Add
+size overflow/boundary checks and an encrypted font/size/link save/reopen/clear regression.
+Do not mislabel relative text size as qualified native zoom, or add fake print/image/color
+controls unsupported by the engine.

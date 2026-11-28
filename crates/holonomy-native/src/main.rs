@@ -1238,8 +1238,8 @@ impl Render for NativeHome {
                             this.apply(Intent::Format(patch)); cx.notify();
                         })));
                     }
-                    for (id, label, patch) in formatting_presets().into_iter().take(3) {
-                        chooser = chooser.child(div().id(("typography-heading", id)).child(button("choose-heading", label)).on_click(cx.listener(move |this, _, _, cx| {
+                    for (index, (_, label, patch)) in formatting_presets().into_iter().take(3).enumerate() {
+                        chooser = chooser.child(div().id(("typography-heading", index)).child(button("choose-heading", label)).on_click(cx.listener(move |this, _, _, cx| {
                             this.apply(Intent::Format(patch.clone())); cx.notify();
                         })));
                     }
