@@ -18,14 +18,22 @@ pub struct Library {
 
 impl Library {
     pub fn new(folder: PathBuf) -> Self {
-        let mut library = Self { folder, entries: Vec::new(), notice: String::new() };
+        let mut library = Self {
+            folder,
+            entries: Vec::new(),
+            notice: String::new(),
+        };
         library.refresh();
         library
     }
 
     pub fn navigate(&mut self, folder: &Path) {
-        self.folder = if folder.is_absolute() { folder.to_path_buf() } else {
-            std::env::current_dir().unwrap_or_else(|_| ".".into()).join(folder)
+        self.folder = if folder.is_absolute() {
+            folder.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| ".".into())
+                .join(folder)
         };
         self.refresh();
     }
@@ -42,7 +50,9 @@ impl Library {
         };
         for (index, item) in listing.enumerate() {
             if index >= MAX_SCANNED {
-                self.notice = "Large folder: showing a bounded subset. Navigate into a smaller folder.".into();
+                self.notice =
+                    "Large folder: showing a bounded subset. Navigate into a smaller folder."
+                        .into();
                 break;
             }
             let Ok(item) = item else {
@@ -51,14 +61,28 @@ impl Library {
             };
             let Ok(kind) = item.file_type() else { continue };
             // Do not follow links into another tree, devices, or pipes.
-            if kind.is_dir() || (kind.is_file() && item.path().extension().is_some_and(|ext| ext == "wavefunction")) {
-                self.entries.push(Entry { path: item.path(), directory: kind.is_dir() });
+            if kind.is_dir()
+                || (kind.is_file()
+                    && item
+                        .path()
+                        .extension()
+                        .is_some_and(|ext| ext == "wavefunction"))
+            {
+                self.entries.push(Entry {
+                    path: item.path(),
+                    directory: kind.is_dir(),
+                });
             }
         }
-        self.entries.sort_by(|a, b| b.directory.cmp(&a.directory).then_with(|| a.path.cmp(&b.path)));
+        self.entries.sort_by(|a, b| {
+            b.directory
+                .cmp(&a.directory)
+                .then_with(|| a.path.cmp(&b.path))
+        });
         if self.entries.len() > MAX_VISIBLE {
             self.entries.truncate(MAX_VISIBLE);
-            self.notice = "Showing the first 128 folders/documents. Use Open for other paths.".into();
+            self.notice =
+                "Showing the first 128 folders/documents. Use Open for other paths.".into();
         }
     }
 }
@@ -76,12 +100,19 @@ mod tests {
         assert_eq!(library.entries.len(), 2);
         assert!(library.entries[0].directory);
         assert!(library.entries[1].path.ends_with("b.wavefunction"));
-        #[cfg(unix)] {
-            std::os::unix::fs::symlink(root.join("b.wavefunction"), root.join("linked.wavefunction")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                root.join("b.wavefunction"),
+                root.join("linked.wavefunction"),
+            )
+            .unwrap();
             library.refresh();
             assert_eq!(library.entries.len(), 2);
         }
-        for n in 0..140 { std::fs::write(root.join(format!("{n}.wavefunction")), b"").unwrap(); }
+        for n in 0..140 {
+            std::fs::write(root.join(format!("{n}.wavefunction")), b"").unwrap();
+        }
         library.refresh();
         assert_eq!(library.entries.len(), MAX_VISIBLE);
         assert!(!library.notice.is_empty());

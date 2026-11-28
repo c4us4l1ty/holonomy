@@ -122,7 +122,9 @@ impl NativeHome {
         let library_folder = if path.is_empty() {
             std::env::current_dir().unwrap_or_else(|_| ".".into())
         } else {
-            let absolute = std::env::current_dir().unwrap_or_else(|_| ".".into()).join(&path);
+            let absolute = std::env::current_dir()
+                .unwrap_or_else(|_| ".".into())
+                .join(&path);
             absolute.parent().unwrap_or(Path::new(".")).to_path_buf()
         };
         let screen = if path.is_empty() {
@@ -379,7 +381,11 @@ impl NativeHome {
         match result {
             Ok(session) => {
                 if let Some(parent) = session.path().parent() {
-                    let folder = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+                    let folder = if parent.as_os_str().is_empty() {
+                        Path::new(".")
+                    } else {
+                        parent
+                    };
                     self.library.navigate(folder);
                 }
                 self.session = Some(session);
@@ -1188,37 +1194,36 @@ impl Render for NativeHome {
                     )));
                 }
                 formatting = formatting
-                            .child(button("history", "History").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if !this.composition_ready() {
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.show_history = !this.show_history;
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("bookmark", "Bookmark").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if !this.composition_ready() {
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.query.zeroize();
-                                    this.screen = Screen::Bookmark;
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("verify", "Verify").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if let Some(s) = &this.session {
-                                        let result = s.verify();
-                                        this.report(result, "World-line authenticated.");
-                                    }
-                                    cx.notify();
-                                },
-                            )))
-;
+                    .child(
+                        button("history", "History").on_click(cx.listener(|this, _, _, cx| {
+                            if !this.composition_ready() {
+                                cx.notify();
+                                return;
+                            }
+                            this.show_history = !this.show_history;
+                            cx.notify();
+                        })),
+                    )
+                    .child(button("bookmark", "Bookmark").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            if !this.composition_ready() {
+                                cx.notify();
+                                return;
+                            }
+                            this.query.zeroize();
+                            this.screen = Screen::Bookmark;
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        button("verify", "Verify").on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(s) = &this.session {
+                                let result = s.verify();
+                                this.report(result, "World-line authenticated.");
+                            }
+                            cx.notify();
+                        })),
+                    );
                 if self.show_formatting {
                     body = body.child(formatting);
                 }
@@ -1423,19 +1428,58 @@ impl Render for NativeHome {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .child(input);
-        let mut library_list = div().id("library-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_1();
+        let mut library_list = div()
+            .id("library-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1();
         for (index, entry) in self.library.entries.iter().enumerate() {
             let entry = entry.clone();
-            let selected = self.session.as_ref().is_some_and(|s| s.path() == entry.path);
-            let label = format!("{} {}", if entry.directory { "+" } else { "·" }, entry.path.file_name().unwrap_or_default().to_string_lossy());
-            library_list = library_list.child(div().id(("library-entry", index)).cursor_pointer().flex_shrink_0().px_3().py_2()
-                .rounded_md().bg(rgb(if selected { palette.selected } else { palette.rail }))
-                .overflow_hidden().whitespace_nowrap().text_ellipsis().child(label)
-                .hover(|style| style.bg(gpui::rgba(0x88888818)))
-                .on_click(cx.listener(move |this, _, _, cx| { this.open_library_entry(&entry); cx.notify(); })));
+            let selected = self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.path() == entry.path);
+            let label = format!(
+                "{} {}",
+                if entry.directory { "+" } else { "·" },
+                entry.path.file_name().unwrap_or_default().to_string_lossy()
+            );
+            library_list = library_list.child(
+                div()
+                    .id(("library-entry", index))
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(if selected {
+                        palette.selected
+                    } else {
+                        palette.rail
+                    }))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label)
+                    .hover(|style| style.bg(gpui::rgba(0x88888818)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_library_entry(&entry);
+                        cx.notify();
+                    })),
+            );
         }
         if self.library.entries.is_empty() {
-            library_list = library_list.child(div().px_3().py_2().text_size(px(12.)).text_color(rgb(muted)).child("No folders or .wavefunction files here."));
+            library_list = library_list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(muted))
+                    .child("No folders or .wavefunction files here."),
+            );
         }
         if sidebar_width > 0. {
             shell = shell.child(
@@ -1497,18 +1541,47 @@ impl Render for NativeHome {
                                 cx.notify();
                             })),
                     )
-                    .child(div().mt_4().flex().items_center().justify_between()
-                        .child(button("library-up", "Up").on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(parent) = this.library.folder.parent().map(Path::to_path_buf) { this.library.navigate(&parent); }
-                            cx.notify();
-                        })))
-                        .child(button("library-refresh", "Refresh").on_click(cx.listener(|this, _, _, cx| {
-                            this.library.refresh(); cx.notify();
-                        }))))
-                    .child(div().px_3().text_size(px(12.)).text_color(rgb(muted)).overflow_hidden().whitespace_nowrap().text_ellipsis()
-                        .child(self.library.folder.to_string_lossy().into_owned()))
+                    .child(
+                        div()
+                            .mt_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(button("library-up", "Up").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(parent) =
+                                        this.library.folder.parent().map(Path::to_path_buf)
+                                    {
+                                        this.library.navigate(&parent);
+                                    }
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("library-refresh", "Refresh").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.library.refresh();
+                                    cx.notify();
+                                },
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .text_size(px(12.))
+                            .text_color(rgb(muted))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(self.library.folder.to_string_lossy().into_owned()),
+                    )
                     .child(library_list)
-                    .child(div().px_3().text_size(px(11.)).text_color(rgb(muted)).child(self.library.notice.clone()))
+                    .child(
+                        div()
+                            .px_3()
+                            .text_size(px(11.))
+                            .text_color(rgb(muted))
+                            .child(self.library.notice.clone()),
+                    )
                     .child(
                         div()
                             .border_t_1()
