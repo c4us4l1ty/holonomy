@@ -12,7 +12,7 @@ import unittest
 class DesktopScriptTests(unittest.TestCase):
     def test_caller_paths_build_profiles_and_failure_propagation(self):
         with tempfile.TemporaryDirectory(prefix="holonomy launcher ") as temp:
-            base = Path(temp)
+            base = Path(temp).resolve()
             root = base / "source tree"
             (root / "scripts").mkdir(parents=True)
             script = root / "scripts/run-desktop.sh"
@@ -53,7 +53,7 @@ class DesktopScriptTests(unittest.TestCase):
                 self.assertEqual(build.count('build'), 1)
                 self.assertEqual(build[build.index('--target-dir') + 1], str(root / 'target'))
                 self.assertEqual(build[build.index('--manifest-path') + 1], str(root / 'Cargo.toml'))
-                self.assertEqual('--release' in build, profile == 'release')
+                self.assertEqual(build[build.index('--profile') + 1], profile)
                 self.assertIn('holonomy-native/native-ui', build)
             run_log.unlink()
             env['BUILD_EXIT'] = '17'

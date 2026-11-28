@@ -43,7 +43,10 @@ jobs:
           sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev xvfb xdotool x11-utils imagemagick mesa-vulkan-drivers
       - name: Test desktop build helper without launching a display
         if: runner.os != 'Windows'
-        run: python3 scripts/test-run-desktop.py
+        shell: bash
+        run: |
+          python3 scripts/test-run-desktop.py 2>&1 | tee -a native-check.log
+          exit "${PIPESTATUS[0]}"
       - name: Resolve, format and compile preview
         shell: bash
         run: |
