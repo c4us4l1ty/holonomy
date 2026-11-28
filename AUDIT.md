@@ -3526,3 +3526,27 @@ Extend real native/Fedora drills: keep Settings open through failed editor close
 emergency wipe while Settings owns keyboard focus, and finally close the editor while a
 reopened Settings window is alive. This checks both failure-preservation and auxiliary-window
 shutdown without weakening save/wipe/security thresholds.
+
+### 2026-11-26 — Correct “own window” to an internal settings page
+
+The user clarified Settings must be a page in the existing desktop window. Remove the
+auxiliary window/entity/weak-owner architecture entirely. Keep underlying Screen/session,
+form/query and undo state; Back/Escape restores them. Never register document text input
+on the Settings page; guard late platform input and refuse navigation during composition.
+Preserve emergency wipe and guarded close, with save-failure text visible on the page.
+
+Review Quiet MD 668f2011fa3d1d5626ed523bbcf68daae055a007 in /tmp and adapt its grouped
+settings row/card and category-rail structure. Add functional session-only appearance,
+format/sidebar visibility and metadata-library view controls; explain unsupported network,
+agent/storage features rather than using fake switches. Replace promotional Home cards
+with actual metadata-only grid/list cards, title ordering, New/View/More menus, safe folder
+creation and bounded keyboard/paste filename search. New folders require one safe component
+and never overwrite. Refuse IME destination changes in palette/settings navigation.
+
+Add font-independent vector header/caption icons. Caption close uses the exact existing save
+fence; maximize/restore and minimize use GPUI's native platform operations. Runtime drills
+now assert same X11 window ID for Settings, category/back navigation, real caption-close
+refusal, menus/grid/list/folder creation, metadata search and existing encrypted roundtrips.
+No plaintext previews/indexes, database/board/import/agent/trash engine or system blur is
+introduced. Visual parity must be evaluated separately from behavioral CI; no exact-pixel
+or production hardware/Wayland guarantee is made.
