@@ -784,7 +784,6 @@ impl Render for NativeHome {
         let (bg, panel, ink, muted) = (palette.page, palette.page, palette.ink, palette.muted);
         let viewport = window.viewport_size();
         let sidebar_width = design::sidebar_width(f32::from(viewport.width));
-        let hero_size = if sidebar_width == 0. { 28. } else { 36. };
         let mut body = div()
             .id("workspace")
             .flex_1()
@@ -797,16 +796,31 @@ impl Render for NativeHome {
             .py_4();
         match self.screen {
             Screen::Home => {
-                body = body.max_w(px(760.)).w_full().mx_auto().justify_center()
-                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("YOUR PRIVATE WORKSPACE"))
-                    .child(div().text_size(px(hero_size)).child("Room for your thoughts."))
-                    .child(div().text_size(px(14.)).text_color(rgb(muted)).child("A quiet page. An encrypted document. Nothing sent anywhere."))
-                    .child(div().flex().flex_wrap().gap_3().mt_4()
-                        .child(button("new", "+  New document").h(px(40.)).px_4().bg(rgb(palette.primary)).text_color(rgb(palette.on_primary))
-                            .on_click(cx.listener(|this,_,_,cx| { this.begin_document(true); cx.notify(); })))
-                        .child(button("open", "Open document").h(px(40.)).px_4().border_1().border_color(rgb(palette.border))
-                            .on_click(cx.listener(|this,_,_,cx| { this.begin_document(false); cx.notify(); }))))
-                    .child(div().mt_6().text_size(px(12.)).text_color(rgb(muted)).child("Experimental build · Start with a test document. Your passphrase is never stored."));
+                body = body.justify_start()
+                    .child(div().text_size(px(18.)).child("Your workspace"))
+                    .child(div().text_size(px(12.)).text_color(rgb(muted))
+                        .child("Encrypted documents · Stored on this device"))
+                    .child(div().flex().flex_wrap().gap_4()
+                        .child(div().w(px(280.)).min_h(px(240.)).p_4().rounded_xl()
+                            .border_1().border_color(rgb(palette.border)).flex().flex_col().gap_3()
+                            .child(div().text_size(px(16.)).child("A new page"))
+                            .child(div().text_size(px(12.)).text_color(rgb(muted)).child("A private space for your next thought."))
+                            .child(div().flex_1())
+                            .child(button("new", "+  New document").h(px(36.)).on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_document(true);
+                                cx.notify();
+                            }))))
+                        .child(div().w(px(280.)).min_h(px(240.)).p_4().rounded_xl()
+                            .border_1().border_color(rgb(palette.border)).flex().flex_col().gap_3()
+                            .child(div().text_size(px(16.)).child("Continue writing"))
+                            .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Open an existing .wavefunction file. Its contents stay locked until you unlock it."))
+                            .child(div().flex_1())
+                            .child(button("open", "Open document").h(px(36.)).on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_document(false);
+                                cx.notify();
+                            })))))
+                    .child(div().text_size(px(11.)).text_color(rgb(muted))
+                        .child("Experimental build · Start with a test document. No plaintext previews are saved."));
             }
             Screen::Unlock => {
                 let busy = self.pending_unlock.is_some();
@@ -949,7 +963,7 @@ impl Render for NativeHome {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(14.))
+                                    .text_size(px(28.))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
@@ -1617,6 +1631,12 @@ fn formatting_presets() -> Vec<(&'static str, &'static str, StylePatch)> {
     let mut bullet = StylePatch::new();
     bullet.list = Some(ListKind::Bullet { depth: 1 });
     result.push(("bullet-list", "• List", bullet));
+    let mut ordered = StylePatch::new();
+    ordered.list = Some(ListKind::Ordered { depth: 1, start: 1 });
+    result.push(("ordered-list", "1. List", ordered));
+    let mut quote = StylePatch::new();
+    quote.blockquote = Some(1);
+    result.push(("quote", "Quote", quote));
     let mut plain = StylePatch::new();
     plain.list = Some(ListKind::None);
     result.push(("no-list", "No list", plain));
@@ -1661,6 +1681,15 @@ fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn toolbar_presets_have_unique_ids_and_clear_is_a_real_reset() {
+        let presets = formatting_presets();
+        let ids: std::collections::HashSet<_> = presets.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(ids.len(), presets.len());
+        assert!(presets.iter().all(|(_, label, patch)| !label.is_empty() && *patch != StylePatch::new()));
+        assert_eq!(presets.last().unwrap().2, StylePatch::clear_all());
+    }
+
     #[test]
     fn form_paste_is_routed_only_to_active_fields() {
         for screen in [Screen::Unlock, Screen::Find, Screen::Bookmark] {
