@@ -17,6 +17,7 @@ ASSET = "holonomy-linux-x86_64.tar.gz"
 BINARIES = {"holonomy-gui", "holonomy-native"}
 MEMBERS = BINARIES | {"THIRD-PARTY-NOTICES.txt"}
 MAX_DOWNLOAD = 512 * 1024 * 1024
+MAX_UNPACKED = 512 * 1024 * 1024
 
 
 def download(url, destination, limit=MAX_DOWNLOAD):
@@ -48,11 +49,20 @@ def unpack_verified(archive, checksum, destination):
     if digest.hexdigest() != expected.lower():
         raise ValueError("desktop checksum mismatch; refusing to install")
     with tarfile.open(archive, "r:gz") as bundle:
-        members = bundle.getmembers()
+        # Stop on the first extra header rather than allocating an unbounded member list.
+        members = []
+        unpacked = 0
+        for member in bundle:
+            if len(members) >= len(MEMBERS):
+                raise ValueError("too many desktop bundle members")
+            if not member.isfile() or not 0 <= member.size <= MAX_UNPACKED:
+                raise ValueError("desktop bundle must contain only bounded regular files")
+            unpacked += member.size
+            if unpacked > MAX_UNPACKED:
+                raise ValueError("desktop bundle exceeds total unpacked size limit")
+            members.append(member)
         if len(members) != len(MEMBERS) or {member.name for member in members} != MEMBERS:
             raise ValueError("unexpected desktop bundle contents")
-        if any(not member.isfile() or member.size > MAX_DOWNLOAD for member in members):
-            raise ValueError("desktop bundle must contain only bounded regular files")
         for member in members:
             with bundle.extractfile(member) as source, (destination / member.name).open("wb") as output:
                 while True:
@@ -90,6 +100,12 @@ def install(root, revision):
 
 
 def main():
+    if sys.argv[1:] in (["--help"], ["-h"]):
+        print("Usage: ./holonomy [document.wavefunction]\n"
+              "Downloads and caches the source-matched Linux x86_64 GPUI desktop once.\n"
+              "Run without a path for Home. No compiler or automatic package installation.\n"
+              "Normal launches require a graphical desktop session; --help does not.")
+        return
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64"):
         raise ValueError("prebuilt launcher currently supports Linux x86_64 only; see README for source builds")
     root = Path(__file__).resolve().parent.parent

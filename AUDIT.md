@@ -3441,3 +3441,19 @@ The adapted design also triggered a distribution review: prebuilt/CI desktop bun
 include THIRD-PARTY-NOTICES.txt (project licenses, adapted-source and embedded-font notices).
 The bootstrap strictly validates that third regular file along with the two executables;
 license material is not silently stripped during caching. No new binary artifact is committed.
+
+
+### 2026-11-26 — Post-redesign delivery and bounds audit
+
+- Fixed bootstrap --help entering platform/display/download checks; usage is now available
+  in a terminal without graphics or network. Added a no-probe/no-install regression.
+- Archive validation previously collected all tar headers before checking the member count,
+  and bounded each member but not total expanded bytes. It now stops at the first extra
+  header, rejects negative/oversized sizes and enforces a combined unpacked-size bound before
+  writing anything. Added rejection tests; checksum/path/link/caching tests remain in place.
+- Added a post-publication canary that anonymously downloads the actual public release using
+  the production installer, verifies/extracts it and compares every byte digest with the
+  exact qualified bundle. It also runs the downloaded GUI launcher's help command. Evidence
+  is retained with native diagnostics. No app data or credentials enter the canary.
+- Existing async KDF, narrow layout, five-scale encrypted runtime and Fedora 44/45 real-KDF
+  responsiveness drills are rerun unchanged; no performance/security thresholds are relaxed.
