@@ -194,7 +194,9 @@ impl PreparedDocument {
         Ok(Self {
             path: path.to_path_buf(),
             keys,
-            kind: PreparedKind::Open { header: Box::new(header) },
+            kind: PreparedKind::Open {
+                header: Box::new(header),
+            },
         })
     }
 
