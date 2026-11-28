@@ -152,7 +152,7 @@ enum PreparedKind {
         salt: [u8; holonomy_seal::DERIVE_SALT_BYTES],
     },
     Open {
-        header: LineHeader,
+        header: Box<LineHeader>,
     },
 }
 
@@ -194,7 +194,7 @@ impl PreparedDocument {
         Ok(Self {
             path: path.to_path_buf(),
             keys,
-            kind: PreparedKind::Open { header },
+            kind: PreparedKind::Open { header: Box::new(header) },
         })
     }
 
