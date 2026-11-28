@@ -13,6 +13,8 @@ on:
       - "crates/holonomy-seal/**"
       - "vendor/xattr/**"
       - "scripts/qualify-native-ui.sh"
+      - "scripts/run-desktop.sh"
+      - "scripts/test-run-desktop.py"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/native-ui.yml"
@@ -39,6 +41,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev xvfb xdotool x11-utils imagemagick mesa-vulkan-drivers
+      - name: Test desktop build helper without launching a display
+        if: runner.os != 'Windows'
+        run: python3 scripts/test-run-desktop.py
       - name: Resolve, format and compile preview
         shell: bash
         run: |

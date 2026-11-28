@@ -8,6 +8,56 @@ and its GPUI companion, or use:
 scripts/run-desktop.sh /absolute/path/notes.wavefunction
 ```
 
+### After pulling main
+
+Rust/Cargo via rustup is required; `rust-toolchain.toml` selects the pinned toolchain.
+On Ubuntu/Debian, install the native build dependencies once:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config clang cmake libxcb1-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+  libfontconfig1-dev libasound2-dev libssl-dev
+```
+
+On macOS, install the Xcode command-line tools (`xcode-select --install`). Then,
+from your repository checkout in a graphical desktop session:
+
+```sh
+git pull origin main
+./scripts/run-desktop.sh
+# Or open an existing document (quote paths containing spaces):
+./scripts/run-desktop.sh "$HOME/Documents/notes.wavefunction"
+```
+
+The helper builds both binaries in one Cargo invocation. The first build downloads
+and compiles GPUI dependencies and can take several minutes; subsequent unchanged
+builds are incremental. Relative document paths resolve from your current directory.
+If your Linux driver reports Vulkan initialization errors, install your distribution's
+Vulkan driver (for Mesa, typically `mesa-vulkan-drivers`); do not force a scale factor
+as a substitute for configuring the desktop's actual 200% scaling.
+
+For an optimized build (slower initial compile):
+
+```sh
+HOLONOMY_BUILD_PROFILE=release ./scripts/run-desktop.sh
+```
+
+Without Bash, build and run directly (also works in Windows PowerShell):
+
+```sh
+cargo build --locked -p holonomy-native -p holonomy-gui --bin holonomy-native --bin holonomy-gui --features holonomy-native/native-ui
+# Linux/macOS:
+./target/debug/holonomy-gui
+# Windows PowerShell: .\target\debug\holonomy-gui.exe
+```
+
+**Windows currently cannot create/open encrypted documents** because the storage
+backend refuses unqualified durability primitives. Building the UI does not remove
+that restriction. On Linux/macOS, choose New for a new path or Open for an existing
+`.wavefunction`, enter the path, Tab to the passphrase, and confirm. Use Ctrl+S
+(Cmd+S on macOS); confirm save success before closing. Start with test documents.
+
 Omit the path for Home. This uses device-scale vector document rendering and native
 GPUI chrome; it does not scale a completed low-resolution framebuffer. The companion
 must remain beside the launcher in installed bundles. Missing companions produce an
