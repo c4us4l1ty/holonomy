@@ -90,55 +90,44 @@ kill -0 "$app_pid"
 xdotool getwindowname "$window" | grep -F 'SAVE FAILED'
 mv "$held_path" "$HOLONOMY_NATIVE_SMOKE_PATH"
 held=false
-# A refused editor close must leave the auxiliary window alive too.
+# Settings is an in-app page: same X11 surface, guarded close and focused wipe.
 xdotool key ctrl+comma
-settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings$' | head -1)
-xdotool windowfocus --sync "$window"
+settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings' | head -1)
+[[ "$settings_window" == "$window" ]]
 xdotool key ctrl+q
 sleep 1
 kill -0 "$app_pid"
 xdotool getwindowname "$window" | grep -F 'SAVE FAILED'
-xdotool search --onlyvisible --name '^Holonomy Settings$' >/dev/null
 import -window "$window" native-refused-save.png
-# Only an explicit emergency wipe discards the pending text. Reopen below must still see the
-# previous committed version, never a partial or silently advanced save.
-xdotool windowfocus --sync "$settings_window"
 xdotool key ctrl+shift+Escape
 timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
-xdotool key Escape
-sleep 0.5
-xdotool windowfocus --sync "$window"
 import -window "$window" native-home.png
+# Metadata search uses the existing native surface and routes selection back to unlock.
+xdotool key ctrl+j
+xdotool type --clearmodifiers --delay 20 'native-smoke'
+import -window "$window" native-search.png
+xdotool key Return
+xdotool key Escape
+# Return Home after cancelling the unlock form.
 xdotool windowsize --sync "$window" 640 560
 xdotool key ctrl+shift+t
 sleep 1
 kill -0 "$app_pid"
 import -window "$window" native-compact.png
-# Settings is a separate native window, not a panel inside the document surface.
 xdotool key ctrl+comma
-settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings$' | head -1)
-[[ "$settings_window" != "$window" ]]
-xdotool windowfocus --sync "$window"
-xdotool key ctrl+comma
-sleep 0.5
-[[ $(xdotool search --onlyvisible --name '^Holonomy Settings$' | wc -l) -eq 1 ]]
-xdotool windowfocus --sync "$settings_window"
-import -window "$settings_window" native-settings.png
+settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings' | head -1)
+[[ "$settings_window" == "$window" ]]
+[[ $(xdotool search --onlyvisible --name '^Holonomy' | wc -l) -eq 1 ]]
+import -window "$window" native-settings.png
 xdotool key Escape
-sleep 0.5
-if xdotool search --onlyvisible --name '^Holonomy Settings$'; then exit 1; fi
+timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
 kill -0 "$app_pid"
-xdotool windowfocus --sync "$window"
-# Reopen and leave Settings alive: editor close must close its auxiliary window too.
 xdotool key ctrl+comma
-settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings$' | head -1)
-xdotool windowfocus --sync "$window"
+timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings' >/dev/null
 xdotool key ctrl+q
-# Bounded wait without relying on an indefinite shell wait if shutdown breaks.
 timeout 20 tail --pid="$app_pid" -f /dev/null
 wait "$app_pid"
 app_pid=''
-if xdotool search --onlyvisible --name '^Holonomy Settings$'; then exit 1; fi
 fixture verify
 
 # Reopen the actual GPUI binary, add an unsaved suffix and kill the process abruptly.

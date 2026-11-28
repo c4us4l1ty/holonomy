@@ -2,8 +2,10 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod design;
+mod chrome;
 mod library;
 mod settings;
+mod home;
 
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgb, size, App, Application, Bounds, Context,
@@ -67,9 +69,17 @@ struct NativeHome {
     show_history: bool,
     sidebar_hidden: bool,
     sidebar_forced: bool,
-    settings_window: Option<gpui::WindowHandle<settings::SettingsWindow>>,
+    settings_page: Option<usize>,
     show_formatting: bool,
     show_typography: bool,
+    home_grid: bool,
+    sort_descending: bool,
+    hide_hidden: bool,
+    home_menu: Option<home::Menu>,
+    library_filter: String,
+    library_selection: usize,
+    search_open: bool,
+    folder_create: bool,
 }
 
 fn button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::Stateful<gpui::Div> {
@@ -176,50 +186,29 @@ impl NativeHome {
             show_history: false,
             sidebar_hidden: false,
             sidebar_forced: false,
-            settings_window: None,
+            settings_page: None,
             show_formatting: false,
             show_typography: false,
+            home_grid: true,
+            sort_descending: false,
+            hide_hidden: true,
+            home_menu: None,
+            library_filter: String::new(),
+            library_selection: 0,
+            search_open: false,
+            folder_create: false,
         }
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
-        // GPUI renders a newly opened window synchronously. Defer until this owner's
-        // update borrow is released, otherwise Settings cannot safely read its state.
-        let weak = cx.entity().downgrade();
-        cx.defer(move |cx| {
-            let Some(owner) = weak.upgrade() else { return };
-            let existing = owner.read(cx).settings_window;
-            if let Some(handle) = existing {
-                if handle
-                    .update(cx, |_, window, _| window.activate_window())
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-            let target = owner.clone();
-            let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
-            let result = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| settings::SettingsWindow::new(target, window, cx)),
-            );
-            owner.update(cx, |owner, cx| {
-                match result {
-                    Ok(handle) => owner.settings_window = Some(handle),
-                    Err(error) => owner.status = format!("Could not open settings: {error}"),
-                }
-                cx.notify();
-            });
-        });
+        if !composition_ready(&self.preedit, &mut self.status) { return; }
+        self.settings_page = Some(0);
+        cx.notify();
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.settings_window.take() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
-        }
+        self.settings_page = None;
+        cx.notify();
     }
 
     fn begin_document(&mut self, create: bool) {
@@ -511,6 +500,10 @@ impl NativeHome {
     }
 
     fn wipe(&mut self, cx: &mut Context<Self>) {
+        self.settings_page = None;
+        self.search_open = false; self.folder_create = false; self.home_menu = None;
+        self.library_filter.clear();
+
         let cancelled_worker = self.pending_unlock.take().is_some()
             || self.unlock_worker_active.load(Ordering::Acquire);
         let verified = self.session.as_mut().map_or(true, Session::wipe);
@@ -561,7 +554,7 @@ impl NativeHome {
             mods.control
         };
         if command && key == "," {
-            self.open_settings(cx);
+            if self.settings_page.is_some() { self.close_settings(cx); } else { self.open_settings(cx); }
             cx.stop_propagation();
             cx.notify();
             return;
@@ -574,6 +567,49 @@ impl NativeHome {
         }
         if command && mods.shift && key == "escape" {
             self.wipe(cx);
+            cx.notify();
+            return;
+        }
+        if command && key == "j" && self.settings_page.is_none() {
+            if self.composition_ready() {
+                self.search_open = true; self.folder_create = false;
+                self.library_filter.clear(); self.library_selection = 0;
+            }
+            cx.stop_propagation(); cx.notify(); return;
+        }
+        if key == "escape" && self.home_menu.is_some() {
+            self.home_menu = None; cx.stop_propagation(); cx.notify(); return;
+        }
+        if self.search_open || self.folder_create {
+            match key {
+                "escape" => { self.search_open = false; self.folder_create = false; self.library_filter.clear(); self.preedit.zeroize(); }
+                "backspace" if self.preedit.is_empty() => { self.library_filter.pop(); self.library_selection = 0; }
+                "up" => self.library_selection = self.library_selection.saturating_sub(1),
+                "down" => self.library_selection = self.library_selection.saturating_add(1),
+                "enter" if self.preedit.is_empty() => {
+                    if self.folder_create {
+                        match self.library.create_folder(&self.library_filter) {
+                            Ok(()) => { self.folder_create = false; self.library_filter.clear(); self.status = "Folder created.".into(); }
+                            Err(error) => self.status = error.to_string(),
+                        }
+                    } else {
+                        let entries = self.library.visible_entries(&self.library_filter, self.hide_hidden, self.sort_descending);
+                        if let Some(entry) = entries.get(self.library_selection.min(entries.len().saturating_sub(1))).cloned() {
+                            self.search_open = false; self.library_filter.clear(); self.open_library_entry(&entry);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            cx.stop_propagation(); cx.notify(); return;
+        }
+        if self.settings_page.is_some() {
+            if key == "escape" {
+                self.close_settings(cx);
+            } else if command && (key == "q" || key == "w") && self.save() {
+                window.remove_window();
+            }
+            cx.stop_propagation();
             cx.notify();
             return;
         }
@@ -780,6 +816,15 @@ impl NativeHome {
     }
 
     fn commit_text(&mut self, text: &str) {
+        if self.settings_page.is_some() { return; }
+        if self.search_open || self.folder_create {
+            if self.library_filter.len().saturating_add(text.len()) <= 255 {
+                self.library_filter.push_str(text);
+                self.library_selection = 0;
+            } else { self.status = "Search/folder input exceeds 255 bytes.".into(); }
+            return;
+        }
+
         if self.pending_unlock.is_some() {
             return;
         }
@@ -911,6 +956,10 @@ impl Render for NativeHome {
                 )
             },
         ));
+        if self.settings_page.is_some() {
+            window.set_window_title(if self.save_failure.is_some() { "Holonomy Settings · SAVE FAILED" } else { "Holonomy Settings" });
+            return settings::render(self, window, cx);
+        }
         let palette = design::Palette::new(self.dark);
         let (bg, panel, ink, muted) = (palette.page, palette.page, palette.ink, palette.muted);
         let viewport = window.viewport_size();
@@ -932,31 +981,7 @@ impl Render for NativeHome {
             .py_4();
         match self.screen {
             Screen::Home => {
-                body = body.justify_start()
-                    .child(div().text_size(px(18.)).child("Your workspace"))
-                    .child(div().text_size(px(12.)).text_color(rgb(muted))
-                        .child("Encrypted documents · Stored on this device"))
-                    .child(div().flex().flex_wrap().gap_4()
-                        .child(div().w(px(280.)).min_h(px(240.)).p_4().rounded_xl()
-                            .border_1().border_color(rgb(palette.border)).flex().flex_col().gap_3()
-                            .child(div().text_size(px(16.)).child("A new page"))
-                            .child(div().text_size(px(12.)).text_color(rgb(muted)).child("A private space for your next thought."))
-                            .child(div().flex_1())
-                            .child(button("new", "+  New document").h(px(36.)).on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_document(true);
-                                cx.notify();
-                            }))))
-                        .child(div().w(px(280.)).min_h(px(240.)).p_4().rounded_xl()
-                            .border_1().border_color(rgb(palette.border)).flex().flex_col().gap_3()
-                            .child(div().text_size(px(16.)).child("Continue writing"))
-                            .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Open an existing .wavefunction file. Its contents stay locked until you unlock it."))
-                            .child(div().flex_1())
-                            .child(button("open", "Open document").h(px(36.)).on_click(cx.listener(|this, _, _, cx| {
-                                this.begin_document(false);
-                                cx.notify();
-                            })))))
-                    .child(div().text_size(px(11.)).text_color(rgb(muted))
-                        .child("Experimental build · Start with a test document. No plaintext previews are saved."));
+                body = body.child(home::cards(self, cx));
             }
             Screen::Unlock => {
                 let busy = self.pending_unlock.is_some();
@@ -1580,7 +1605,7 @@ impl Render for NativeHome {
             .flex()
             .flex_col()
             .gap_1();
-        for (index, entry) in self.library.entries.iter().enumerate() {
+        for (index, entry) in self.library.visible_entries("", self.hide_hidden, self.sort_descending).iter().enumerate() {
             let entry = entry.clone();
             let selected = self
                 .session
@@ -1745,7 +1770,7 @@ impl Render for NativeHome {
                     ),
             );
         }
-        shell.child(
+        let workspace = shell.child(
             div()
                 .flex_1()
                 .min_w_0()
@@ -1828,10 +1853,20 @@ impl Render for NativeHome {
                                 .gap_2()
                                 .child(button("header-new", "+").on_click(cx.listener(
                                     |this, _, _, cx| {
-                                        this.begin_document(true);
+                                        this.home_menu = if this.home_menu == Some(home::Menu::New) { None } else { Some(home::Menu::New) };
                                         cx.notify();
                                     },
                                 )))
+                                .child(button("header-view", "View").on_click(cx.listener(|this, _, _, cx| {
+                                    this.home_menu = if this.home_menu == Some(home::Menu::View) { None } else { Some(home::Menu::View) }; cx.notify();
+                                })))
+                                .child(button("header-search", "Search").on_click(cx.listener(|this, _, _, cx| {
+                                    if this.composition_ready() { this.search_open = true; this.folder_create = false; this.library_filter.clear(); this.library_selection = 0; }
+                                    cx.notify();
+                                })))
+                                .child(button("header-more", "...").on_click(cx.listener(|this, _, _, cx| {
+                                    this.home_menu = if this.home_menu == Some(home::Menu::More) { None } else { Some(home::Menu::More) }; cx.notify();
+                                })))
                                 .child(button("header-settings", "Settings").on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.open_settings(cx);
@@ -1851,7 +1886,8 @@ impl Render for NativeHome {
                                             cx.notify();
                                         })),
                                 ),
-                        ),
+                        )
+                        .child(chrome::controls(ink, cx)),
                 )
                 .child(body)
                 .child(
@@ -1885,7 +1921,8 @@ impl Render for NativeHome {
                                 .child(format!("{:.2}× · Local workspace", window.scale_factor())),
                         ),
                 ),
-        )
+        );
+        div().relative().size_full().text_color(rgb(ink)).text_size(px(14.)).child(workspace).children(home::overlay(self, cx)).into_any_element()
     }
 }
 
@@ -1947,7 +1984,7 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_unlock.is_some() {
+        if self.pending_unlock.is_some() || self.settings_page.is_some() {
             return;
         }
         let range = range.unwrap_or(0..self.preedit.encode_utf16().count());
@@ -1969,7 +2006,7 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_unlock.is_some() {
+        if self.pending_unlock.is_some() || self.settings_page.is_some() {
             return;
         }
         let range = range.unwrap_or(0..self.preedit.encode_utf16().count());

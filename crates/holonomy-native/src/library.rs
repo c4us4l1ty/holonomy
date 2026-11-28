@@ -38,6 +38,28 @@ impl Library {
         self.refresh();
     }
 
+    pub fn visible_entries(&self, filter: &str, hide_hidden: bool, descending: bool) -> Vec<Entry> {
+        let needle = filter.to_lowercase();
+        let mut entries: Vec<_> = self.entries.iter().filter(|entry| {
+            let name = entry.path.file_name().unwrap_or_default().to_string_lossy();
+            (!hide_hidden || !name.starts_with('.')) && name.to_lowercase().contains(&needle)
+        }).cloned().collect();
+        entries.sort_by(|a, b| b.directory.cmp(&a.directory).then_with(|| {
+            let order = a.path.cmp(&b.path);
+            if descending { order.reverse() } else { order }
+        }));
+        entries
+    }
+
+    pub fn create_folder(&mut self, name: &str) -> std::io::Result<()> {
+        if !valid_folder_name(name) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Use one folder name (1–255 bytes), not a path, dot name or control characters."));
+        }
+        std::fs::create_dir(self.folder.join(name))?;
+        self.refresh();
+        Ok(())
+    }
+
     pub fn refresh(&mut self) {
         self.entries.clear();
         self.notice.clear();
@@ -87,6 +109,11 @@ impl Library {
     }
 }
 
+pub fn valid_folder_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 255 && name != "." && name != ".."
+        && !name.chars().any(|c| c == '/' || c == '\\' || c.is_control())
+}
+
 /// The text input path must be lossless and bounded before navigation changes any session.
 pub fn input_path(path: &Path) -> Option<&str> {
     path.to_str().filter(|path| path.len() <= 4096)
@@ -95,6 +122,21 @@ pub fn input_path(path: &Path) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_names_cannot_escape_or_overwrite_and_views_filter_metadata() {
+        for name in ["", ".", "..", "../outside", "a/b", "a\\b", "a\nb"] { assert!(!valid_folder_name(name)); }
+        assert!(!valid_folder_name(&"x".repeat(256)));
+        assert!(valid_folder_name("Research notes"));
+        let library = Library { folder: ".".into(), notice: String::new(), entries: vec![
+            Entry { path: ".hidden".into(), directory: true },
+            Entry { path: "Beta.wavefunction".into(), directory: false },
+            Entry { path: "Alpha.wavefunction".into(), directory: false },
+        ] };
+        assert_eq!(library.visible_entries("alpha", true, false).len(), 1);
+        assert_eq!(library.visible_entries("", true, true)[0].path, PathBuf::from("Beta.wavefunction"));
+        assert_eq!(library.visible_entries("", false, false).len(), 3);
+    }
+
     #[test]
     fn unrepresentable_library_paths_are_refused_before_navigation() {
         assert_eq!(
