@@ -352,9 +352,25 @@ pub fn overlay(owner: &NativeHome, cx: &mut Context<NativeHome>) -> Option<AnyEl
                 );
         }
     }
-    Some(div().absolute().inset_0()
-        .child(div().absolute().inset_0().occlude().on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
-            this.home_menu = None; cx.stop_propagation(); cx.notify();
-        })))
-        .child(panel).into_any_element())
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.home_menu = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(panel)
+            .into_any_element(),
+    )
 }
