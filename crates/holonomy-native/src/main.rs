@@ -190,15 +190,22 @@ impl NativeHome {
             let Some(owner) = weak.upgrade() else { return };
             let existing = owner.read(cx).settings_window;
             if let Some(handle) = existing {
-                if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+                if handle
+                    .update(cx, |_, window, _| window.activate_window())
+                    .is_ok()
+                {
                     return;
                 }
             }
             let target = owner.clone();
             let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
-            let result = cx.open_window(WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default()
-            }, |window, cx| cx.new(|cx| settings::SettingsWindow::new(target, window, cx)));
+            let result = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| settings::SettingsWindow::new(target, window, cx)),
+            );
             owner.update(cx, |owner, cx| {
                 match result {
                     Ok(handle) => owner.settings_window = Some(handle),
