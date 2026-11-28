@@ -3387,3 +3387,24 @@ change, not a declaration that visual/security/parity qualification is complete.
   Signal/crash termination still does not certify complete wipe or guarantee unsaved data.
 - README now provides post-pull commands, Linux dependencies, macOS prerequisites, and
   Windows's existing persistence refusal. These changes do not close visual/parity gates.
+
+
+### 2026-11-26 — Compiler-free desktop and evidence-bounded Fedora compatibility
+
+User's Fedora source build failed first in a cc wrapper and then at a nonexistent
+hard-coded GCC path. More compiler overrides are not an acceptable desktop launch UX.
+Added `./holonomy [document]`: download the main first-parent desktop-input revision's
+bundle, verify SHA-256, safely extract two regular executables, atomically cache under
+`target/`, then exec without changing cwd. Concurrent first launches serialize via
+flock; failed downloads do not poison a cache or start a stale fallback. Source-built
+files/unrelated links are preserved. No automatic package installs or Rust builds.
+
+Native CI now exports a separate test-only fixture harness and runs the exact downloadable
+Ubuntu-built executables in Fedora 44/45 containers with runtime packages but no Cargo/GCC.
+Qualification exercises real encrypted input/save/refused close/wipe/reopen at 1x and 2x.
+A main-only job publishes checksummed, source-matched experimental prereleases **only**
+after all native OS and Fedora jobs pass. Test fixture code/documents are excluded.
+Offline bootstrap regressions attack corruption, empty checksums, archive traversal,
+symlinks, cache reuse, source matching and failure atomicity. Checksums are corruption
+checks, not an independent signature or supply-chain attestation. This is qualified
+X11/software-Vulkan evidence, not a universal hardware/Wayland/Fedora-version guarantee.

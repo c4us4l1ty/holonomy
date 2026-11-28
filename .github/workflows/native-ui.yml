@@ -14,6 +14,10 @@ on:
       - "vendor/xattr/**"
       - "scripts/qualify-native-ui.sh"
       - "scripts/run-desktop.sh"
+      - "holonomy"
+      - "scripts/desktop-launch.py"
+      - "scripts/test-desktop-launch.py"
+      - "scripts/qualify-fedora.sh"
       - "scripts/test-run-desktop.py"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -46,6 +50,7 @@ jobs:
         shell: bash
         run: |
           python3 scripts/test-run-desktop.py 2>&1 | tee -a native-check.log
+          python3 scripts/test-desktop-launch.py 2>&1 | tee -a native-check.log
           exit "${PIPESTATUS[0]}"
       - name: Resolve, format and compile preview
         shell: bash
@@ -79,6 +84,27 @@ jobs:
             GPUI_X11_SCALE_FACTOR="$scale" xvfb-run -a -s "-screen 0 2560x1800x24" scripts/qualify-native-ui.sh 2>&1 | tee -a native-check.log
             mv native-smoke.png "native-smoke-${scale}.png"
           done
+      - name: Export Linux test-only encrypted fixture harness
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo test --locked -p holonomy-native --lib --no-run --message-format=json > fixture-build.json
+          python3 - <<'PYTHON'
+          import json, shutil
+          for line in open("fixture-build.json"):
+              item = json.loads(line)
+              if item.get("reason") == "compiler-artifact" and item.get("executable") and item["target"]["name"] == "holonomy_native":
+                  shutil.copyfile(item["executable"], "native-fixture")
+                  break
+          else:
+              raise SystemExit("missing native fixture executable")
+          PYTHON
+      - name: Upload test-only Linux fixture
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-fixture-linux
+          path: native-fixture
       - name: Upload runnable preview
         uses: actions/upload-artifact@v4
         with:
@@ -109,8 +135,67 @@ jobs:
             native-refused-save.png
             native-unlock.png
             crates/holonomy-native/src/lib.rs
-  bridge:
+  fedora:
+    name: Fedora ${{ matrix.version }} runtime (no compiler)
     needs: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["44", "45"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: holonomy-native-preview-ubuntu-latest
+          path: target/debug
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-fixture-linux
+          path: target/debug
+      - name: Test the exact downloadable executables inside Fedora
+        shell: bash
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD:/work" -w /work fedora:${{ matrix.version }} bash scripts/qualify-fedora.sh 2>&1 | tee fedora-runtime.log
+      - name: Preserve Fedora runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ui-fedora-${{ matrix.version }}
+          path: |
+            fedora-runtime.log
+            native-smoke*.png
+            native-failure.png
+            native-refused-save.png
+  publish-desktop:
+    name: Publish source-matched experimental desktop
+    needs: [qualify, fedora]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: holonomy-native-preview-ubuntu-latest
+          path: bundle
+      - name: Package the Fedora-tested binaries, without test fixture or document
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          chmod 755 bundle/holonomy-gui bundle/holonomy-native
+          tar czf holonomy-linux-x86_64.tar.gz -C bundle holonomy-gui holonomy-native
+          sha256sum holonomy-linux-x86_64.tar.gz > holonomy-linux-x86_64.tar.gz.sha256
+          gh release create "desktop-$GITHUB_SHA" --target "$GITHUB_SHA" --prerelease \
+            --title "Experimental GPUI desktop ${GITHUB_SHA:0:12}" \
+            --notes "Source-matched Linux x86_64 development build. The exact executables passed encrypted runtime smoke tests on Fedora 44 and 45 under Xvfb/software Vulkan, including 200% scale. Not a hardware/Wayland/security/visual certification. No compiler is required to run. Runtime graphics libraries/drivers are still required. Use test documents. Checksums detect corruption, not an independent signature. Install/run from the matching checkout with ./holonomy." \
+            holonomy-linux-x86_64.tar.gz holonomy-linux-x86_64.tar.gz.sha256
+  bridge:
+    needs: [qualify, fedora]
     if: always() && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
