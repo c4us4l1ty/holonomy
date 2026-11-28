@@ -16,7 +16,7 @@ trap 'xwininfo -root -tree || true; import -window root native-failure.png || tr
 # Select X11 explicitly; hosted CI may also advertise a nonfunctional Wayland display.
 unset WAYLAND_DISPLAY
 export GPUI_X11_SCALE_FACTOR="${GPUI_X11_SCALE_FACTOR:-1}"
-target/debug/holonomy-native "$HOLONOMY_NATIVE_SMOKE_PATH" &
+target/debug/holonomy-gui "$HOLONOMY_NATIVE_SMOKE_PATH" &
 app_pid=$!
 window=$(timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' | head -1)
 xdotool windowfocus --sync "$window"

@@ -26,6 +26,7 @@
 pub mod canvas;
 #[cfg(target_os = "macos")]
 pub mod cocoa;
+pub mod desktop;
 pub mod panel;
 pub mod platform;
 pub mod store;

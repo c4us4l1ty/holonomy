@@ -1,3 +1,24 @@
+## Desktop UI: GPUI
+
+The normal desktop entry points (`holonomy-gui` and `holonomy gui`) now launch the
+GPUI frontend, not the legacy enlarged pixel surface. Build **both** the launcher
+and its GPUI companion, or use:
+
+```sh
+scripts/run-desktop.sh /absolute/path/notes.wavefunction
+```
+
+Omit the path for Home. This uses device-scale vector document rendering and native
+GPUI chrome; it does not scale a completed low-resolution framebuffer. The companion
+must remain beside the launcher in installed bundles. Missing companions produce an
+error, never a silent fallback to the old renderer. For explicit legacy compatibility
+testing only, set `HOLONOMY_LEGACY_GUI=1`. The TUI/CLI is unchanged.
+
+**Experimental, use test documents:** changing the desktop entry point does not certify
+visual sharpness on your monitor or close the remaining security/platform/parity gates.
+Windows encrypted persistence is still refused. See
+[`crates/holonomy-native/README.md`](crates/holonomy-native/README.md) for exact limits.
+
 # Holonomy
 
 A writing instrument for one document that grows for a lifetime: thirty million words, sixty
@@ -112,7 +133,7 @@ detail lives.
 | That binary, driven end to end by CI | **Real** — created, sealed, reopened, `verify`, `compact`, `import`, `export`, wrong/empty passphrases refused | `scripts/smoke-install.sh` (D-72), `tests/transfer_migrate.rs` |
 | A packaged release or installer | **Unsigned archives for Linux x86_64, macOS arm64, and Windows x86_64** per `v*` tag, built from the lockfile and smoke-tested before packaging. No installer, no signing/notarization | `docs/TO-APP.md` M8, `.github/workflows/release.yml` |
 | Opening a copied file on a fresh profile (`L-9`) | **Enforced (`L-9` gated)**: single-host `env -i` zero-state drill (`portability`) + Linux `x86_64` → macOS `aarch64` & Windows `x86_64` cross-OS hand-off with passphrase alone (`l9-cross-os`) | `scripts/qualify-l9-portability.sh`, `.github/workflows/ci.yml` |
-| Platform IME / dead keys & OS suspend tripwires | **Implemented in native windows** — `NSTextInputClient` + `NSWorkspaceWillSleepNotification` (`Cocoa`), `imm32.dll` `WM_IME_*` + `PBT_APMSUSPEND` (`Win32`), dead-key/`Multi_key` compose + `SIGUSR2`/`SIGTSTP`/`SIGPWR` (`X11` & TUI). Full GPUI GPU shell remains unbuilt under `--locked` | `holonomy-gui/src/{cocoa,win32,x11,canvas,bin/holonomy}.rs` (`D-96`) |
+| Platform IME / dead keys & OS suspend tripwires | **Implemented in native windows** — `NSTextInputClient` + `NSWorkspaceWillSleepNotification` (`Cocoa`), `imm32.dll` `WM_IME_*` + `PBT_APMSUSPEND` (`Win32`), dead-key/`Multi_key` compose + `SIGUSR2`/`SIGTSTP`/`SIGPWR` (`X11` & TUI). GPUI desktop now builds under `--locked`; full native IME/suspend qualification remains open | `holonomy-gui/src/{cocoa,win32,x11,canvas,bin/holonomy}.rs` (`D-96`) |
 | Wide characters (`中`, Hangul, emoji) | **Real** — two-cell UCD 18.0.0 width in both `CellShaper` and terminal renderer (`Ambiguous` = 1 cell) | OQ-25 |
 | Right-to-left & mixed BiDi text (Hebrew, Arabic, …) | **Real UAX #9 visual ordering + L-8 caret bijection + `GDEF`/`GSUB`/`GPOS` shaping** (`displaced = 0`, split selection spans, kerning/ligatures/marks) | OQ-11 (D-77), OQ-24 (D-95) |
 | Emergency wipe & zeroize canaries (`L-7`) | **Not qualified.** Historical headless tests wipe selected buffers and canaries; the live reaper is cooperative and can stall with the UI, so a blocked window cannot meet the 50 ms deadline. The window now reports a wipe by the reaper's own outcome and exits 1 when it cannot be confirmed (D-89), but that is a receipt for *registered* arenas, not complete plaintext coverage. A Linux isolated-supervisor test is not wired into the editor. | `holonomy-seal::reaper`, `holonomy-text/tests/wipe_gate.rs`, `docs/BOUNDED_SEARCH_AND_WIPE.md` (D-82–D-89) |

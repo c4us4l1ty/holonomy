@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Explicit compatibility test; the normal desktop launcher is GPUI.
+export HOLONOMY_LEGACY_GUI=1
 
 # Real Xvfb qualification gate for `holonomy-gui` (`x11.rs` + `canvas.rs` + `PixelSurface`).
 # Boots a real headless X11 server (`Xvfb`), launches the compiled `holonomy-gui` desktop binary,

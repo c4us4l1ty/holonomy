@@ -1,6 +1,7 @@
-# Native vector frontend — development build
+# GPUI desktop — experimental build
 
-This is an opt-in migration, **not yet the default release editor**. GPUI draws
+The desktop launchers now select this frontend by default. **This is not a
+production-qualified release.** GPUI draws
 window chrome; document text is shaped by Holonomy and painted as vector glyph
 outlines at the monitor's device scale. No finished logical framebuffer is enlarged,
 and document strings are not passed into GPUI's text layout cache.
@@ -49,7 +50,7 @@ encrypted reopen verification of the last committed version. A failed append req
 recovery/reopen; restoring a pathname never clears the storage safety fence. CI
 screenshots are test specimens, not proof of quality on the user's actual monitor.
 
-Still outstanding before replacing the default:
+Still outstanding before production qualification:
 
 - Suspend/USB tripwire producers, complete scene/cache lifecycle review and shutdown/OS-quit
   failure handling. Manual/dead-man CPU/key wipe is not a full lifecycle qualification.
@@ -60,8 +61,10 @@ Still outstanding before replacing the default:
 - Native-platform runtime qualification, mixed-monitor DPI, fractional-scale visual
   checks and user confirmation at 200%.
 
-**Use test documents only until these gates close.** The old frontend remains the
-release default; none of its installers or launchers is silently replaced.
+**Use test documents only until these gates close.** `holonomy-gui` and `holonomy gui`
+launch the sibling `holonomy-native` executable. Release bundles include it. The old
+pixel frontend is available only via explicit `HOLONOMY_LEGACY_GUI=1`; missing GPUI
+binaries never silently fall back. Use `scripts/run-desktop.sh` for a source checkout.
 
 See `docs/QUIET-MD-UI-MIGRATION.md` and `vendor/xattr/HOLONOMY.md` for the migration
 and temporary compatibility patch. Linux build dependencies are listed in

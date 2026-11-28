@@ -6,6 +6,7 @@ on:
       - "crates/holonomy-native/**"
       - "crates/holonomy-eye/**"
       - "crates/holonomy-gui/**"
+      - ".github/workflows/release.yml"
       - "crates/holonomy-shell/**"
       - "crates/holonomy-text/**"
       - "crates/holonomy-line/**"
