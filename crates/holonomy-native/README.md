@@ -22,7 +22,9 @@ The Native UI preview workflow publishes platform binaries as run artifacts.
 - Native text-input callbacks and bounded, zeroizing IME preedit. Document composition is
   committed as one text insertion rather than persisting each intermediate candidate.
 - Keyboard editing, mouse selection, drag, scroll, undo/redo, select-all and basic formatting.
-- Save and save-before-close/Home; a save refusal keeps the session open. Uncommitted IME
+- Save and save-before-close/Home; a save refusal keeps the session open and displays a
+  persistent SAVE FAILED warning until a successful save or explicit wipe. See
+  `docs/LINUX-SAVE-RECOVERY.md` for recovery and plaintext-egress cautions. Uncommitted IME
   composition blocks unlock/create/save/close until the platform commits or cancels it.
 - Streaming Find, read-only witness previews, bookmark creation and integrity verification.
 - Explicit bounded clipboard copy/cut/paste with plaintext-egress disclosure.
