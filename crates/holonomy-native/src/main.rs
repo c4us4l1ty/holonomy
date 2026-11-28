@@ -183,26 +183,30 @@ impl NativeHome {
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.settings_window {
-            if handle
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok()
-            {
-                return;
+        // GPUI renders a newly opened window synchronously. Defer until this owner's
+        // update borrow is released, otherwise Settings cannot safely read its state.
+        let weak = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let Some(owner) = weak.upgrade() else { return };
+            let existing = owner.read(cx).settings_window;
+            if let Some(handle) = existing {
+                if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+                    return;
+                }
             }
-        }
-        let owner = cx.entity();
-        let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
-        match cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| settings::SettingsWindow::new(owner, window, cx)),
-        ) {
-            Ok(handle) => self.settings_window = Some(handle),
-            Err(error) => self.status = format!("Could not open settings: {error}"),
-        }
+            let target = owner.clone();
+            let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
+            let result = cx.open_window(WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default()
+            }, |window, cx| cx.new(|cx| settings::SettingsWindow::new(target, window, cx)));
+            owner.update(cx, |owner, cx| {
+                match result {
+                    Ok(handle) => owner.settings_window = Some(handle),
+                    Err(error) => owner.status = format!("Could not open settings: {error}"),
+                }
+                cx.notify();
+            });
+        });
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
