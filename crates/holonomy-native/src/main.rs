@@ -455,6 +455,18 @@ impl NativeHome {
         } else {
             mods.control
         };
+        if command && key == "," {
+            self.show_settings = !self.show_settings;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if key == "escape" && self.show_settings {
+            self.show_settings = false;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if command && mods.shift && key == "t" {
             self.dark = !self.dark;
             cx.stop_propagation();
