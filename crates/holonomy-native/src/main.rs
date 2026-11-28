@@ -2,6 +2,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod design;
+mod library;
 
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgb, size, App, Application, Bounds, Context,
@@ -60,6 +61,7 @@ struct NativeHome {
     save_failure: Option<String>,
     bounds: Bounds<Pixels>,
     dragging: bool,
+    library: library::Library,
     show_history: bool,
     sidebar_hidden: bool,
     sidebar_forced: bool,
@@ -117,6 +119,12 @@ fn field(
 impl NativeHome {
     fn new(cx: &mut Context<Self>) -> Self {
         let path = std::env::args().nth(1).unwrap_or_default();
+        let library_folder = if path.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| ".".into())
+        } else {
+            let absolute = std::env::current_dir().unwrap_or_else(|_| ".".into()).join(&path);
+            absolute.parent().unwrap_or(Path::new(".")).to_path_buf()
+        };
         let screen = if path.is_empty() {
             Screen::Home
         } else {
@@ -159,6 +167,7 @@ impl NativeHome {
             save_failure: None,
             bounds: Bounds::default(),
             dragging: false,
+            library: library::Library::new(library_folder),
             show_history: false,
             sidebar_hidden: false,
             sidebar_forced: false,
@@ -185,6 +194,27 @@ impl NativeHome {
         self.editing_path = true;
         self.screen = Screen::Unlock;
         self.status.clear();
+    }
+
+    fn open_library_entry(&mut self, entry: &library::Entry) {
+        if !self.composition_ready() {
+            return;
+        }
+        if entry.directory {
+            self.library.navigate(&entry.path);
+        } else {
+            // begin_document refuses navigation when saving the old document fails.
+            self.begin_document(false);
+            if self.screen == Screen::Unlock && self.session.is_none() {
+                match entry.path.to_str() {
+                    Some(path) if path.len() <= 4096 => {
+                        self.path = path.into();
+                        self.editing_path = false;
+                    }
+                    _ => self.status = "This path cannot be entered as bounded UTF-8 text.".into(),
+                }
+            }
+        }
     }
 
     fn report(&mut self, result: holonomy_native::Result<()>, success: &str) {
@@ -348,6 +378,10 @@ impl NativeHome {
         });
         match result {
             Ok(session) => {
+                if let Some(parent) = session.path().parent() {
+                    let folder = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+                    self.library.navigate(folder);
+                }
                 self.session = Some(session);
                 self.screen = Screen::Editor;
                 self.status.clear();
@@ -1387,6 +1421,20 @@ impl Render for NativeHome {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .child(input);
+        let mut library_list = div().id("library-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_1();
+        for (index, entry) in self.library.entries.iter().enumerate() {
+            let entry = entry.clone();
+            let selected = self.session.as_ref().is_some_and(|s| s.path() == entry.path);
+            let label = format!("{} {}", if entry.directory { "+" } else { "·" }, entry.path.file_name().unwrap_or_default().to_string_lossy());
+            library_list = library_list.child(div().id(("library-entry", index)).cursor_pointer().flex_shrink_0().px_3().py_2()
+                .rounded_md().bg(rgb(if selected { palette.selected } else { palette.rail }))
+                .overflow_hidden().whitespace_nowrap().text_ellipsis().child(label)
+                .hover(|style| style.bg(gpui::rgba(0x88888818)))
+                .on_click(cx.listener(move |this, _, _, cx| { this.open_library_entry(&entry); cx.notify(); })));
+        }
+        if self.library.entries.is_empty() {
+            library_list = library_list.child(div().px_3().py_2().text_size(px(12.)).text_color(rgb(muted)).child("No folders or .wavefunction files here."));
+        }
         if sidebar_width > 0. {
             shell = shell.child(
                 div()
@@ -1447,38 +1495,18 @@ impl Render for NativeHome {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        div()
-                            .mt_6()
-                            .px_3()
-                            .text_size(px(11.))
-                            .text_color(rgb(muted))
-                            .child("WORKSPACE"),
-                    )
-                    .child(
-                        div()
-                            .px_3()
-                            .text_size(px(12.))
-                            .text_color(rgb(muted))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(
-                                self.session
-                                    .as_ref()
-                                    .map(|s| {
-                                        format!(
-                                            "▤  {}",
-                                            s.path()
-                                                .file_name()
-                                                .unwrap_or_default()
-                                                .to_string_lossy()
-                                        )
-                                    })
-                                    .unwrap_or_else(|| "No document open".into()),
-                            ),
-                    )
-                    .child(div().flex_1())
+                    .child(div().mt_4().flex().items_center().justify_between()
+                        .child(button("library-up", "Up").on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(parent) = this.library.folder.parent().map(Path::to_path_buf) { this.library.navigate(&parent); }
+                            cx.notify();
+                        })))
+                        .child(button("library-refresh", "Refresh").on_click(cx.listener(|this, _, _, cx| {
+                            this.library.refresh(); cx.notify();
+                        }))))
+                    .child(div().px_3().text_size(px(12.)).text_color(rgb(muted)).overflow_hidden().whitespace_nowrap().text_ellipsis()
+                        .child(self.library.folder.to_string_lossy().into_owned()))
+                    .child(library_list)
+                    .child(div().px_3().text_size(px(11.)).text_color(rgb(muted)).child(self.library.notice.clone()))
                     .child(
                         div()
                             .border_t_1()
