@@ -966,6 +966,15 @@ mod ui_smoke_fixture {
         session.save().unwrap();
     }
     #[test]
+    #[ignore = "checks the real calibrated create/responsiveness UI drill"]
+    fn verify_created() {
+        let path = PathBuf::from(std::env::var_os("HOLONOMY_NATIVE_CREATE_PATH").expect("explicit create fixture path"));
+        let mut session = Session::open(&path, b"native responsive create passphrase").unwrap();
+        assert_eq!(session.editor.frame().unwrap().text(), "Created without blocking the window");
+        session.verify().unwrap();
+    }
+
+    #[test]
     #[ignore = "checks the file saved by the Xvfb native UI qualification job"]
     fn verify() {
         let path = PathBuf::from(

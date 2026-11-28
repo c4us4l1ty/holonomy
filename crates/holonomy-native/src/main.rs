@@ -377,7 +377,8 @@ impl NativeHome {
     }
 
     fn wipe(&mut self, cx: &mut Context<Self>) {
-        let cancelled_worker = self.pending_unlock.take().is_some();
+        let cancelled_worker = self.pending_unlock.take().is_some()
+            || self.unlock_worker_active.load(Ordering::Acquire);
         let verified = self.session.as_mut().map_or(true, Session::wipe);
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
         self.session.take();
@@ -466,6 +467,12 @@ impl NativeHome {
                 cx.stop_propagation();
                 cx.notify();
             }
+            return;
+        }
+        if command && (key == "n" || key == "o") {
+            self.begin_document(key == "n");
+            cx.stop_propagation();
+            cx.notify();
             return;
         }
         if self.screen == Screen::Unlock {
@@ -715,7 +722,13 @@ fn paint_frame(bounds: Bounds<Pixels>, frame: VectorFrame, ink: u32, window: &mu
 impl Render for NativeHome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_window_title(&self.session.as_ref().map_or_else(
-            || "Holonomy Native".to_string(),
+            || {
+                if self.pending_unlock.is_some() {
+                    format!("Holonomy Native - Working - {}", if self.dark { "Dark" } else { "Light" })
+                } else {
+                    "Holonomy Native".to_string()
+                }
+            },
             |session| {
                 format!(
                     "Holonomy Native — {}",

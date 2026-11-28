@@ -134,6 +134,7 @@ jobs:
             native-smoke*.png
             native-failure.png
             native-refused-save.png
+            native-busy.png
             native-home.png
             native-compact.png
             native-unlock.png
@@ -172,6 +173,7 @@ jobs:
             native-smoke*.png
             native-failure.png
             native-refused-save.png
+            native-busy.png
             native-home.png
             native-compact.png
   publish-desktop:
