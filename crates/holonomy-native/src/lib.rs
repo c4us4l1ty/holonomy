@@ -389,7 +389,10 @@ impl Session {
 
     /// Computes toolbar formatting from the core selection, never from a second document model.
     pub fn toolbar(&self) -> holonomy_text::ToolbarState {
-        self.history.as_ref().unwrap_or(&self.editor).toolbar_state()
+        self.history
+            .as_ref()
+            .unwrap_or(&self.editor)
+            .toolbar_state()
     }
 
     /// Copies the explicitly selected plaintext for an explicit clipboard operation only.
@@ -745,8 +748,12 @@ mod tests {
         use holonomy_text::{StylePatch, TriState};
         let fixture = Fixture::new();
         let mut session = fixture.session();
-        session.apply(Intent::Type("checkpoint text".into())).unwrap();
-        assert!(session.apply(Intent::SetLink(Some("https://example.invalid".into()))).is_err());
+        session
+            .apply(Intent::Type("checkpoint text".into()))
+            .unwrap();
+        assert!(session
+            .apply(Intent::SetLink(Some("https://example.invalid".into())))
+            .is_err());
         session.apply(Intent::SelectAll).unwrap();
         let mut patch = StylePatch::new();
         patch.bold = Some(true);
@@ -764,8 +771,13 @@ mod tests {
         assert!(session.apply(Intent::SetLink(None)).is_err());
         session.show_current();
         assert_eq!(session.toolbar().bold, TriState::Uniform(false));
-        session.apply(Intent::SetLink(Some("https://example.invalid".into()))).unwrap();
-        assert_eq!(session.toolbar().link, TriState::Uniform(Some("https://example.invalid".into())));
+        session
+            .apply(Intent::SetLink(Some("https://example.invalid".into())))
+            .unwrap();
+        assert_eq!(
+            session.toolbar().link,
+            TriState::Uniform(Some("https://example.invalid".into()))
+        );
     }
 
     #[test]

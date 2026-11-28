@@ -97,10 +97,14 @@ mod tests {
     use super::*;
     #[test]
     fn unrepresentable_library_paths_are_refused_before_navigation() {
-        assert_eq!(input_path(Path::new("notes.wavefunction")), Some("notes.wavefunction"));
+        assert_eq!(
+            input_path(Path::new("notes.wavefunction")),
+            Some("notes.wavefunction")
+        );
         assert!(input_path(Path::new(&"x".repeat(4096))).is_some());
         assert!(input_path(Path::new(&"x".repeat(4097))).is_none());
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::ffi::OsStringExt;
             let invalid = std::ffi::OsString::from_vec(vec![b'n', 0xff]);
             assert!(input_path(Path::new(&invalid)).is_none());
