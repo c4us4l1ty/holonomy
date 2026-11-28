@@ -3457,3 +3457,15 @@ license material is not silently stripped during caching. No new binary artifact
   is retained with native diagnostics. No app data or credentials enter the canary.
 - Existing async KDF, narrow layout, five-scale encrypted runtime and Fedora 44/45 real-KDF
   responsiveness drills are rerun unchanged; no performance/security thresholds are relaxed.
+
+### 2026-11-26 — Form clipboard bug hunt
+
+The frontend consumed command shortcuts globally but only implemented paste inside the
+Editor branch. Ctrl/Cmd+V in Unlock (both path and passphrase), Find and Bookmark therefore
+silently did nothing, including password-manager pastes. Route those explicit pastes
+through commit_text after the existing pending-unlock/composition guards, so field size
+limits and query-index resets still apply. Zeroize the local clipboard text copy after
+insertion (not a claim to clear the OS/framework clipboard). Document paste is unchanged.
+Oversized path text was also silently discarded; now report refusal and preserve the old
+path atomically. Add field-routing/Unicode byte-bound regressions and exercise real X11
+clipboard passphrase and Find insertion in the five-scale and Fedora runtime drills.

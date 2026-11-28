@@ -44,7 +44,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev xvfb xdotool x11-utils imagemagick mesa-vulkan-drivers
+          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev xvfb xdotool xclip x11-utils imagemagick mesa-vulkan-drivers
       - name: Test desktop build helper without launching a display
         if: runner.os != 'Windows'
         shell: bash

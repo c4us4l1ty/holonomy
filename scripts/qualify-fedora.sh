@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs INSIDE Fedora: validate the exact downloadable binaries, no Rust/C compiler installed.
 set -euxo pipefail
-dnf install -y python3 xorg-x11-server-Xvfb /usr/bin/xwininfo /usr/bin/xdpyinfo xdotool ImageMagick \
+dnf install -y python3 xorg-x11-server-Xvfb /usr/bin/xwininfo /usr/bin/xdpyinfo xdotool xclip ImageMagick \
   vulkan-loader mesa-vulkan-drivers libxkbcommon-x11 fontconfig alsa-lib openssl-libs \
   libX11-xcb libXcursor libXi libXrandr libXinerama libXrender \
   'libwayland-client.so.0()(64bit)' 'libwayland-cursor.so.0()(64bit)' \

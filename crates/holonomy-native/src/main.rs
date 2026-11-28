@@ -491,6 +491,17 @@ impl NativeHome {
             cx.notify();
             return;
         }
+        if form_paste(self.screen, command, key) {
+            if let Some(item) = cx.read_from_clipboard() {
+                if let Some(mut text) = item.text() {
+                    self.commit_text(&text);
+                    text.zeroize();
+                }
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if self.screen == Screen::Unlock {
             match key {
                 "escape" => {
@@ -646,8 +657,8 @@ impl NativeHome {
         }
         match self.screen {
             Screen::Unlock if self.editing_path => {
-                if self.path.len().saturating_add(text.len()) <= 4096 {
-                    self.path.push_str(text);
+                if !append_path(&mut self.path, text) {
+                    self.status = "Document path exceeds the 4096-byte limit.".into();
                 }
             }
             Screen::Unlock => {
@@ -1580,6 +1591,20 @@ fn main() {
     });
 }
 
+// Forms do not inherit the document editor's clipboard shortcuts. Route paste explicitly
+// through their bounded input path, never as a document edit or a partial field insertion.
+fn form_paste(screen: Screen, command: bool, key: &str) -> bool {
+    command && key == "v" && matches!(screen, Screen::Unlock | Screen::Find | Screen::Bookmark)
+}
+
+fn append_path(path: &mut String, text: &str) -> bool {
+    if path.len().saturating_add(text.len()) > 4096 {
+        return false;
+    }
+    path.push_str(text);
+    true
+}
+
 // Saving cannot silently drop text that still belongs to the platform's composition. Refuse
 // until the IME commits/cancels rather than guessing at a commit and later inserting it twice.
 fn composition_ready(preedit: &SecretInput, status: &mut String) -> bool {
@@ -1603,6 +1628,29 @@ fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn form_paste_is_routed_only_to_active_fields() {
+        for screen in [Screen::Unlock, Screen::Find, Screen::Bookmark] {
+            assert!(form_paste(screen, true, "v"));
+            assert!(!form_paste(screen, false, "v"));
+            assert!(!form_paste(screen, true, "c"));
+        }
+        assert!(!form_paste(Screen::Home, true, "v"));
+        assert!(!form_paste(Screen::Editor, true, "v"));
+    }
+
+    #[test]
+    fn path_paste_is_atomic_and_utf8_byte_bounded() {
+        let mut path = "x".repeat(4094);
+        assert!(append_path(&mut path, "é"));
+        assert_eq!(path.len(), 4096);
+        assert!(!append_path(&mut path, "x"));
+        assert_eq!(path.len(), 4096);
+        let mut original = "notes.wavefunction".to_string();
+        assert!(!append_path(&mut original, &"x".repeat(4096)));
+        assert_eq!(original, "notes.wavefunction");
+    }
+
     #[test]
     fn unlock_worker_guard_releases_single_flight_gate_on_drop() {
         let active = Arc::new(AtomicBool::new(true));

@@ -35,7 +35,8 @@ xdotool key Return
 sleep 1
 [[ "$(xdotool getwindowname "$window")" == "Holonomy Native" ]]
 [[ "$(sha256sum "$HOLONOMY_NATIVE_SMOKE_PATH")" == "$before" ]]
-xdotool type --clearmodifiers --delay 35 'native smoke passphrase'
+printf %s 'native smoke passphrase' | xclip -selection clipboard
+xdotool key ctrl+v
 sleep 1
 import -window "$window" native-unlock.png
 xdotool key Return
@@ -46,7 +47,8 @@ xdotool type --clearmodifiers --delay 35 'Saved by native UI smoke test'
 xdotool key ctrl+z
 xdotool key ctrl+y
 xdotool key ctrl+f
-xdotool type --clearmodifiers --delay 35 'native'
+printf %s 'native' | xclip -selection clipboard
+xdotool key ctrl+v
 xdotool key Return Escape
 xdotool key ctrl+b
 xdotool key ctrl+s
