@@ -114,11 +114,24 @@ xdotool key ctrl+shift+t
 sleep 1
 kill -0 "$app_pid"
 import -window "$window" native-compact.png
+xdotool windowsize --sync "$window" "$(awk "BEGIN {printf \"%.0f\", 1100 * $GPUI_X11_SCALE_FACTOR}")" "$(awk "BEGIN {printf \"%.0f\", 800 * $GPUI_X11_SCALE_FACTOR}")"
 xdotool key ctrl+comma
 settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings' | head -1)
 [[ "$settings_window" == "$window" ]]
 [[ $(xdotool search --onlyvisible --name '^Holonomy' | wc -l) -eq 1 ]]
 import -window "$window" native-settings.png
+xdotool key Down
+sleep 0.3
+import -window "$window" native-settings-appearance.png
+xdotool key Down
+sleep 0.3
+import -window "$window" native-settings-shortcuts.png
+xdotool key Down
+sleep 0.3
+import -window "$window" native-settings-documents.png
+xdotool key Down Down
+sleep 0.3
+import -window "$window" native-settings-about.png
 xdotool key Escape
 timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
 kill -0 "$app_pid"

@@ -142,7 +142,7 @@ jobs:
             native-busy.png
             native-home.png
             native-compact.png
-            native-settings.png
+            native-settings*.png
             native-search.png
             native-library.png
             native-unlock.png
@@ -184,7 +184,7 @@ jobs:
             native-busy.png
             native-home.png
             native-compact.png
-            native-settings.png
+            native-settings*.png
             native-search.png
             native-library.png
   publish-desktop:

@@ -620,6 +620,10 @@ impl NativeHome {
         if self.settings_page.is_some() {
             if key == "escape" {
                 self.close_settings(cx);
+            } else if key == "down" {
+                self.settings_page = self.settings_page.map(|page| (page + 1).min(5));
+            } else if key == "up" {
+                self.settings_page = self.settings_page.map(|page| page.saturating_sub(1));
             } else if command && (key == "q" || key == "w") && self.save() {
                 window.remove_window();
             }
