@@ -249,16 +249,16 @@ impl NativeHome {
         if entry.directory {
             self.library.navigate(&entry.path);
         } else {
-            // begin_document refuses navigation when saving the old document fails.
+            // Validate before saving/closing or changing the selected path. A refused
+            // library name must never leave the unlock form targeting the old file.
+            let Some(path) = library::input_path(&entry.path) else {
+                self.status = "This path cannot be entered as bounded UTF-8 text.".into();
+                return;
+            };
             self.begin_document(false);
             if self.screen == Screen::Unlock && self.session.is_none() {
-                match entry.path.to_str() {
-                    Some(path) if path.len() <= 4096 => {
-                        self.path = path.into();
-                        self.editing_path = false;
-                    }
-                    _ => self.status = "This path cannot be entered as bounded UTF-8 text.".into(),
-                }
+                self.path = path.into();
+                self.editing_path = false;
             }
         }
     }
@@ -282,15 +282,24 @@ impl NativeHome {
     }
 
     fn apply(&mut self, intent: Intent) {
+        self.try_apply(intent);
+    }
+
+    fn try_apply(&mut self, intent: Intent) -> bool {
         if !self.composition_ready() {
-            return;
+            return false;
         }
         if let Some(session) = self.session.as_mut() {
             let navigation = matches!(intent, Intent::RevealCaret);
             let result = session.apply(intent);
-            if !navigation || result.is_err() {
+            let accepted = result.is_ok();
+            if !navigation || !accepted {
                 self.report(result, "");
             }
+            accepted
+        } else {
+            self.status = "No document is open.".into();
+            false
         }
     }
 
@@ -652,14 +661,13 @@ impl NativeHome {
                         } else {
                             Some(self.query.to_string())
                         };
-                        self.apply(Intent::SetLink(target));
-                        self.query.zeroize();
-                        self.screen = Screen::Editor;
+                        let accepted = self.try_apply(Intent::SetLink(target));
+                        complete_form(&mut self.query, &mut self.screen, accepted);
                     } else if let Some(session) = &mut self.session {
                         let result = session.bookmark(&self.query);
+                        let accepted = result.is_ok();
                         self.report(result, "Bookmark added.");
-                        self.query.zeroize();
-                        self.screen = Screen::Editor;
+                        complete_form(&mut self.query, &mut self.screen, accepted);
                     }
                 }
                 "backspace" => {
@@ -2037,6 +2045,14 @@ fn main() {
     });
 }
 
+// Refused transactions retain the input and form so the user can correct/retry.
+fn complete_form(query: &mut SecretInput, screen: &mut Screen, accepted: bool) {
+    if accepted {
+        query.zeroize();
+        *screen = Screen::Editor;
+    }
+}
+
 fn adjust_text_size(size: u32, delta: i32) -> u32 {
     (i64::from(size) + i64::from(delta)).clamp(500, 3000) as u32
 }
@@ -2145,6 +2161,21 @@ fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refused_link_and_bookmark_keep_input_until_success_or_cancel() {
+        for initial in [Screen::Link, Screen::Bookmark] {
+            let mut query = SecretInput::default();
+            assert!(query.push_str("keep this input"));
+            let mut screen = initial;
+            complete_form(&mut query, &mut screen, false);
+            assert!(screen == initial);
+            assert_eq!(&*query, "keep this input");
+            complete_form(&mut query, &mut screen, true);
+            assert!(screen == Screen::Editor);
+            assert!(query.is_empty());
+        }
+    }
+
     #[test]
     fn toolbar_size_steps_are_bounded_and_do_not_overflow() {
         assert_eq!(adjust_text_size(1000, 100), 1100);

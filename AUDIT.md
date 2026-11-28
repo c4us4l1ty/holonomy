@@ -3511,3 +3511,18 @@ form routed through bounded/IME/worker guards and the engine SetLink transaction
 size overflow/boundary checks and an encrypted font/size/link save/reopen/clear regression.
 Do not mislabel relative text size as qualified native zoom, or add fake print/image/color
 controls unsupported by the engine.
+
+### 2026-11-26 — Post-settings end-to-end bug hunt
+
+Fix refused Link/Bookmark transactions discarding input: leave the form/input intact on
+failure, wiping and returning to Editor only on success (or explicit Escape cancellation).
+Refuse SetLink without a selection instead of falsely accepting a no-op. Fix history toolbar
+state reading the live editor instead of the visible checkpoint; refuse bookmarks from
+history rather than silently bookmarking the latest witness. Validate a library path's
+lossless UTF-8/4096-byte bounds before saving/closing/changing navigation state; unsupported
+names previously left Unlock pointing at the old file. Add regression tests for each path.
+
+Extend real native/Fedora drills: keep Settings open through failed editor close, invoke
+emergency wipe while Settings owns keyboard focus, and finally close the editor while a
+reopened Settings window is alive. This checks both failure-preservation and auxiliary-window
+shutdown without weakening save/wipe/security thresholds.

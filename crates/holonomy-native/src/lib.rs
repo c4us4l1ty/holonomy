@@ -196,6 +196,12 @@ impl Session {
                     .into(),
             );
         }
+        if self.history.is_none() && matches!(&intent, Intent::SetLink(_)) {
+            let (start, end) = self.editor.selection().normalised();
+            if start == end {
+                return Err("Select document text before adding or removing a link.".into());
+            }
+        }
         if let Some(history) = self.history.as_mut() {
             if !matches!(
                 intent,
@@ -292,6 +298,9 @@ impl Session {
 
     /// Adds a bookmark only after a successful save.
     pub fn bookmark(&mut self, name: &str) -> Result<()> {
+        if self.in_history() {
+            return Err("Return to the current document before adding a bookmark.".into());
+        }
         self.save()?;
         let sequence = self
             .witnesses()
@@ -380,7 +389,10 @@ impl Session {
 
     /// Computes toolbar formatting from the core selection, never from a second document model.
     pub fn toolbar(&self) -> holonomy_text::ToolbarState {
-        self.editor.toolbar_state()
+        self.history
+            .as_ref()
+            .unwrap_or(&self.editor)
+            .toolbar_state()
     }
 
     /// Copies the explicitly selected plaintext for an explicit clipboard operation only.
@@ -729,6 +741,43 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    #[test]
+    fn link_requires_selection_and_history_toolbar_reports_the_visible_checkpoint() {
+        use holonomy_text::{StylePatch, TriState};
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session
+            .apply(Intent::Type("checkpoint text".into()))
+            .unwrap();
+        assert!(session
+            .apply(Intent::SetLink(Some("https://example.invalid".into())))
+            .is_err());
+        session.apply(Intent::SelectAll).unwrap();
+        let mut patch = StylePatch::new();
+        patch.bold = Some(true);
+        session.apply(Intent::Format(patch)).unwrap();
+        session.save().unwrap();
+        let checkpoint = *session.witnesses().last().unwrap();
+        let mut patch = StylePatch::new();
+        patch.bold = Some(false);
+        session.apply(Intent::Format(patch)).unwrap();
+        session.save().unwrap();
+        session.show_witness(checkpoint).unwrap();
+        session.apply(Intent::SelectAll).unwrap();
+        assert_eq!(session.toolbar().bold, TriState::Uniform(true));
+        assert!(session.bookmark("must not mark the wrong witness").is_err());
+        assert!(session.apply(Intent::SetLink(None)).is_err());
+        session.show_current();
+        assert_eq!(session.toolbar().bold, TriState::Uniform(false));
+        session
+            .apply(Intent::SetLink(Some("https://example.invalid".into())))
+            .unwrap();
+        assert_eq!(
+            session.toolbar().link,
+            TriState::Uniform(Some("https://example.invalid".into()))
+        );
     }
 
     #[test]
