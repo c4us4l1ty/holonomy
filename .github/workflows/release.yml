@@ -45,8 +45,14 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "stem=holonomy-${version}-${TARGET}" >> "$GITHUB_OUTPUT"
 
+      - name: Install GPUI Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev libasound2-dev libssl-dev
       - name: Build Linux release binaries from the lockfile
-        run: cargo build --locked --release -p holonomy-gui --bin holonomy --bin holonomy-gui
+        run: |
+          cargo build --locked --release -p holonomy-gui --bin holonomy --bin holonomy-gui
+          cargo build --locked --release -p holonomy-native --features native-ui
 
       - name: Smoke-test the release binary before packaging
         run: |
@@ -64,6 +70,7 @@ jobs:
           mkdir -p "${root}/bin" "${root}/share/doc/holonomy/LICENSES"
           install -m 755 target/release/holonomy "${root}/bin/holonomy"
           install -m 755 target/release/holonomy-gui "${root}/bin/holonomy-gui"
+          install -m 755 target/release/holonomy-native "${root}/bin/holonomy-native"
           cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY.md README.md "${root}/share/doc/holonomy/"
           cp LICENSES/*.txt "${root}/share/doc/holonomy/LICENSES/"
           cp packaging/README-RELEASE.txt "${root}/README-RELEASE.txt"
@@ -122,6 +129,7 @@ jobs:
         run: |
           cargo test --locked -p holonomy-gui
           cargo build --locked --release -p holonomy-gui --bin holonomy --bin holonomy-gui
+          cargo build --locked --release -p holonomy-native --features native-ui
 
       - name: Assemble the macOS tarball
         env:
@@ -132,6 +140,7 @@ jobs:
           mkdir -p "${root}/bin" "${root}/share/doc/holonomy/LICENSES"
           install -m 755 target/release/holonomy "${root}/bin/holonomy"
           install -m 755 target/release/holonomy-gui "${root}/bin/holonomy-gui"
+          install -m 755 target/release/holonomy-native "${root}/bin/holonomy-native"
           cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY.md README.md "${root}/share/doc/holonomy/"
           cp LICENSES/*.txt "${root}/share/doc/holonomy/LICENSES/"
           cp packaging/README-RELEASE.txt "${root}/README-RELEASE.txt"
@@ -191,6 +200,7 @@ jobs:
         run: |
           cargo test --locked -p holonomy-gui
           cargo build --locked --release -p holonomy-gui --bin holonomy --bin holonomy-gui
+          cargo build --locked --release -p holonomy-native --features native-ui
 
       - name: Assemble the Windows archive
         shell: pwsh
@@ -202,6 +212,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$root/bin", "$root/share/doc/holonomy/LICENSES" | Out-Null
           Copy-Item target/release/holonomy.exe "$root/bin/holonomy.exe"
           Copy-Item target/release/holonomy-gui.exe "$root/bin/holonomy-gui.exe"
+          Copy-Item target/release/holonomy-native.exe "$root/bin/holonomy-native.exe"
           Copy-Item LICENSE-MIT, LICENSE-APACHE, THIRD_PARTY.md, README.md "$root/share/doc/holonomy/"
           Copy-Item LICENSES/*.txt "$root/share/doc/holonomy/LICENSES/"
           Copy-Item packaging/README-RELEASE.txt "$root/README-RELEASE.txt"

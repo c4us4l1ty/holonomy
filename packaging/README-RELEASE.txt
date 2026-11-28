@@ -21,7 +21,7 @@ bundled README.md (share/doc/holonomy/README.md after unpacking). In particular:
 
 Run it:
   ./bin/holonomy notes.wavefunction        # TUI editor (Ctrl+R history, Ctrl+G panel, Ctrl+S save)
-  ./bin/holonomy-gui notes.wavefunction    # Desktop pixel window (Ctrl+K link, Ctrl+Shift+D dark mode)
+  ./bin/holonomy-gui notes.wavefunction    # GPUI desktop (keep holonomy-native beside this launcher)
   ./bin/holonomy verify notes.wavefunction
   ./bin/holonomy compact src.wavefunction dst.wavefunction
 
@@ -29,3 +29,9 @@ The binaries are not signed or notarized: verify the .sha256 file against how yo
 the archive.
 
 Project: https://github.com/c4us4l1ty/holonomy — licence MIT OR Apache-2.0.
+
+DESKTOP MIGRATION NOTICE: the desktop launcher now starts the bundled GPUI companion.
+The old pixel renderer requires explicit HOLONOMY_LEGACY_GUI=1. GPUI is experimental:
+Windows encrypted persistence is refused, full IME/accessibility/feature parity and
+GPU/suspend/USB qualification remain open. No autosave guarantee is made for GPUI;
+use Ctrl+S and verify saves. Use test documents until the documented gates close.

@@ -3359,3 +3359,16 @@ Listed so they stay dead.
 - Added a regression asserting rejection preserves the composed Unicode text and reports why.
   Emergency wipe remains available during composition. Platform IME integration and actual
   user-display visual qualification remain release blockers; this does not switch the default UI.
+
+
+### 2026-11-26 — Desktop routing, not another hidden preview
+
+User still sees blur after the GPUI migration: desktop launchers and release archives
+continued selecting the legacy pixel renderer. Quiet MD was re-cloned and inspected;
+it is a Rust/GPUI application, not an Electron UI or a safe replacement storage engine.
+Both desktop entry points now start the sibling GPUI companion, without PATH search,
+shell interpolation, or automatic pixel fallback. CLI/TUI stay unchanged. Release
+archives now include that companion and Linux build dependencies. The five-scale
+runtime qualification exercises the canonical desktop launcher, not a bypass executable.
+Legacy runtime tests explicitly opt into compatibility mode. This is a desktop routing
+change, not a declaration that visual/security/parity qualification is complete.

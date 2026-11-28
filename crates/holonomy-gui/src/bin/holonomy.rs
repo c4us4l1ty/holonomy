@@ -1638,6 +1638,10 @@ fn run_gui_command(
     doc: Option<&Path>,
     deadman: Option<Duration>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("HOLONOMY_LEGACY_GUI").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        let status = holonomy_gui::desktop::launch(doc, deadman)?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
     match run_desktop(doc, deadman)? {
         DesktopEnd::Saved
         | DesktopEnd::NothingToWrite

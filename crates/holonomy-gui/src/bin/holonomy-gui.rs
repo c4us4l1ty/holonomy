@@ -50,6 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
+    if std::env::var_os("HOLONOMY_LEGACY_GUI").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        let status = holonomy_gui::desktop::launch(doc.as_deref(), deadman)?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
     match run_desktop(doc.as_deref(), deadman)? {
         DesktopEnd::Saved
         | DesktopEnd::NothingToWrite
