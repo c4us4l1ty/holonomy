@@ -3469,3 +3469,29 @@ insertion (not a claim to clear the OS/framework clipboard). Document paste is u
 Oversized path text was also silently discarded; now report refusal and preserve the old
 path atomically. Add field-routing/Unicode byte-bound regressions and exercise real X11
 clipboard passphrase and Find insertion in the five-scale and Fedora runtime drills.
+
+### 2026-11-26 — Reference UI continuation
+
+Add an explicit rail collapse control, including a bounded compact-width rail override,
+and a session-only settings surface (appearance and expanded formatting visibility).
+Settings remain accessible from the header when the rail is hidden; Ctrl/Cmd+, opens,
+Escape dismisses. Extra format controls default collapsed. Bold/italic/underline report
+uniform-active background or mixed-state dot using engine toolbar state, not document text.
+Add compact rail geometry and mixed-state regressions. Runtime drill opens and captures
+settings in compact dark layout before dismissing and continuing authenticated reopen.
+No preference files, plaintext thumbnails or recent-document index are added. Full folder
+library navigation is still not implemented; do not describe the current-document rail as
+one. Existing save-failure and emergency-wipe fences remain unchanged.
+
+### 2026-11-26 — Complete reference workspace navigation
+
+Implement the remaining real folder/document browser, with metadata-only bounded scans,
+directories-first ordering, explicit Up/Refresh and inaccessible/large-folder notices.
+Only regular .wavefunction files and real directories are listed; symlinks/special files
+are excluded. Selecting another document goes through composition/worker and failed-save
+fences before presenting its unlock form. Successfully opened documents refresh the rail
+at their parent folder. No plaintext preview, recent-file database or document-body read
+is introduced. Add sorting/filtering/refresh/limit/missing-folder/symlink regressions.
+Move history/bookmark/verify into expanded formatting to reduce primary-toolbar clutter;
+emergency wipe remains directly available. Complete the reference design as an opaque,
+platform-neutral encrypted workspace, not a claim of translucency or Markdown feature parity.

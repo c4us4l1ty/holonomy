@@ -92,3 +92,23 @@ The real-KDF 200% smoke test requires a theme repaint while derivation is still 
 then creates, saves and independently reopens the document. It also records narrow-window
 screenshots. Downloaded development executables use opt-level=1; they remain experimental.
 Cmd/Ctrl+N and Cmd/Ctrl+O open New/Open; Cmd/Ctrl+Shift+T switches theme.
+
+### Workspace navigation and toolbar
+
+The sidebar lists folders and `.wavefunction` files in the open document's folder (or
+current directory at Home). Click a folder to browse it; **Up** and **Refresh** navigate
+and rescan. Click a document to save/close the current one and unlock the selected file.
+Save failure, unfinished IME composition, or an active unlock blocks document switching.
+The browser reads directory metadata only: it does not decrypt previews, write a recent-file
+index, or follow listed symlinks. Scans are bounded to 1024 entries, displaying at most 128;
+large/inaccessible folders show a notice. **Open** still accepts an explicit path.
+
+**Formatting** expands heading, inline code/strike, alignment, list/quote, clear-format,
+history/bookmark and authentication controls. Save, undo/redo, B/I/U, Find and emergency
+wipe remain in the compact bar. Uniform active inline styles are highlighted; mixed selections
+have a dot. Formatting uses engine transactions and remains undoable.
+
+The header toggles the sidebar, including in compact windows. **Settings** (Ctrl/Cmd+,)
+controls light/dark appearance and extra-format visibility for this session; Escape closes it.
+No persistent preference file or plaintext content cache is created. The opaque neutral rail
+intentionally replaces the reference app's platform-specific translucent background.

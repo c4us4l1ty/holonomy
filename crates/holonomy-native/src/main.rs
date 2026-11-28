@@ -2,6 +2,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod design;
+mod library;
 
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgb, size, App, Application, Bounds, Context,
@@ -10,7 +11,7 @@ use gpui::{
 };
 use holonomy_native::{BoxRect, SecretInput, Session, VectorFrame};
 use holonomy_shell::{Intent, Move};
-use holonomy_text::{StylePatch, TriState};
+use holonomy_text::{Alignment, Heading, ListKind, StylePatch, TriState};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -60,7 +61,12 @@ struct NativeHome {
     save_failure: Option<String>,
     bounds: Bounds<Pixels>,
     dragging: bool,
+    library: library::Library,
     show_history: bool,
+    sidebar_hidden: bool,
+    sidebar_forced: bool,
+    show_settings: bool,
+    show_formatting: bool,
 }
 
 fn button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::Stateful<gpui::Div> {
@@ -113,6 +119,14 @@ fn field(
 impl NativeHome {
     fn new(cx: &mut Context<Self>) -> Self {
         let path = std::env::args().nth(1).unwrap_or_default();
+        let library_folder = if path.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| ".".into())
+        } else {
+            let absolute = std::env::current_dir()
+                .unwrap_or_else(|_| ".".into())
+                .join(&path);
+            absolute.parent().unwrap_or(Path::new(".")).to_path_buf()
+        };
         let screen = if path.is_empty() {
             Screen::Home
         } else {
@@ -155,7 +169,12 @@ impl NativeHome {
             save_failure: None,
             bounds: Bounds::default(),
             dragging: false,
+            library: library::Library::new(library_folder),
             show_history: false,
+            sidebar_hidden: false,
+            sidebar_forced: false,
+            show_settings: false,
+            show_formatting: false,
         }
     }
 
@@ -177,6 +196,27 @@ impl NativeHome {
         self.editing_path = true;
         self.screen = Screen::Unlock;
         self.status.clear();
+    }
+
+    fn open_library_entry(&mut self, entry: &library::Entry) {
+        if !self.composition_ready() {
+            return;
+        }
+        if entry.directory {
+            self.library.navigate(&entry.path);
+        } else {
+            // begin_document refuses navigation when saving the old document fails.
+            self.begin_document(false);
+            if self.screen == Screen::Unlock && self.session.is_none() {
+                match entry.path.to_str() {
+                    Some(path) if path.len() <= 4096 => {
+                        self.path = path.into();
+                        self.editing_path = false;
+                    }
+                    _ => self.status = "This path cannot be entered as bounded UTF-8 text.".into(),
+                }
+            }
+        }
     }
 
     fn report(&mut self, result: holonomy_native::Result<()>, success: &str) {
@@ -340,6 +380,14 @@ impl NativeHome {
         });
         match result {
             Ok(session) => {
+                if let Some(parent) = session.path().parent() {
+                    let folder = if parent.as_os_str().is_empty() {
+                        Path::new(".")
+                    } else {
+                        parent
+                    };
+                    self.library.navigate(folder);
+                }
                 self.session = Some(session);
                 self.screen = Screen::Editor;
                 self.status.clear();
@@ -369,7 +417,13 @@ impl NativeHome {
             match kind {
                 0 => patch.bold = Some(!matches!(toolbar.bold, TriState::Uniform(true))),
                 1 => patch.italic = Some(!matches!(toolbar.italic, TriState::Uniform(true))),
-                _ => patch.underline = Some(!matches!(toolbar.underline, TriState::Uniform(true))),
+                2 => patch.underline = Some(!matches!(toolbar.underline, TriState::Uniform(true))),
+                3 => {
+                    patch.strikethrough =
+                        Some(!matches!(toolbar.strikethrough, TriState::Uniform(true)))
+                }
+                4 => patch.code_span = Some(!matches!(toolbar.code_span, TriState::Uniform(true))),
+                _ => return,
             }
             self.apply(Intent::Format(patch));
         }
@@ -441,6 +495,18 @@ impl NativeHome {
         } else {
             mods.control
         };
+        if command && key == "," {
+            self.show_settings = !self.show_settings;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if key == "escape" && self.show_settings {
+            self.show_settings = false;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if command && mods.shift && key == "t" {
             self.dark = !self.dark;
             cx.stop_propagation();
@@ -780,8 +846,12 @@ impl Render for NativeHome {
         let palette = design::Palette::new(self.dark);
         let (bg, panel, ink, muted) = (palette.page, palette.page, palette.ink, palette.muted);
         let viewport = window.viewport_size();
-        let sidebar_width = design::sidebar_width(f32::from(viewport.width));
-        let hero_size = if sidebar_width == 0. { 28. } else { 36. };
+        let sidebar_width = design::visible_sidebar_width(
+            f32::from(viewport.width),
+            self.sidebar_hidden,
+            self.sidebar_forced,
+        );
+        let toolbar = self.session.as_ref().map(Session::toolbar);
         let mut body = div()
             .id("workspace")
             .flex_1()
@@ -794,16 +864,31 @@ impl Render for NativeHome {
             .py_4();
         match self.screen {
             Screen::Home => {
-                body = body.max_w(px(760.)).w_full().mx_auto().justify_center()
-                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("YOUR PRIVATE WORKSPACE"))
-                    .child(div().text_size(px(hero_size)).child("Room for your thoughts."))
-                    .child(div().text_size(px(14.)).text_color(rgb(muted)).child("A quiet page. An encrypted document. Nothing sent anywhere."))
-                    .child(div().flex().flex_wrap().gap_3().mt_4()
-                        .child(button("new", "+  New document").h(px(40.)).px_4().bg(rgb(palette.primary)).text_color(rgb(palette.on_primary))
-                            .on_click(cx.listener(|this,_,_,cx| { this.begin_document(true); cx.notify(); })))
-                        .child(button("open", "Open document").h(px(40.)).px_4().border_1().border_color(rgb(palette.border))
-                            .on_click(cx.listener(|this,_,_,cx| { this.begin_document(false); cx.notify(); }))))
-                    .child(div().mt_6().text_size(px(12.)).text_color(rgb(muted)).child("Experimental build · Start with a test document. Your passphrase is never stored."));
+                body = body.justify_start()
+                    .child(div().text_size(px(18.)).child("Your workspace"))
+                    .child(div().text_size(px(12.)).text_color(rgb(muted))
+                        .child("Encrypted documents · Stored on this device"))
+                    .child(div().flex().flex_wrap().gap_4()
+                        .child(div().w(px(280.)).min_h(px(240.)).p_4().rounded_xl()
+                            .border_1().border_color(rgb(palette.border)).flex().flex_col().gap_3()
+                            .child(div().text_size(px(16.)).child("A new page"))
+                            .child(div().text_size(px(12.)).text_color(rgb(muted)).child("A private space for your next thought."))
+                            .child(div().flex_1())
+                            .child(button("new", "+  New document").h(px(36.)).on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_document(true);
+                                cx.notify();
+                            }))))
+                        .child(div().w(px(280.)).min_h(px(240.)).p_4().rounded_xl()
+                            .border_1().border_color(rgb(palette.border)).flex().flex_col().gap_3()
+                            .child(div().text_size(px(16.)).child("Continue writing"))
+                            .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Open an existing .wavefunction file. Its contents stay locked until you unlock it."))
+                            .child(div().flex_1())
+                            .child(button("open", "Open document").h(px(36.)).on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_document(false);
+                                cx.notify();
+                            })))))
+                    .child(div().text_size(px(11.)).text_color(rgb(muted))
+                        .child("Experimental build · Start with a test document. No plaintext previews are saved."));
             }
             Screen::Unlock => {
                 let busy = self.pending_unlock.is_some();
@@ -946,7 +1031,7 @@ impl Render for NativeHome {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(14.))
+                                    .text_size(px(28.))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
@@ -991,22 +1076,80 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
-                            .child(button("bold", "B").on_click(cx.listener(|this, _, _, cx| {
-                                this.format(0);
-                                cx.notify();
-                            })))
                             .child(
-                                button("italic", "I").on_click(cx.listener(|this, _, _, cx| {
-                                    this.format(1);
-                                    cx.notify();
-                                })),
+                                button("bold", style_label("B", toolbar.as_ref().map(|t| &t.bold)))
+                                    .bg(rgb(
+                                        if toolbar.as_ref().is_some_and(|t| {
+                                            matches!(t.bold, TriState::Uniform(true))
+                                        }) {
+                                            palette.selected
+                                        } else {
+                                            palette.page
+                                        },
+                                    ))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.format(0);
+                                        cx.notify();
+                                    })),
                             )
-                            .child(button("underline", "U").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.format(2);
-                                    cx.notify();
-                                },
-                            )))
+                            .child(
+                                button(
+                                    "italic",
+                                    style_label("I", toolbar.as_ref().map(|t| &t.italic)),
+                                )
+                                .bg(rgb(
+                                    if toolbar.as_ref().is_some_and(|t| {
+                                        matches!(t.italic, TriState::Uniform(true))
+                                    }) {
+                                        palette.selected
+                                    } else {
+                                        palette.page
+                                    },
+                                ))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.format(1);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                button(
+                                    "underline",
+                                    style_label("U", toolbar.as_ref().map(|t| &t.underline)),
+                                )
+                                .bg(rgb(
+                                    if toolbar.as_ref().is_some_and(|t| {
+                                        matches!(t.underline, TriState::Uniform(true))
+                                    }) {
+                                        palette.selected
+                                    } else {
+                                        palette.page
+                                    },
+                                ))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.format(2);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                button(
+                                    "format-toggle",
+                                    if self.show_formatting {
+                                        "Less formatting"
+                                    } else {
+                                        "Formatting"
+                                    },
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.show_formatting = !this.show_formatting;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
                             .child(button("find", "Find").on_click(cx.listener(
                                 |this, _, _, cx| {
                                     if !this.composition_ready() {
@@ -1019,36 +1162,6 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
-                            .child(button("history", "History").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if !this.composition_ready() {
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.show_history = !this.show_history;
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("bookmark", "Bookmark").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if !this.composition_ready() {
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.query.zeroize();
-                                    this.screen = Screen::Bookmark;
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("verify", "Verify").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if let Some(s) = &this.session {
-                                        let result = s.verify();
-                                        this.report(result, "World-line authenticated.");
-                                    }
-                                    cx.notify();
-                                },
-                            )))
                             .child(button("wipe", "Emergency wipe").on_click(cx.listener(
                                 |this, _, _, cx| {
                                     this.wipe(cx);
@@ -1056,6 +1169,64 @@ impl Render for NativeHome {
                                 },
                             ))),
                     );
+                let mut formatting = div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(palette.border));
+                for (id, label, kind) in [("strike", "Strike", 3), ("code-span", "Code", 4)] {
+                    formatting = formatting.child(button(id, label).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.format(kind);
+                            cx.notify();
+                        },
+                    )));
+                }
+                for (id, label, patch) in formatting_presets() {
+                    formatting = formatting.child(button(id, label).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.apply(Intent::Format(patch.clone()));
+                            cx.notify();
+                        },
+                    )));
+                }
+                formatting = formatting
+                    .child(
+                        button("history", "History").on_click(cx.listener(|this, _, _, cx| {
+                            if !this.composition_ready() {
+                                cx.notify();
+                                return;
+                            }
+                            this.show_history = !this.show_history;
+                            cx.notify();
+                        })),
+                    )
+                    .child(button("bookmark", "Bookmark").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            if !this.composition_ready() {
+                                cx.notify();
+                                return;
+                            }
+                            this.query.zeroize();
+                            this.screen = Screen::Bookmark;
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        button("verify", "Verify").on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(s) = &this.session {
+                                let result = s.verify();
+                                this.report(result, "World-line authenticated.");
+                            }
+                            cx.notify();
+                        })),
+                    );
+                if self.show_formatting {
+                    body = body.child(formatting);
+                }
                 if self.screen != Screen::Editor {
                     body = body.child(format!(
                         "{} · Enter confirms · Escape cancels",
@@ -1257,6 +1428,59 @@ impl Render for NativeHome {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .child(input);
+        let mut library_list = div()
+            .id("library-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1();
+        for (index, entry) in self.library.entries.iter().enumerate() {
+            let entry = entry.clone();
+            let selected = self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.path() == entry.path);
+            let label = format!(
+                "{} {}",
+                if entry.directory { "+" } else { "·" },
+                entry.path.file_name().unwrap_or_default().to_string_lossy()
+            );
+            library_list = library_list.child(
+                div()
+                    .id(("library-entry", index))
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(if selected {
+                        palette.selected
+                    } else {
+                        palette.rail
+                    }))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label)
+                    .hover(|style| style.bg(gpui::rgba(0x88888818)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_library_entry(&entry);
+                        cx.notify();
+                    })),
+            );
+        }
+        if self.library.entries.is_empty() {
+            library_list = library_list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(muted))
+                    .child("No folders or .wavefunction files here."),
+            );
+        }
         if sidebar_width > 0. {
             shell = shell.child(
                 div()
@@ -1276,17 +1500,6 @@ impl Render for NativeHome {
                             .gap_3()
                             .px_2()
                             .pb_6()
-                            .child(
-                                div()
-                                    .size(px(28.))
-                                    .rounded_lg()
-                                    .bg(rgb(palette.primary))
-                                    .text_color(rgb(palette.on_primary))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child("h"),
-                            )
                             .child("Holonomy"),
                     )
                     .child(
@@ -1330,20 +1543,45 @@ impl Render for NativeHome {
                     )
                     .child(
                         div()
-                            .mt_6()
-                            .px_3()
-                            .text_size(px(11.))
-                            .text_color(rgb(muted))
-                            .child("WORKSPACE"),
+                            .mt_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(button("library-up", "Up").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(parent) =
+                                        this.library.folder.parent().map(Path::to_path_buf)
+                                    {
+                                        this.library.navigate(&parent);
+                                    }
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("library-refresh", "Refresh").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.library.refresh();
+                                    cx.notify();
+                                },
+                            ))),
                     )
                     .child(
                         div()
                             .px_3()
                             .text_size(px(12.))
                             .text_color(rgb(muted))
-                            .child("Encrypted files stay on your device."),
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(self.library.folder.to_string_lossy().into_owned()),
                     )
-                    .child(div().flex_1())
+                    .child(library_list)
+                    .child(
+                        div()
+                            .px_3()
+                            .text_size(px(11.))
+                            .text_color(rgb(muted))
+                            .child(self.library.notice.clone()),
+                    )
                     .child(
                         div()
                             .border_t_1()
@@ -1352,7 +1590,14 @@ impl Render for NativeHome {
                             .px_3()
                             .text_size(px(11.))
                             .text_color(rgb(muted))
-                            .child("Private by design"),
+                            .child(
+                                button("rail-settings", "Settings")
+                                    .justify_start()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_settings = !this.show_settings;
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             );
         }
@@ -1365,7 +1610,10 @@ impl Render for NativeHome {
                 .flex_col()
                 .child(
                     div()
-                        .h(px(52.))
+                        .min_h(px(52.))
+                        .py_2()
+                        .flex_wrap()
+                        .gap_2()
                         .flex_shrink_0()
                         .px_6()
                         .flex()
@@ -1373,20 +1621,60 @@ impl Render for NativeHome {
                         .justify_between()
                         .border_b_1()
                         .border_color(rgb(palette.border))
-                        .child(button("workspace-home", "Workspace").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if this.session.is_some() {
-                                    this.home();
-                                } else {
-                                    this.cancel_unlock();
-                                }
-                                cx.notify();
-                            },
-                        )))
+                        .child(button("toggle-sidebar", if sidebar_width > 0. { "Hide sidebar" } else { "Sidebar" }).on_click(cx.listener(|this, _, window, cx| {
+                            if design::sidebar_width(f32::from(window.viewport_size().width)) == 0. {
+                                this.sidebar_forced = !this.sidebar_forced;
+                                this.sidebar_hidden = false;
+                            } else {
+                                this.sidebar_hidden = !this.sidebar_hidden;
+                                this.sidebar_forced = false;
+                            }
+                            cx.notify();
+                        })))
+                        .child(
+                            button("workspace-home", "Holonomy  ›").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if this.session.is_some() {
+                                        this.home();
+                                    } else {
+                                        this.cancel_unlock();
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(
+                                    self.session
+                                        .as_ref()
+                                        .map(|s| {
+                                            s.path()
+                                                .file_name()
+                                                .unwrap_or_default()
+                                                .to_string_lossy()
+                                                .into_owned()
+                                        })
+                                        .unwrap_or_else(|| "Workspace".into()),
+                                ),
+                        )
                         .child(
                             div()
                                 .flex()
                                 .gap_2()
+                                .child(button("header-new", "+").on_click(cx.listener(|this, _, _, cx| {
+                                    this.begin_document(true);
+                                    cx.notify();
+                                })))
+                                .child(button("header-settings", "Settings").on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_settings = !this.show_settings;
+                                    cx.notify();
+                                })))
                                 .child(button("header-open", "Open").on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.begin_document(false);
@@ -1402,6 +1690,23 @@ impl Render for NativeHome {
                                 ),
                         ),
                 )
+                .children(self.show_settings.then(|| div().px_6().py_3().bg(rgb(palette.rail)).flex().flex_col().gap_2()
+                    .child(div().flex().items_center().justify_between().child("Workspace settings")
+                        .child(button("close-settings", "Close").on_click(cx.listener(|this, _, _, cx| {
+                            this.show_settings = false;
+                            cx.notify();
+                        }))))
+                    .child(div().flex().flex_wrap().gap_2()
+                        .child(button("settings-theme", if self.dark { "Appearance: Dark" } else { "Appearance: Light" }).on_click(cx.listener(|this, _, _, cx| {
+                            this.dark = !this.dark;
+                            cx.notify();
+                        })))
+                        .child(button("settings-toolbar", if self.show_formatting { "Extra formatting: shown" } else { "Extra formatting: hidden" }).on_click(cx.listener(|this, _, _, cx| {
+                            this.show_formatting = !this.show_formatting;
+                            cx.notify();
+                        }))))
+                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Preferences last for this session. No document text or previews are stored in settings."))
+                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Shortcuts: Ctrl/Cmd+S save · Ctrl/Cmd+F find · Ctrl/Cmd+Shift+T theme · Ctrl/Cmd+Shift+Escape emergency wipe"))))
                 .child(body)
                 .child(
                     div()
@@ -1591,6 +1896,52 @@ fn main() {
     });
 }
 
+// Mixed selections must not look uniformly enabled. The dot communicates mixed state
+// without copying selected document text into the framework text cache.
+fn style_label(label: &str, state: Option<&TriState<bool>>) -> String {
+    match state {
+        Some(TriState::Mixed) => format!("{label} ·"),
+        _ => label.into(),
+    }
+}
+
+// Every visible format control maps to an undoable engine patch, not Markdown insertion.
+fn formatting_presets() -> Vec<(&'static str, &'static str, StylePatch)> {
+    let mut result = Vec::new();
+    for (id, label, heading) in [
+        ("body-text", "Text", Heading::None),
+        ("heading-1", "H1", Heading::H1),
+        ("heading-2", "H2", Heading::H2),
+    ] {
+        let mut patch = StylePatch::new();
+        patch.heading = Some(heading);
+        result.push((id, label, patch));
+    }
+    for (id, label, alignment) in [
+        ("align-start", "Left", Alignment::Start),
+        ("align-center", "Center", Alignment::Center),
+        ("align-end", "Right", Alignment::End),
+    ] {
+        let mut patch = StylePatch::new();
+        patch.alignment = Some(alignment);
+        result.push((id, label, patch));
+    }
+    let mut bullet = StylePatch::new();
+    bullet.list = Some(ListKind::Bullet { depth: 1 });
+    result.push(("bullet-list", "• List", bullet));
+    let mut ordered = StylePatch::new();
+    ordered.list = Some(ListKind::Ordered { depth: 1, start: 1 });
+    result.push(("ordered-list", "1. List", ordered));
+    let mut quote = StylePatch::new();
+    quote.blockquote = Some(1);
+    result.push(("quote", "Quote", quote));
+    let mut plain = StylePatch::new();
+    plain.list = Some(ListKind::None);
+    result.push(("no-list", "No list", plain));
+    result.push(("clear-format", "Clear format", StylePatch::clear_all()));
+    result
+}
+
 // Forms do not inherit the document editor's clipboard shortcuts. Route paste explicitly
 // through their bounded input path, never as a document edit or a partial field insertion.
 fn form_paste(screen: Screen, command: bool, key: &str) -> bool {
@@ -1628,6 +1979,24 @@ fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_style_label_does_not_claim_uniform_formatting() {
+        assert_eq!(style_label("B", Some(&TriState::Mixed)), "B ·");
+        assert_eq!(style_label("B", Some(&TriState::Uniform(true))), "B");
+        assert_eq!(style_label("B", None), "B");
+    }
+
+    #[test]
+    fn toolbar_presets_have_unique_ids_and_clear_is_a_real_reset() {
+        let presets = formatting_presets();
+        let ids: std::collections::HashSet<_> = presets.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(ids.len(), presets.len());
+        assert!(presets
+            .iter()
+            .all(|(_, label, patch)| !label.is_empty() && *patch != StylePatch::new()));
+        assert_eq!(presets.last().unwrap().2, StylePatch::clear_all());
+    }
+
     #[test]
     fn form_paste_is_routed_only_to_active_fields() {
         for screen in [Screen::Unlock, Screen::Find, Screen::Bookmark] {
