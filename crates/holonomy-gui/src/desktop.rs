@@ -29,7 +29,16 @@ pub fn launch(doc: Option<&Path>, deadman: Option<Duration>) -> std::io::Result<
     if let Some(timeout) = deadman {
         command.env("HOLONOMY_DEADMAN_MS", timeout.as_millis().to_string());
     }
-    command.status().map_err(|error| {
+    // Replace the wrapper on Unix: signals/termination must reach the process that owns
+    // the unlocked session, rather than leaving an orphaned GPUI child behind.
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec())
+    };
+    #[cfg(not(unix))]
+    let result = command.status();
+    result.map_err(|error| {
         std::io::Error::new(
             error.kind(),
             format!(

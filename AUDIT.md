@@ -3372,3 +3372,18 @@ archives now include that companion and Linux build dependencies. The five-scale
 runtime qualification exercises the canonical desktop launcher, not a bypass executable.
 Legacy runtime tests explicitly opt into compatibility mode. This is a desktop routing
 change, not a declaration that visual/security/parity qualification is complete.
+
+
+### 2026-11-26 — Source launcher path/lifecycle follow-up
+
+- Found `run-desktop.sh` changed cwd to the checkout before opening a relative document
+  path. It now preserves caller cwd, uses an absolute manifest/target directory, and
+  builds both desktop executables in one Cargo invocation. Optional release profile
+  provides an explicit optimized build without making normal incremental startup slower.
+- Added isolated helper regressions for spaces, relative paths, both profiles, failed
+  build refusal (never start a stale executable), invalid profiles and child exit status.
+- Unix desktop launch now uses exec rather than waiting on a child, so launcher PID
+  termination cannot leave an orphaned unlocked GPUI process. Windows keeps child waiting.
+  Signal/crash termination still does not certify complete wipe or guarantee unsaved data.
+- README now provides post-pull commands, Linux dependencies, macOS prerequisites, and
+  Windows's existing persistence refusal. These changes do not close visual/parity gates.
