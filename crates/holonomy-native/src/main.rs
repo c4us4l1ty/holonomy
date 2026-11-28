@@ -2089,7 +2089,7 @@ mod tests {
 
     #[test]
     fn form_paste_is_routed_only_to_active_fields() {
-        for screen in [Screen::Unlock, Screen::Find, Screen::Bookmark] {
+        for screen in [Screen::Unlock, Screen::Find, Screen::Bookmark, Screen::Link] {
             assert!(form_paste(screen, true, "v"));
             assert!(!form_paste(screen, false, "v"));
             assert!(!form_paste(screen, true, "c"));

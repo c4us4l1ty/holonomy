@@ -86,8 +86,13 @@ impl Render for SettingsWindow {
         content = content.child(card).child(div().h(px(24.)));
         div().size_full().flex().bg(rgb(palette.page)).text_color(rgb(palette.ink)).text_size(px(14.))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let command = if cfg!(target_os = "macos") { event.keystroke.modifiers.platform } else { event.keystroke.modifiers.control };
+                if command && event.keystroke.modifiers.shift && event.keystroke.key == "escape" {
+                    let _ = this.owner.update(cx, |owner, cx| { owner.wipe(cx); cx.notify(); });
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key == "escape" || (command && event.keystroke.key == "w") {
                     window.remove_window(); cx.stop_propagation();
                 }

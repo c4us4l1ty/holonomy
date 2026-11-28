@@ -112,3 +112,15 @@ The header toggles the sidebar, including in compact windows. **Settings** (Ctrl
 controls light/dark appearance and extra-format visibility for this session; Escape closes it.
 No persistent preference file or plaintext content cache is created. The opaque neutral rail
 intentionally replaces the reference app's platform-specific translucent background.
+
+Settings now opens in its own native window with General, Appearance, Shortcuts, Documents,
+Privacy and About categories. Opening it again focuses the existing window; Escape/Ctrl+W
+closes only Settings. Closing the editor closes its auxiliary window after the normal
+save guard succeeds. Emergency wipe works while Settings has focus as well.
+
+The rounded editor toolbar now includes a family/style chooser (Sans/Serif/Monospace and
+body/H1/H2), bounded text-size −/+ controls, and a Link form (empty URL removes a link).
+Size is relative to body text (100% = 1em), **not** document zoom or point size. Formatting
+uses the existing selection/undo/encrypted persistence path; URLs are not automatically
+opened. Unsupported reference-app operations (printing, image insertion, comments, text
+color and unqualified native zoom) are not presented as working controls.
