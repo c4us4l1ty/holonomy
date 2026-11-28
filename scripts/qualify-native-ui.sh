@@ -9,6 +9,10 @@ fixture() {
     cargo test --locked -p holonomy-native --lib "ui_smoke_fixture::$1" -- --exact --ignored
   fi
 }
+# Isolate the library so mouse navigation has a deterministic directory/file ordering.
+library_root="${HOLONOMY_NATIVE_SMOKE_PATH}.library-$$"
+mkdir -p "$library_root/Folder"
+export HOLONOMY_NATIVE_SMOKE_PATH="$library_root/native-smoke.wavefunction"
 fixture create
 app_pid=''
 held_path="${HOLONOMY_NATIVE_SMOKE_PATH}.held-$$"
@@ -18,6 +22,7 @@ cleanup() {
   if [[ -n "$app_pid" ]]; then kill "$app_pid" 2>/dev/null || true; fi
   rm -f "$HOLONOMY_NATIVE_SMOKE_PATH" "$HOLONOMY_NATIVE_CREATE_PATH"
   if $held; then rm -f "$held_path"; fi
+  rmdir "$library_root/Folder" "$library_root" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'xwininfo -root -tree || true; import -window root native-failure.png || true' ERR
@@ -54,6 +59,23 @@ xdotool key ctrl+b
 xdotool key ctrl+s
 sleep 1
 import -window "$window" native-smoke.png
+# Real library clicks: enter Folder, go Up, choose the saved encrypted document, unlock.
+# Coordinates are logical GPUI units scaled to the actual X11 surface.
+library_click() {
+  local x y
+  x=$(awk "BEGIN {printf \"%.0f\", $1 * $GPUI_X11_SCALE_FACTOR}")
+  y=$(awk "BEGIN {printf \"%.0f\", $2 * $GPUI_X11_SCALE_FACTOR}")
+  xdotool mousemove --window "$window" "$x" "$y" click 1
+  sleep 0.4
+}
+library_click 70 300
+library_click 28 232
+library_click 90 342
+timeout 10 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
+printf %s 'native smoke passphrase' | xclip -selection clipboard
+xdotool key ctrl+v Return
+timeout 45 xdotool search --sync --onlyvisible --name 'native-smoke.wavefunction' >/dev/null
+import -window "$window" native-library.png
 # Removing the pathname makes the next append fail before any bytes can be written. Closing must
 # leave the process/window and pending text alive. A failed append poisons the handle by design:
 # do not clear that fence or pretend a retry is guaranteed to recover it.

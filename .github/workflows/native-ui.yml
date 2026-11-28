@@ -143,6 +143,7 @@ jobs:
             native-home.png
             native-compact.png
             native-settings.png
+            native-library.png
             native-unlock.png
             crates/holonomy-native/src/lib.rs
   fedora:
@@ -183,6 +184,7 @@ jobs:
             native-home.png
             native-compact.png
             native-settings.png
+            native-library.png
   publish-desktop:
     name: Publish source-matched experimental desktop
     needs: [qualify, fedora]
