@@ -87,9 +87,26 @@ impl Library {
     }
 }
 
+/// The text input path must be lossless and bounded before navigation changes any session.
+pub fn input_path(path: &Path) -> Option<&str> {
+    path.to_str().filter(|path| path.len() <= 4096)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unrepresentable_library_paths_are_refused_before_navigation() {
+        assert_eq!(input_path(Path::new("notes.wavefunction")), Some("notes.wavefunction"));
+        assert!(input_path(Path::new(&"x".repeat(4096))).is_some());
+        assert!(input_path(Path::new(&"x".repeat(4097))).is_none());
+        #[cfg(unix)] {
+            use std::os::unix::ffi::OsStringExt;
+            let invalid = std::ffi::OsString::from_vec(vec![b'n', 0xff]);
+            assert!(input_path(Path::new(&invalid)).is_none());
+        }
+    }
+
     #[test]
     fn metadata_browser_filters_sorts_refreshes_and_handles_missing_folders() {
         let root = std::env::temp_dir().join(format!("holonomy-library-{}", std::process::id()));

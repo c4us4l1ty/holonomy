@@ -120,18 +120,16 @@ sleep 0.5
 if xdotool search --onlyvisible --name '^Holonomy Settings$'; then exit 1; fi
 kill -0 "$app_pid"
 xdotool windowfocus --sync "$window"
-# Closing and reopening must replace the stale handle, not silently fail.
+# Reopen and leave Settings alive: editor close must close its auxiliary window too.
 xdotool key ctrl+comma
 settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings$' | head -1)
-xdotool windowfocus --sync "$settings_window"
-xdotool key Escape
-sleep 0.5
 xdotool windowfocus --sync "$window"
 xdotool key ctrl+q
 # Bounded wait without relying on an indefinite shell wait if shutdown breaks.
 timeout 20 tail --pid="$app_pid" -f /dev/null
 wait "$app_pid"
 app_pid=''
+if xdotool search --onlyvisible --name '^Holonomy Settings$'; then exit 1; fi
 fixture verify
 
 # Reopen the actual GPUI binary, add an unsaved suffix and kill the process abruptly.
