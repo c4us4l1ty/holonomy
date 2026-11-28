@@ -188,6 +188,7 @@ pub fn overlay(owner: &NativeHome, cx: &mut Context<NativeHome>) -> Option<AnyEl
         return Some(
             div()
                 .absolute()
+                .occlude()
                 .inset_0()
                 .p_6()
                 .bg(rgba(0x00000066))
@@ -201,6 +202,7 @@ pub fn overlay(owner: &NativeHome, cx: &mut Context<NativeHome>) -> Option<AnyEl
     let menu = owner.home_menu?;
     let mut panel = div()
         .absolute()
+        .occlude()
         .top(px(48.))
         .right(px(120.))
         .w(px(240.))
