@@ -1098,9 +1098,9 @@ impl Render for NativeHome {
                                 button(
                                     "format-toggle",
                                     if self.show_formatting {
-                                        "Formatting ▴"
+                                        "Less formatting"
                                     } else {
-                                        "Formatting ▾"
+                                        "Formatting"
                                     },
                                 )
                                 .on_click(cx.listener(
@@ -1488,7 +1488,7 @@ impl Render for NativeHome {
                             .text_size(px(11.))
                             .text_color(rgb(muted))
                             .child(
-                                button("rail-settings", "⚙  Settings")
+                                button("rail-settings", "Settings")
                                     .justify_start()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.show_settings = !this.show_settings;
@@ -1515,7 +1515,7 @@ impl Render for NativeHome {
                         .justify_between()
                         .border_b_1()
                         .border_color(rgb(palette.border))
-                        .child(button("toggle-sidebar", if sidebar_width > 0. { "◧" } else { "☰" }).on_click(cx.listener(|this, _, window, cx| {
+                        .child(button("toggle-sidebar", if sidebar_width > 0. { "Hide sidebar" } else { "Sidebar" }).on_click(cx.listener(|this, _, window, cx| {
                             if design::sidebar_width(f32::from(window.viewport_size().width)) == 0. {
                                 this.sidebar_forced = !this.sidebar_forced;
                                 this.sidebar_hidden = false;
