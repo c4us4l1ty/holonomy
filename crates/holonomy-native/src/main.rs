@@ -584,6 +584,16 @@ impl NativeHome {
             self.home_menu = None; cx.stop_propagation(); cx.notify(); return;
         }
         if self.search_open || self.folder_create {
+            if !self.preedit.is_empty() {
+                if command { self.composition_ready(); cx.stop_propagation(); cx.notify(); }
+                return;
+            }
+            if command && key == "v" {
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(mut text) = item.text() { self.commit_text(&text); text.zeroize(); }
+                }
+                cx.stop_propagation(); cx.notify(); return;
+            }
             match key {
                 "escape" => { self.search_open = false; self.folder_create = false; self.library_filter.clear(); self.preedit.zeroize(); }
                 "backspace" if self.preedit.is_empty() => { self.library_filter.pop(); self.library_selection = 0; }
@@ -597,14 +607,15 @@ impl NativeHome {
                         }
                     } else {
                         let entries = self.library.visible_entries(&self.library_filter, self.hide_hidden, self.sort_descending);
-                        if let Some(entry) = entries.get(self.library_selection.min(entries.len().saturating_sub(1))).cloned() {
+                        if let Some(entry) = entries.get(self.library_selection.min(entries.len().min(20).saturating_sub(1))).cloned() {
                             self.search_open = false; self.library_filter.clear(); self.open_library_entry(&entry);
                         }
                     }
                 }
                 _ => {}
             }
-            cx.stop_propagation(); cx.notify(); return;
+            if command || matches!(key, "escape" | "backspace" | "up" | "down" | "enter") { cx.stop_propagation(); }
+            cx.notify(); return;
         }
         if self.settings_page.is_some() {
             if key == "escape" {

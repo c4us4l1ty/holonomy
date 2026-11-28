@@ -40,20 +40,20 @@ pub fn overlay(owner: &NativeHome, cx: &mut Context<NativeHome>) -> Option<AnyEl
             .border_1().border_color(rgb(palette.border)).shadow_lg().overflow_hidden().flex().flex_col()
             .child(div().p_4().flex().items_center().justify_between().child(title)
                 .child(button("close-palette", "Esc").on_click(cx.listener(|this, _, _, cx| {
-                    this.search_open = false; this.folder_create = false; this.library_filter.clear(); cx.notify();
+                    if this.composition_ready() { this.search_open = false; this.folder_create = false; this.library_filter.clear(); } cx.notify();
                 }))))
             .child(div().px_4().py_3().border_t_1().border_b_1().border_color(rgb(palette.border))
                 .child(if owner.library_filter.is_empty() { "Type to search / enter a folder name".to_string() } else { owner.library_filter.clone() }));
         if !owner.folder_create {
             let entries = owner.library.visible_entries(&owner.library_filter, owner.hide_hidden, owner.sort_descending);
-            let selected = owner.library_selection.min(entries.len().saturating_sub(1));
+            let selected = owner.library_selection.min(entries.len().min(20).saturating_sub(1));
             let mut results = div().id("search-results").min_h_0().max_h(px(420.)).overflow_y_scroll();
             for (index, entry) in entries.into_iter().take(20).enumerate() {
                 let label = entry.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 results = results.child(div().id(("search-result", index)).cursor_pointer().p_3().mx_2().my_1().rounded_md()
                     .bg(rgb(if index == selected { palette.selected } else { palette.rail }))
                     .child(label).on_click(cx.listener(move |this, _, _, cx| {
-                        this.search_open = false; this.library_filter.clear(); this.open_library_entry(&entry); cx.notify();
+                        if this.composition_ready() { this.search_open = false; this.library_filter.clear(); this.open_library_entry(&entry); } cx.notify();
                     })));
             }
             content = content.child(results);
