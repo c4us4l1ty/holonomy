@@ -3,6 +3,7 @@
 
 mod design;
 mod library;
+mod settings;
 
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgb, size, App, Application, Bounds, Context,
@@ -11,7 +12,7 @@ use gpui::{
 };
 use holonomy_native::{BoxRect, SecretInput, Session, VectorFrame};
 use holonomy_shell::{Intent, Move};
-use holonomy_text::{Alignment, Heading, ListKind, StylePatch, TriState};
+use holonomy_text::{Alignment, FontFamily, Heading, ListKind, StylePatch, TriState};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -27,6 +28,7 @@ enum Screen {
     Editor,
     Find,
     Bookmark,
+    Link,
 }
 
 struct UnlockWorker(Arc<AtomicBool>);
@@ -65,8 +67,9 @@ struct NativeHome {
     show_history: bool,
     sidebar_hidden: bool,
     sidebar_forced: bool,
-    show_settings: bool,
+    settings_window: Option<gpui::WindowHandle<settings::SettingsWindow>>,
     show_formatting: bool,
+    show_typography: bool,
 }
 
 fn button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::Stateful<gpui::Div> {
@@ -173,8 +176,31 @@ impl NativeHome {
             show_history: false,
             sidebar_hidden: false,
             sidebar_forced: false,
-            show_settings: false,
+            settings_window: None,
             show_formatting: false,
+            show_typography: false,
+        }
+    }
+
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.settings_window {
+            if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+                return;
+            }
+        }
+        let owner = cx.entity();
+        let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
+        match cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |window, cx| {
+            cx.new(|cx| settings::SettingsWindow::new(owner, window, cx))
+        }) {
+            Ok(handle) => self.settings_window = Some(handle),
+            Err(error) => self.status = format!("Could not open settings: {error}"),
+        }
+    }
+
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.settings_window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
     }
 
@@ -410,6 +436,18 @@ impl NativeHome {
                 .into();
     }
 
+    fn resize_text(&mut self, delta: i32) {
+        if let Some(session) = &self.session {
+            let size = match session.toolbar().size_milli {
+                TriState::Uniform(size) => size,
+                TriState::Mixed => 1000,
+            };
+            let mut patch = StylePatch::new();
+            patch.size_milli = Some(adjust_text_size(size, delta));
+            self.apply(Intent::Format(patch));
+        }
+    }
+
     fn format(&mut self, kind: u8) {
         if let Some(session) = &self.session {
             let toolbar = session.toolbar();
@@ -496,13 +534,7 @@ impl NativeHome {
             mods.control
         };
         if command && key == "," {
-            self.show_settings = !self.show_settings;
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
-        if key == "escape" && self.show_settings {
-            self.show_settings = false;
+            self.open_settings(cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -538,6 +570,7 @@ impl NativeHome {
         }
         if command && key == "q" {
             if self.save() {
+                self.close_settings(cx);
                 window.remove_window();
             }
             cx.notify();
@@ -586,7 +619,7 @@ impl NativeHome {
                 }
                 _ => {}
             }
-        } else if matches!(self.screen, Screen::Find | Screen::Bookmark) {
+        } else if matches!(self.screen, Screen::Find | Screen::Bookmark | Screen::Link) {
             match key {
                 "escape" => {
                     self.query.zeroize();
@@ -595,6 +628,11 @@ impl NativeHome {
                 "enter" => {
                     if self.screen == Screen::Find {
                         self.find();
+                    } else if self.screen == Screen::Link {
+                        let target = if self.query.is_empty() { None } else { Some(self.query.to_string()) };
+                        self.apply(Intent::SetLink(target));
+                        self.query.zeroize();
+                        self.screen = Screen::Editor;
                     } else if let Some(session) = &mut self.session {
                         let result = session.bookmark(&self.query);
                         self.report(result, "Bookmark added.");
@@ -732,7 +770,7 @@ impl NativeHome {
                     self.status = "Passphrase input exceeds the 4096-byte limit.".into();
                 }
             }
-            Screen::Find | Screen::Bookmark => {
+            Screen::Find | Screen::Bookmark | Screen::Link => {
                 if !self.query.push_str(text) {
                     self.status = "Search/bookmark input exceeds the 4096-byte limit.".into();
                 }
@@ -1004,7 +1042,7 @@ impl Render for NativeHome {
                                 .child(form_hint),
                         );
             }
-            Screen::Editor | Screen::Find | Screen::Bookmark => {
+            Screen::Editor | Screen::Find | Screen::Bookmark | Screen::Link => {
                 let title = self
                     .session
                     .as_ref()
@@ -1052,6 +1090,9 @@ impl Render for NativeHome {
                             .py_2()
                             .border_b_1()
                             .border_color(rgb(palette.border))
+                            .rounded_xl()
+                            .bg(rgb(palette.rail))
+                            .px_2()
                             .child(button("home", "Home").on_click(cx.listener(
                                 |this, _, _, cx| {
                                     this.home();
@@ -1076,6 +1117,19 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
+                            .child(button("typography-menu", typography_label(toolbar.as_ref())).on_click(cx.listener(|this, _, _, cx| {
+                                this.show_typography = !this.show_typography;
+                                cx.notify();
+                            })))
+                            .child(button("size-down", "−").on_click(cx.listener(|this, _, _, cx| {
+                                this.resize_text(-100);
+                                cx.notify();
+                            })))
+                            .child(div().px_2().text_size(px(12.)).child(text_size_label(toolbar.as_ref())))
+                            .child(button("size-up", "+").on_click(cx.listener(|this, _, _, cx| {
+                                this.resize_text(100);
+                                cx.notify();
+                            })))
                             .child(
                                 button("bold", style_label("B", toolbar.as_ref().map(|t| &t.bold)))
                                     .bg(rgb(
@@ -1150,6 +1204,13 @@ impl Render for NativeHome {
                                     },
                                 )),
                             )
+                            .child(button("link", "Link").on_click(cx.listener(|this, _, _, cx| {
+                                if this.composition_ready() {
+                                    this.query.zeroize();
+                                    this.screen = Screen::Link;
+                                }
+                                cx.notify();
+                            })))
                             .child(button("find", "Find").on_click(cx.listener(
                                 |this, _, _, cx| {
                                     if !this.composition_ready() {
@@ -1169,6 +1230,21 @@ impl Render for NativeHome {
                                 },
                             ))),
                     );
+                if self.show_typography {
+                    let mut chooser = div().flex().flex_wrap().gap_2().p_3().rounded_lg().bg(rgb(palette.rail));
+                    for (id, label, family) in [("font-sans", "Sans serif", FontFamily::Sans), ("font-serif", "Serif", FontFamily::Serif), ("font-mono", "Monospace", FontFamily::Mono)] {
+                        chooser = chooser.child(button(id, label).on_click(cx.listener(move |this, _, _, cx| {
+                            let mut patch = StylePatch::new(); patch.family = Some(family);
+                            this.apply(Intent::Format(patch)); cx.notify();
+                        })));
+                    }
+                    for (id, label, patch) in formatting_presets().into_iter().take(3) {
+                        chooser = chooser.child(div().id(("typography-heading", id)).child(button("choose-heading", label)).on_click(cx.listener(move |this, _, _, cx| {
+                            this.apply(Intent::Format(patch.clone())); cx.notify();
+                        })));
+                    }
+                    body = body.child(chooser);
+                }
                 let mut formatting = div()
                     .flex()
                     .flex_wrap()
@@ -1232,6 +1308,8 @@ impl Render for NativeHome {
                         "{} · Enter confirms · Escape cancels",
                         if self.screen == Screen::Find {
                             "Find"
+                        } else if self.screen == Screen::Link {
+                            "Link URL (empty removes link)"
                         } else {
                             "Bookmark name"
                         }
@@ -1594,7 +1672,7 @@ impl Render for NativeHome {
                                 button("rail-settings", "Settings")
                                     .justify_start()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_settings = !this.show_settings;
+                                        this.open_settings(cx);
                                         cx.notify();
                                     })),
                             ),
@@ -1672,7 +1750,7 @@ impl Render for NativeHome {
                                     cx.notify();
                                 })))
                                 .child(button("header-settings", "Settings").on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_settings = !this.show_settings;
+                                    this.open_settings(cx);
                                     cx.notify();
                                 })))
                                 .child(button("header-open", "Open").on_click(cx.listener(
@@ -1690,23 +1768,6 @@ impl Render for NativeHome {
                                 ),
                         ),
                 )
-                .children(self.show_settings.then(|| div().px_6().py_3().bg(rgb(palette.rail)).flex().flex_col().gap_2()
-                    .child(div().flex().items_center().justify_between().child("Workspace settings")
-                        .child(button("close-settings", "Close").on_click(cx.listener(|this, _, _, cx| {
-                            this.show_settings = false;
-                            cx.notify();
-                        }))))
-                    .child(div().flex().flex_wrap().gap_2()
-                        .child(button("settings-theme", if self.dark { "Appearance: Dark" } else { "Appearance: Light" }).on_click(cx.listener(|this, _, _, cx| {
-                            this.dark = !this.dark;
-                            cx.notify();
-                        })))
-                        .child(button("settings-toolbar", if self.show_formatting { "Extra formatting: shown" } else { "Extra formatting: hidden" }).on_click(cx.listener(|this, _, _, cx| {
-                            this.show_formatting = !this.show_formatting;
-                            cx.notify();
-                        }))))
-                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Preferences last for this session. No document text or previews are stored in settings."))
-                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("Shortcuts: Ctrl/Cmd+S save · Ctrl/Cmd+F find · Ctrl/Cmd+Shift+T theme · Ctrl/Cmd+Shift+Escape emergency wipe"))))
                 .child(body)
                 .child(
                     div()
@@ -1877,6 +1938,7 @@ fn main() {
                 window.on_window_should_close(cx, move |_, cx| {
                     weak.update(cx, |this, cx| {
                         let saved = this.save();
+                        if saved { this.close_settings(cx); }
                         cx.notify();
                         saved
                     })
@@ -1894,6 +1956,26 @@ fn main() {
         .detach();
         cx.activate(true);
     });
+}
+
+fn adjust_text_size(size: u32, delta: i32) -> u32 {
+    (i64::from(size) + i64::from(delta)).clamp(500, 3000) as u32
+}
+
+fn text_size_label(toolbar: Option<&holonomy_text::ToolbarState>) -> String {
+    match toolbar.map(|t| &t.size_milli) {
+        Some(TriState::Uniform(size)) => format!("{}%", size / 10),
+        _ => "Mixed".into(),
+    }
+}
+
+fn typography_label(toolbar: Option<&holonomy_text::ToolbarState>) -> &'static str {
+    match toolbar.map(|t| &t.family) {
+        Some(TriState::Uniform(FontFamily::Sans)) => "Sans serif / Style",
+        Some(TriState::Uniform(FontFamily::Serif)) => "Serif / Style",
+        Some(TriState::Uniform(FontFamily::Mono)) => "Monospace / Style",
+        _ => "Mixed / Style",
+    }
 }
 
 // Mixed selections must not look uniformly enabled. The dot communicates mixed state
@@ -1945,7 +2027,7 @@ fn formatting_presets() -> Vec<(&'static str, &'static str, StylePatch)> {
 // Forms do not inherit the document editor's clipboard shortcuts. Route paste explicitly
 // through their bounded input path, never as a document edit or a partial field insertion.
 fn form_paste(screen: Screen, command: bool, key: &str) -> bool {
-    command && key == "v" && matches!(screen, Screen::Unlock | Screen::Find | Screen::Bookmark)
+    command && key == "v" && matches!(screen, Screen::Unlock | Screen::Find | Screen::Bookmark | Screen::Link)
 }
 
 fn append_path(path: &mut String, text: &str) -> bool {
@@ -1979,6 +2061,14 @@ fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn toolbar_size_steps_are_bounded_and_do_not_overflow() {
+        assert_eq!(adjust_text_size(1000, 100), 1100);
+        assert_eq!(adjust_text_size(500, -100), 500);
+        assert_eq!(adjust_text_size(3000, 100), 3000);
+        assert_eq!(adjust_text_size(u32::MAX, i32::MAX), 3000);
+    }
+
     #[test]
     fn mixed_style_label_does_not_claim_uniform_formatting() {
         assert_eq!(style_label("B", Some(&TriState::Mixed)), "B ·");

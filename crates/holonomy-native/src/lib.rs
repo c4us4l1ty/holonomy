@@ -732,6 +732,34 @@ mod tests {
     }
 
     #[test]
+    fn rich_toolbar_font_size_and_link_survive_encrypted_reopen() {
+        use holonomy_text::{FontFamily, StylePatch, TriState};
+        let fixture = Fixture::new();
+        let mut session = fixture.session();
+        session.apply(Intent::Type("formatted selection".into())).unwrap();
+        session.apply(Intent::SelectAll).unwrap();
+        let mut patch = StylePatch::new();
+        patch.family = Some(FontFamily::Mono);
+        patch.size_milli = Some(1100);
+        session.apply(Intent::Format(patch)).unwrap();
+        session.apply(Intent::SetLink(Some("https://example.invalid".into()))).unwrap();
+        session.save().unwrap();
+        drop(session);
+        let mut reopened = Session::open(&fixture.0, b"native fixture passphrase").unwrap();
+        reopened.apply(Intent::SelectAll).unwrap();
+        let state = reopened.toolbar();
+        assert_eq!(state.family, TriState::Uniform(FontFamily::Mono));
+        assert_eq!(state.size_milli, TriState::Uniform(1100));
+        assert_eq!(state.link, TriState::Uniform(Some("https://example.invalid".into())));
+        reopened.apply(Intent::SetLink(None)).unwrap();
+        reopened.apply(Intent::Format(StylePatch::clear_all())).unwrap();
+        let state = reopened.toolbar();
+        assert_eq!(state.family, TriState::Uniform(FontFamily::Sans));
+        assert_eq!(state.size_milli, TriState::Uniform(1000));
+        assert_eq!(state.link, TriState::Uniform(None));
+    }
+
+    #[test]
     fn refused_close_preserves_pending_text_without_bypassing_poisoning() {
         let fixture = Fixture::new();
         let mut session = fixture.session();

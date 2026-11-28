@@ -105,12 +105,28 @@ xdotool key ctrl+shift+t
 sleep 1
 kill -0 "$app_pid"
 import -window "$window" native-compact.png
-# Exercise settings on the compact layout and ensure Escape dismisses without quitting.
+# Settings is a separate native window, not a panel inside the document surface.
 xdotool key ctrl+comma
-sleep 1
-kill -0 "$app_pid"
-import -window "$window" native-settings.png
+settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings$' | head -1)
+[[ "$settings_window" != "$window" ]]
+xdotool windowfocus --sync "$window"
+xdotool key ctrl+comma
+sleep 0.5
+[[ $(xdotool search --onlyvisible --name '^Holonomy Settings$' | wc -l) -eq 1 ]]
+xdotool windowfocus --sync "$settings_window"
+import -window "$settings_window" native-settings.png
 xdotool key Escape
+sleep 0.5
+if xdotool search --onlyvisible --name '^Holonomy Settings$'; then exit 1; fi
+kill -0 "$app_pid"
+xdotool windowfocus --sync "$window"
+# Closing and reopening must replace the stale handle, not silently fail.
+xdotool key ctrl+comma
+settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings$' | head -1)
+xdotool windowfocus --sync "$settings_window"
+xdotool key Escape
+sleep 0.5
+xdotool windowfocus --sync "$window"
 xdotool key ctrl+q
 # Bounded wait without relying on an indefinite shell wait if shutdown breaks.
 timeout 20 tail --pid="$app_pid" -f /dev/null
