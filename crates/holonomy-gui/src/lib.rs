@@ -24,9 +24,9 @@
 //! the advances the Eye measured, so a GPU backend draws exactly the picture the tests assert.
 
 pub mod canvas;
-pub mod desktop;
 #[cfg(target_os = "macos")]
 pub mod cocoa;
+pub mod desktop;
 pub mod panel;
 pub mod platform;
 pub mod store;

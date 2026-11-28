@@ -49,6 +49,9 @@ mod tests {
         let root = std::env::temp_dir().join("holonomy launcher test");
         let result = companion(&root.join("holonomy-gui")).unwrap();
         assert_eq!(result.parent(), Some(root.as_path()));
-        assert_eq!(result.file_stem().unwrap().to_str(), Some("holonomy-native"));
+        assert_eq!(
+            result.file_stem().unwrap().to_str(),
+            Some("holonomy-native")
+        );
     }
 }
