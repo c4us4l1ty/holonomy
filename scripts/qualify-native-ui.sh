@@ -22,7 +22,7 @@ cleanup() {
   if [[ -n "$app_pid" ]]; then kill "$app_pid" 2>/dev/null || true; fi
   rm -f "$HOLONOMY_NATIVE_SMOKE_PATH" "$HOLONOMY_NATIVE_CREATE_PATH"
   if $held; then rm -f "$held_path"; fi
-  rmdir "$library_root/Folder" "$library_root" 2>/dev/null || true
+  rmdir "$library_root/Folder" "$library_root/Created from UI" "$library_root" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'xwininfo -root -tree || true; import -window root native-failure.png || true' ERR
@@ -106,6 +106,30 @@ import -window "$window" native-refused-save.png
 xdotool key ctrl+shift+Escape
 timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
 import -window "$window" native-home.png
+# Qualify actual header menus and safe folder creation in the isolated workspace.
+home_click() {
+  local x y
+  x=$(awk "BEGIN {printf \"%.0f\", $1 * $GPUI_X11_SCALE_FACTOR}")
+  y=$(awk "BEGIN {printf \"%.0f\", $2 * $GPUI_X11_SCALE_FACTOR}")
+  xdotool mousemove --window "$window" "$x" "$y" click 1
+  sleep 0.3
+}
+home_click 886 20
+import -window "$window" native-home-view-menu.png
+home_click 860 130
+import -window "$window" native-home-list.png
+home_click 886 20
+home_click 860 98
+home_click 852 20
+import -window "$window" native-home-new-menu.png
+home_click 860 102
+xdotool type --clearmodifiers --delay 35 'Created from UI'
+xdotool key Return
+sleep 0.5
+[[ -d "$library_root/Created from UI" ]]
+home_click 958 20
+import -window "$window" native-home-more-menu.png
+xdotool key Escape
 # Metadata search uses the existing native surface and routes selection back to unlock.
 xdotool key ctrl+j
 xdotool type --clearmodifiers --delay 20 'native-smoke'

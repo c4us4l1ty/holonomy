@@ -140,7 +140,7 @@ jobs:
             native-failure.png
             native-refused-save.png
             native-busy.png
-            native-home.png
+            native-home*.png
             native-compact.png
             native-settings*.png
             native-search.png
@@ -182,7 +182,7 @@ jobs:
             native-failure.png
             native-refused-save.png
             native-busy.png
-            native-home.png
+            native-home*.png
             native-compact.png
             native-settings*.png
             native-search.png
