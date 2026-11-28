@@ -3430,3 +3430,9 @@ scroll. Unchanged viewport sizes no longer rerun resize/scroll geometry on every
 Downloaded development binaries receive opt-level=1 (not release/security qualification).
 Save, search, verification and final world-line replay remain synchronous: this fixes the
 identified KDF freeze, not every possible slow-disk/large-document stall.
+
+Screenshot review caught a narrow-window failure even though the smoke job passed: the
+flex-constrained Home column shrank wrapped text and the footer wrapped into the page.
+Separated natural-height form content from its scroll viewport, reduced compact hero
+size, and made footer/controls single-line with clipped/ellipsized status. Real-KDF
+liveness is now exercised at 200% on Ubuntu and both Fedora runtime containers.

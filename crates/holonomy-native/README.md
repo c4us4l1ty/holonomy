@@ -69,3 +69,24 @@ binaries never silently fall back. Use `scripts/run-desktop.sh` for a source che
 See `docs/QUIET-MD-UI-MIGRATION.md` and `vendor/xattr/HOLONOMY.md` for the migration
 and temporary compatibility patch. Linux build dependencies are listed in
 `.github/workflows/native-ui.yml`.
+
+
+## Workspace design and responsiveness
+
+The shell adapts Quiet MD's neutral palette and Vega geometry (MIT attribution in
+`THIRD_PARTY.md`): a recessed library rail, compact ghost tools, bounded full-bleed
+writing measure and centered unlock form. Narrow windows hide the rail and wrap tools;
+short Home/unlock screens use a separate scroll viewport rather than shrinking text.
+
+Calibration and memory-hard passphrase derivation now run on a single background worker.
+The UI stays interactive, displays progress, and supports Cancel/Escape. Cancellation
+revokes the result; Argon2 itself cannot be interrupted, so its zeroizing temporary is
+cleared when the worker returns. No file is created for a cancelled preparation. Existing
+locked key owners and the editor remain on their original thread, without unsafe Send.
+Final world-line authentication, save, search and verification remain synchronous, so
+this is not a guarantee against every slow-disk or large-document stall.
+
+The real-KDF 200% smoke test requires a theme repaint while derivation is still running,
+then creates, saves and independently reopens the document. It also records narrow-window
+screenshots. Downloaded development executables use opt-level=1; they remain experimental.
+Cmd/Ctrl+N and Cmd/Ctrl+O open New/Open; Cmd/Ctrl+Shift+T switches theme.

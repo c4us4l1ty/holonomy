@@ -74,6 +74,7 @@ fn button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::State
         .px_2()
         .rounded_md()
         .text_size(px(12.))
+        .whitespace_nowrap()
         .hover(|style| style.bg(gpui::rgba(0x88888818)))
         .child(label.into())
 }
@@ -104,6 +105,7 @@ fn field(
         .bg(rgb(palette.page))
         .text_size(px(14.))
         .overflow_hidden()
+        .whitespace_nowrap()
         .child(label)
 }
 
@@ -745,7 +747,9 @@ impl Render for NativeHome {
         ));
         let palette = design::Palette::new(self.dark);
         let (bg, panel, ink, muted) = (palette.page, palette.page, palette.ink, palette.muted);
-        let sidebar_width = design::sidebar_width(f32::from(window.viewport_size().width));
+        let viewport = window.viewport_size();
+        let sidebar_width = design::sidebar_width(f32::from(viewport.width));
+        let hero_size = if sidebar_width == 0. { 28. } else { 36. };
         let mut body = div()
             .id("workspace")
             .flex_1()
@@ -760,7 +764,7 @@ impl Render for NativeHome {
             Screen::Home => {
                 body = body.max_w(px(760.)).w_full().mx_auto().justify_center()
                     .child(div().text_size(px(12.)).text_color(rgb(muted)).child("YOUR PRIVATE WORKSPACE"))
-                    .child(div().text_size(px(36.)).child("Room for your thoughts."))
+                    .child(div().text_size(px(hero_size)).child("Room for your thoughts."))
                     .child(div().text_size(px(14.)).text_color(rgb(muted)).child("A quiet page. An encrypted document. Nothing sent anywhere."))
                     .child(div().flex().flex_wrap().gap_3().mt_4()
                         .child(button("new", "+  New document").h(px(40.)).px_4().bg(rgb(palette.primary)).text_color(rgb(palette.on_primary))
@@ -1154,12 +1158,6 @@ impl Render for NativeHome {
                 );
             }
         }
-        if matches!(self.screen, Screen::Home | Screen::Unlock) {
-            body = body.overflow_y_scroll();
-            if f32::from(window.viewport_size().height) < 640. {
-                body = body.justify_start();
-            }
-        }
         if !self.preedit.is_empty() {
             let entity = cx.entity();
             body = body.child(
@@ -1184,6 +1182,16 @@ impl Render for NativeHome {
                 .h(px(64.))
                 .w_full(),
             );
+        }
+        if matches!(self.screen, Screen::Home | Screen::Unlock) {
+            // A scroll viewport and a natural-height content column must be separate. Making
+            // the constrained flex column itself scrollable lets wrapped text shrink/overlap.
+            body = body.flex_none().min_h(px((f32::from(viewport.height) - 82.).max(0.)));
+            if f32::from(viewport.height) < 640. {
+                body = body.justify_start();
+            }
+            body = div().id("page-scroll").flex_1().min_h_0().min_w_0()
+                .overflow_y_scroll().child(body);
         }
         let input_entity = cx.entity();
         let focus = self.focus.clone();
@@ -1370,9 +1378,12 @@ impl Render for NativeHome {
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
                                 .child(self.status.clone()),
                         )
-                        .child(format!("{:.2}× · Local workspace", window.scale_factor())),
+                        .child(div().flex_shrink_0().whitespace_nowrap()
+                            .child(format!("{:.2}× · Local workspace", window.scale_factor()))),
                 ),
         )
     }
