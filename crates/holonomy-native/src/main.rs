@@ -57,6 +57,7 @@ struct NativeHome {
     pending_unlock: Option<PendingUnlock>,
     unlock_worker_active: Arc<AtomicBool>,
     status: String,
+    save_failure: Option<String>,
     bounds: Bounds<Pixels>,
     dragging: bool,
     show_history: bool,
@@ -151,6 +152,7 @@ impl NativeHome {
             pending_unlock: None,
             unlock_worker_active: Arc::new(AtomicBool::new(false)),
             status: String::new(),
+            save_failure: None,
             bounds: Bounds::default(),
             dragging: false,
             show_history: false,
@@ -221,9 +223,19 @@ impl NativeHome {
             .session
             .as_mut()
             .map_or(Ok(()), |session| session.prepare_close());
-        let success = result.is_ok();
-        self.report(result, "Saved to an authenticated witness.");
-        success
+        match result {
+            Ok(()) => {
+                self.save_failure = None;
+                self.status = "Saved to an authenticated witness.".into();
+                true
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.status = "Do not assume changes are durable.".into();
+                self.save_failure = Some(message);
+                false
+            }
+        }
     }
 
     fn home(&mut self) {
@@ -231,6 +243,7 @@ impl NativeHome {
             return;
         }
         self.session.take();
+        self.save_failure = None;
         self.preedit.zeroize();
         self.passphrase.zeroize();
         self.query.zeroize();
@@ -387,6 +400,7 @@ impl NativeHome {
         let verified = self.session.as_mut().map_or(true, Session::wipe);
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
         self.session.take();
+        self.save_failure = None;
         self.preedit.zeroize();
         self.passphrase.zeroize();
         self.query.zeroize();
@@ -750,12 +764,19 @@ impl Render for NativeHome {
             },
             |session| {
                 format!(
-                    "Holonomy Native — {}",
+                    "Holonomy Native — {}{}",
                     session
                         .path()
                         .file_name()
                         .unwrap_or_default()
-                        .to_string_lossy()
+                        .to_string_lossy(),
+                    if self.save_failure.is_some() {
+                        " · SAVE FAILED"
+                    } else if session.dirty() {
+                        " · unsaved"
+                    } else {
+                        ""
+                    }
                 )
             },
         ));
@@ -1410,7 +1431,11 @@ impl Render for NativeHome {
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
-                                .child(self.status.clone()),
+                                .child(if let Some(error) = &self.save_failure {
+                                    format!("SAVE FAILED: {error} · {}", self.status)
+                                } else {
+                                    self.status.clone()
+                                }),
                         )
                         .child(
                             div()
