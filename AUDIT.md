@@ -3482,3 +3482,16 @@ settings in compact dark layout before dismissing and continuing authenticated r
 No preference files, plaintext thumbnails or recent-document index are added. Full folder
 library navigation is still not implemented; do not describe the current-document rail as
 one. Existing save-failure and emergency-wipe fences remain unchanged.
+
+### 2026-11-26 — Complete reference workspace navigation
+
+Implement the remaining real folder/document browser, with metadata-only bounded scans,
+directories-first ordering, explicit Up/Refresh and inaccessible/large-folder notices.
+Only regular .wavefunction files and real directories are listed; symlinks/special files
+are excluded. Selecting another document goes through composition/worker and failed-save
+fences before presenting its unlock form. Successfully opened documents refresh the rail
+at their parent folder. No plaintext preview, recent-file database or document-body read
+is introduced. Add sorting/filtering/refresh/limit/missing-folder/symlink regressions.
+Move history/bookmark/verify into expanded formatting to reduce primary-toolbar clutter;
+emergency wipe remains directly available. Complete the reference design as an opaque,
+platform-neutral encrypted workspace, not a claim of translucency or Markdown feature parity.

@@ -1156,36 +1156,6 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
-                            .child(button("history", "History").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if !this.composition_ready() {
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.show_history = !this.show_history;
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("bookmark", "Bookmark").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if !this.composition_ready() {
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.query.zeroize();
-                                    this.screen = Screen::Bookmark;
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("verify", "Verify").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if let Some(s) = &this.session {
-                                        let result = s.verify();
-                                        this.report(result, "World-line authenticated.");
-                                    }
-                                    cx.notify();
-                                },
-                            )))
                             .child(button("wipe", "Emergency wipe").on_click(cx.listener(
                                 |this, _, _, cx| {
                                     this.wipe(cx);
@@ -1217,6 +1187,38 @@ impl Render for NativeHome {
                         },
                     )));
                 }
+                formatting = formatting
+                            .child(button("history", "History").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if !this.composition_ready() {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.show_history = !this.show_history;
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("bookmark", "Bookmark").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if !this.composition_ready() {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.query.zeroize();
+                                    this.screen = Screen::Bookmark;
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("verify", "Verify").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(s) = &this.session {
+                                        let result = s.verify();
+                                        this.report(result, "World-line authenticated.");
+                                    }
+                                    cx.notify();
+                                },
+                            )))
+;
                 if self.show_formatting {
                     body = body.child(formatting);
                 }
