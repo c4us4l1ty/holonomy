@@ -916,6 +916,8 @@ impl Render for NativeHome {
                                     .min_w_0()
                                     .text_size(px(14.))
                                     .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .child(title),
                             )
                             .child(
@@ -1186,12 +1188,19 @@ impl Render for NativeHome {
         if matches!(self.screen, Screen::Home | Screen::Unlock) {
             // A scroll viewport and a natural-height content column must be separate. Making
             // the constrained flex column itself scrollable lets wrapped text shrink/overlap.
-            body = body.flex_none().min_h(px((f32::from(viewport.height) - 82.).max(0.)));
+            body = body
+                .flex_none()
+                .min_h(px((f32::from(viewport.height) - 82.).max(0.)));
             if f32::from(viewport.height) < 640. {
                 body = body.justify_start();
             }
-            body = div().id("page-scroll").flex_1().min_h_0().min_w_0()
-                .overflow_y_scroll().child(body);
+            body = div()
+                .id("page-scroll")
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .overflow_y_scroll()
+                .child(body);
         }
         let input_entity = cx.entity();
         let focus = self.focus.clone();
@@ -1382,8 +1391,12 @@ impl Render for NativeHome {
                                 .text_ellipsis()
                                 .child(self.status.clone()),
                         )
-                        .child(div().flex_shrink_0().whitespace_nowrap()
-                            .child(format!("{:.2}× · Local workspace", window.scale_factor()))),
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
+                                .child(format!("{:.2}× · Local workspace", window.scale_factor())),
+                        ),
                 ),
         )
     }

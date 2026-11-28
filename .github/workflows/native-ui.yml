@@ -106,6 +106,9 @@ jobs:
         with:
           name: native-fixture-linux
           path: native-fixture
+      - name: Include source and font license notices with every executable bundle
+        shell: bash
+        run: cat LICENSE-MIT LICENSE-APACHE THIRD_PARTY.md LICENSES/*.txt vendor/xattr/LICENSE-* > target/debug/THIRD-PARTY-NOTICES.txt
       - name: Upload runnable preview
         uses: actions/upload-artifact@v4
         with:
@@ -115,6 +118,7 @@ jobs:
             target/debug/holonomy-native.exe
             target/debug/holonomy-gui
             target/debug/holonomy-gui.exe
+            target/debug/THIRD-PARTY-NOTICES.txt
       - name: Capture formatter patch without hiding a failed check
         if: always()
         shell: bash
@@ -195,7 +199,7 @@ jobs:
         shell: bash
         run: |
           chmod 755 bundle/holonomy-gui bundle/holonomy-native
-          tar czf holonomy-linux-x86_64.tar.gz -C bundle holonomy-gui holonomy-native
+          tar czf holonomy-linux-x86_64.tar.gz -C bundle holonomy-gui holonomy-native THIRD-PARTY-NOTICES.txt
           sha256sum holonomy-linux-x86_64.tar.gz > holonomy-linux-x86_64.tar.gz.sha256
           gh release create "desktop-$GITHUB_SHA" --target "$GITHUB_SHA" --prerelease \
             --title "Experimental GPUI desktop ${GITHUB_SHA:0:12}" \

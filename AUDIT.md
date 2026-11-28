@@ -3436,3 +3436,8 @@ flex-constrained Home column shrank wrapped text and the footer wrapped into the
 Separated natural-height form content from its scroll viewport, reduced compact hero
 size, and made footer/controls single-line with clipped/ellipsized status. Real-KDF
 liveness is now exercised at 200% on Ubuntu and both Fedora runtime containers.
+
+The adapted design also triggered a distribution review: prebuilt/CI desktop bundles now
+include THIRD-PARTY-NOTICES.txt (project licenses, adapted-source and embedded-font notices).
+The bootstrap strictly validates that third regular file along with the two executables;
+license material is not silently stripped during caching. No new binary artifact is committed.

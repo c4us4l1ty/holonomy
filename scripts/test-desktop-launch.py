@@ -18,7 +18,7 @@ class DesktopBootstrapTests(unittest.TestCase):
     def bundle(self, root, names=None, symlink=False):
         archive = root / 'bundle.tar.gz'
         with tarfile.open(archive, 'w:gz') as bundle:
-            for name in names or sorted(launcher.BINARIES):
+            for name in names or sorted(launcher.MEMBERS):
                 member = tarfile.TarInfo(name)
                 if symlink:
                     member.type = tarfile.SYMTYPE
@@ -75,7 +75,7 @@ class DesktopBootstrapTests(unittest.TestCase):
                 self.assertEqual(launcher.install(root, revision), cache)
             self.assertEqual(len(urls), 2, 'second launch must not download or compile')
             self.assertTrue(all('/desktop-' + revision + '/' in url for url in urls))
-            self.assertEqual({path.name for path in cache.iterdir()}, launcher.BINARIES)
+            self.assertEqual({path.name for path in cache.iterdir()}, launcher.MEMBERS)
             other_revision = 'b' * 40
             with mock.patch.object(launcher, 'download', side_effect=OSError('offline')):
                 with self.assertRaises(OSError):
