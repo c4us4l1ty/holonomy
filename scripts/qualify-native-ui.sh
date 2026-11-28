@@ -90,15 +90,24 @@ kill -0 "$app_pid"
 xdotool getwindowname "$window" | grep -F 'SAVE FAILED'
 mv "$held_path" "$HOLONOMY_NATIVE_SMOKE_PATH"
 held=false
+# A refused editor close must leave the auxiliary window alive too.
+xdotool key ctrl+comma
+settings_window=$(timeout 15 xdotool search --sync --onlyvisible --name '^Holonomy Settings$' | head -1)
+xdotool windowfocus --sync "$window"
 xdotool key ctrl+q
 sleep 1
 kill -0 "$app_pid"
 xdotool getwindowname "$window" | grep -F 'SAVE FAILED'
+xdotool search --onlyvisible --name '^Holonomy Settings$' >/dev/null
 import -window "$window" native-refused-save.png
 # Only an explicit emergency wipe discards the pending text. Reopen below must still see the
 # previous committed version, never a partial or silently advanced save.
+xdotool windowfocus --sync "$settings_window"
 xdotool key ctrl+shift+Escape
 timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
+xdotool key Escape
+sleep 0.5
+xdotool windowfocus --sync "$window"
 import -window "$window" native-home.png
 xdotool windowsize --sync "$window" 640 560
 xdotool key ctrl+shift+t
