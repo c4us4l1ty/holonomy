@@ -806,7 +806,11 @@ impl Render for NativeHome {
         let palette = design::Palette::new(self.dark);
         let (bg, panel, ink, muted) = (palette.page, palette.page, palette.ink, palette.muted);
         let viewport = window.viewport_size();
-        let sidebar_width = design::visible_sidebar_width(f32::from(viewport.width), self.sidebar_hidden, self.sidebar_forced);
+        let sidebar_width = design::visible_sidebar_width(
+            f32::from(viewport.width),
+            self.sidebar_hidden,
+            self.sidebar_forced,
+        );
         let toolbar = self.session.as_ref().map(Session::toolbar);
         let mut body = div()
             .id("workspace")
@@ -1032,29 +1036,80 @@ impl Render for NativeHome {
                                     cx.notify();
                                 },
                             )))
-                            .child(button("bold", style_label("B", toolbar.as_ref().map(|t| &t.bold)))
-                                .bg(rgb(if toolbar.as_ref().is_some_and(|t| matches!(t.bold, TriState::Uniform(true))) { palette.selected } else { palette.page })).on_click(cx.listener(|this, _, _, cx| {
-                                this.format(0);
-                                cx.notify();
-                            })))
                             .child(
-                                button("italic", style_label("I", toolbar.as_ref().map(|t| &t.italic)))
-                                .bg(rgb(if toolbar.as_ref().is_some_and(|t| matches!(t.italic, TriState::Uniform(true))) { palette.selected } else { palette.page })).on_click(cx.listener(|this, _, _, cx| {
-                                    this.format(1);
-                                    cx.notify();
-                                })),
+                                button("bold", style_label("B", toolbar.as_ref().map(|t| &t.bold)))
+                                    .bg(rgb(
+                                        if toolbar.as_ref().is_some_and(|t| {
+                                            matches!(t.bold, TriState::Uniform(true))
+                                        }) {
+                                            palette.selected
+                                        } else {
+                                            palette.page
+                                        },
+                                    ))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.format(0);
+                                        cx.notify();
+                                    })),
                             )
-                            .child(button("underline", style_label("U", toolbar.as_ref().map(|t| &t.underline)))
-                                .bg(rgb(if toolbar.as_ref().is_some_and(|t| matches!(t.underline, TriState::Uniform(true))) { palette.selected } else { palette.page })).on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.format(2);
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("format-toggle", if self.show_formatting { "Formatting ▴" } else { "Formatting ▾" }).on_click(cx.listener(|this, _, _, cx| {
-                                this.show_formatting = !this.show_formatting;
-                                cx.notify();
-                            })))
+                            .child(
+                                button(
+                                    "italic",
+                                    style_label("I", toolbar.as_ref().map(|t| &t.italic)),
+                                )
+                                .bg(rgb(
+                                    if toolbar.as_ref().is_some_and(|t| {
+                                        matches!(t.italic, TriState::Uniform(true))
+                                    }) {
+                                        palette.selected
+                                    } else {
+                                        palette.page
+                                    },
+                                ))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.format(1);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                button(
+                                    "underline",
+                                    style_label("U", toolbar.as_ref().map(|t| &t.underline)),
+                                )
+                                .bg(rgb(
+                                    if toolbar.as_ref().is_some_and(|t| {
+                                        matches!(t.underline, TriState::Uniform(true))
+                                    }) {
+                                        palette.selected
+                                    } else {
+                                        palette.page
+                                    },
+                                ))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.format(2);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                button(
+                                    "format-toggle",
+                                    if self.show_formatting {
+                                        "Formatting ▴"
+                                    } else {
+                                        "Formatting ▾"
+                                    },
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.show_formatting = !this.show_formatting;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
                             .child(button("find", "Find").on_click(cx.listener(
                                 |this, _, _, cx| {
                                     if !this.composition_ready() {
@@ -1432,10 +1487,14 @@ impl Render for NativeHome {
                             .px_3()
                             .text_size(px(11.))
                             .text_color(rgb(muted))
-                            .child(button("rail-settings", "⚙  Settings").justify_start().on_click(cx.listener(|this, _, _, cx| {
-                                this.show_settings = !this.show_settings;
-                                cx.notify();
-                            }))),
+                            .child(
+                                button("rail-settings", "⚙  Settings")
+                                    .justify_start()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_settings = !this.show_settings;
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             );
         }
