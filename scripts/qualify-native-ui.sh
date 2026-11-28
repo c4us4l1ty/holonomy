@@ -73,6 +73,12 @@ import -window "$window" native-refused-save.png
 # previous committed version, never a partial or silently advanced save.
 xdotool key ctrl+shift+Escape
 timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
+import -window "$window" native-home.png
+xdotool windowsize --sync "$window" 640 560
+xdotool key ctrl+shift+t
+sleep 1
+kill -0 "$app_pid"
+import -window "$window" native-compact.png
 xdotool key ctrl+q
 # Bounded wait without relying on an indefinite shell wait if shutdown breaks.
 timeout 20 tail --pid="$app_pid" -f /dev/null

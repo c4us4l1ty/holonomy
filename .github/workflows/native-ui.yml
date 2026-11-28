@@ -71,6 +71,7 @@ jobs:
       - name: Build runnable preview and companion editor
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_DEV_OPT_LEVEL: "1"
         run: |
           cargo build --locked -p holonomy-native -p holonomy-gui --bin holonomy-native --bin holonomy-gui --features holonomy-native/native-ui
       - name: Exercise actual native input, encrypted save and reopen under Xvfb
@@ -133,6 +134,8 @@ jobs:
             native-smoke*.png
             native-failure.png
             native-refused-save.png
+            native-home.png
+            native-compact.png
             native-unlock.png
             crates/holonomy-native/src/lib.rs
   fedora:
@@ -169,6 +172,8 @@ jobs:
             native-smoke*.png
             native-failure.png
             native-refused-save.png
+            native-home.png
+            native-compact.png
   publish-desktop:
     name: Publish source-matched experimental desktop
     needs: [qualify, fedora]

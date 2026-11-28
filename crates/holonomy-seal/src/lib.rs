@@ -65,7 +65,7 @@ pub use capability::{DEMKey, UnwrapKey};
 // includes raw shared secrets. Downstream crates get only the opaque capsule/key operations.
 pub use envelope::{Capsule, EnvelopeError, HybridCiphertext};
 pub use error::SealError;
-pub use kdf::{MasterKeys, ParamsClass, DERIVE_SALT_BYTES};
+pub use kdf::{MasterKeys, ParamsClass, PreparedMasterKeys, DERIVE_SALT_BYTES};
 pub use lock::{describe_how, probe_capability, LockCapability, LockReport};
 pub use passphrase::{
     estimate_passphrase_strength, PassphraseError, PassphraseInput, PassphraseStrength,

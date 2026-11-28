@@ -3408,3 +3408,25 @@ Offline bootstrap regressions attack corruption, empty checksums, archive traver
 symlinks, cache reuse, source matching and failure atomicity. Checksums are corruption
 checks, not an independent signature or supply-chain attestation. This is qualified
 X11/software-Vulkan evidence, not a universal hardware/Wayland/Fedora-version guarantee.
+
+### 2026-11-26 — Quiet MD design and UI-thread KDF freeze
+
+User screenshots show the development frontend, not the requested Quiet MD-style shell,
+and the OS reports unresponsiveness. Confirmed memory-hard calibration/derivation ran
+synchronously in unlock/create callbacks. Split authentication into worker-safe opaque
+prepared roots and UI-thread locked capability/editor installation. No unsafe Send/Sync
+implementations were added. Existing derive/open/create APIs use the same formulas. Open
+rechecks the complete header epoch before and after world-line authentication. Cancel
+revokes delivery and drops late results; create touches no file until completion. Single-
+flight admission prevents repeated cancel/retry from spawning unbounded KDF workers.
+Cancellation cannot interrupt Argon2; the UI says temporary cleanup finishes when it does.
+The worker's zeroizing root is not a locked/reaper-registered capability; this extends the
+existing temporary-root lifetime and is not claimed as full emergency-wipe qualification.
+
+Adapted Quiet MD's neutral palette/Vega geometry with MIT attribution. Recessed library rail,
+compact ghost tools, full-bleed bounded writing measure and centered unlock form replace the
+full-width bordered debug controls. Narrow windows hide the rail and wrap tools; small forms
+scroll. Unchanged viewport sizes no longer rerun resize/scroll geometry on every render.
+Downloaded development binaries receive opt-level=1 (not release/security qualification).
+Save, search, verification and final world-line replay remain synchronous: this fixes the
+identified KDF freeze, not every possible slow-disk/large-document stall.
