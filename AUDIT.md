@@ -3469,3 +3469,16 @@ insertion (not a claim to clear the OS/framework clipboard). Document paste is u
 Oversized path text was also silently discarded; now report refusal and preserve the old
 path atomically. Add field-routing/Unicode byte-bound regressions and exercise real X11
 clipboard passphrase and Find insertion in the five-scale and Fedora runtime drills.
+
+### 2026-11-26 — Reference UI continuation
+
+Add an explicit rail collapse control, including a bounded compact-width rail override,
+and a session-only settings surface (appearance and expanded formatting visibility).
+Settings remain accessible from the header when the rail is hidden; Ctrl/Cmd+, opens,
+Escape dismisses. Extra format controls default collapsed. Bold/italic/underline report
+uniform-active background or mixed-state dot using engine toolbar state, not document text.
+Add compact rail geometry and mixed-state regressions. Runtime drill opens and captures
+settings in compact dark layout before dismissing and continuing authenticated reopen.
+No preference files, plaintext thumbnails or recent-document index are added. Full folder
+library navigation is still not implemented; do not describe the current-document rail as
+one. Existing save-failure and emergency-wipe fences remain unchanged.

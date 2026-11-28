@@ -83,6 +83,12 @@ xdotool key ctrl+shift+t
 sleep 1
 kill -0 "$app_pid"
 import -window "$window" native-compact.png
+# Exercise settings on the compact layout and ensure Escape dismisses without quitting.
+xdotool key ctrl+comma
+sleep 1
+kill -0 "$app_pid"
+import -window "$window" native-settings.png
+xdotool key Escape
 xdotool key ctrl+q
 # Bounded wait without relying on an indefinite shell wait if shutdown breaks.
 timeout 20 tail --pid="$app_pid" -f /dev/null
