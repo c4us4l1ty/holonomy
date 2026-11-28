@@ -1507,7 +1507,10 @@ impl Render for NativeHome {
                 .flex_col()
                 .child(
                     div()
-                        .h(px(52.))
+                        .min_h(px(52.))
+                        .py_2()
+                        .flex_wrap()
+                        .gap_2()
                         .flex_shrink_0()
                         .px_6()
                         .flex()
