@@ -113,10 +113,19 @@ controls light/dark appearance and extra-format visibility for this session; Esc
 No persistent preference file or plaintext content cache is created. The opaque neutral rail
 intentionally replaces the reference app's platform-specific translucent background.
 
-Settings now opens in its own native window with General, Appearance, Shortcuts, Documents,
-Privacy and About categories. Opening it again focuses the existing window; Escape/Ctrl+W
-closes only Settings. Closing the editor closes its auxiliary window after the normal
-save guard succeeds. Emergency wipe works while Settings has focus as well.
+Settings is a dedicated **page inside the existing app window**, with General, Appearance,
+Shortcuts, Documents, Privacy and About categories. Back/Escape restores the document or
+form underneath without closing it or resetting undo/input state. No second desktop window
+is created. Ctrl/Cmd+Q and the top-right close button retain the normal save guard;
+emergency wipe also works from Settings.
+
+Home shows actual metadata-only document/folder cards, with Grid/List and title order in
+View; + offers encrypted Document, Folder and Open. Ctrl/Cmd+J opens a bounded filename
+search palette (Up/Down, Enter, Escape, paste supported). Folders are created only from a
+validated single-component name and never overwrite existing entries. Hidden names are
+filtered by default and can be enabled in Documents settings. Preferences are session-only.
+The caption controls minimize, maximize/restore, and save-guarded close. The design does
+not expose database/board/import/agent/trash functionality unsupported by this engine.
 
 The rounded editor toolbar now includes a family/style chooser (Sans/Serif/Monospace and
 body/H1/H2), bounded text-size −/+ controls, and a Link form (empty URL removes a link).

@@ -220,6 +220,11 @@ mod tests {
         assert!(library.entries.is_empty());
         library.navigate(&root.join("missing"));
         assert!(!library.notice.is_empty());
+        library.navigate(&root);
+        library.create_folder("Created").unwrap();
+        assert!(root.join("Created").is_dir());
+        assert!(library.create_folder("Created").is_err());
+        assert!(library.create_folder("../outside").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

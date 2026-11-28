@@ -2020,7 +2020,9 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<gpui::UTF16Selection> {
-        if self.screen == Screen::Home {
+        if self.settings_page.is_some()
+            || (self.screen == Screen::Home && !self.search_open && !self.folder_create)
+        {
             return None;
         }
         let end = self.preedit.encode_utf16().count();
