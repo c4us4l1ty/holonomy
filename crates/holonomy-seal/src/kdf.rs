@@ -262,6 +262,20 @@ pub struct MasterKeys {
     unwrap: UnwrapKey,
 }
 
+/// A derived root awaiting installation on its owning thread. It is zeroized on drop and
+/// deliberately exposes no key bytes. Unlike locked capability owners it can cross a worker
+/// boundary without transferring raw pointers, reaper registrations, or thread-local editors.
+pub struct PreparedMasterKeys {
+    root: RootSecret,
+}
+
+impl PreparedMasterKeys {
+    /// Completes the existing USB-binding subkey step on the destination thread.
+    pub fn finish(self, usb: Option<&[u8; 32]>) -> MasterKeys {
+        MasterKeys::from_root(&self.root, usb)
+    }
+}
+
 impl MasterKeys {
     /// Derive the unwrap key from passphrase, salt, and the optional USB slot.
     ///
@@ -289,8 +303,19 @@ impl MasterKeys {
         usb: Option<&[u8; 32]>,
         params: &crate::calibrate::KdfParamsRecord,
     ) -> Result<Self, KdfError> {
-        let root = derive_root_secret_with(passphrase, salt, params)?;
-        Ok(Self::from_root(&root, usb))
+        Ok(Self::prepare_with(passphrase, salt, params)?.finish(usb))
+    }
+
+    /// Performs the expensive derivation without creating thread-bound locked key owners.
+    /// The returned root is opaque, non-cloneable, and zeroized on drop, including cancellation.
+    pub fn prepare_with(
+        passphrase: &[u8],
+        salt: &[u8; DERIVE_SALT_BYTES],
+        params: &crate::calibrate::KdfParamsRecord,
+    ) -> Result<PreparedMasterKeys, KdfError> {
+        Ok(PreparedMasterKeys {
+            root: derive_root_secret_with(passphrase, salt, params)?,
+        })
     }
 
     /// The one USB-binding subkey step both entry points share, so the two can never drift:

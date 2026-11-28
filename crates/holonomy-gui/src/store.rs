@@ -138,6 +138,103 @@ pub(crate) struct Line {
     pub(crate) line: WorldLine,
 }
 
+/// Worker-prepared authentication. No file is created until `finish` is called. Dropping
+/// a cancelled result erases its opaque root; no locked capabilities or Rc owners cross threads.
+pub struct PreparedDocument {
+    path: PathBuf,
+    keys: holonomy_seal::PreparedMasterKeys,
+    kind: PreparedKind,
+}
+
+enum PreparedKind {
+    Create {
+        params: KdfParamsRecord,
+        salt: [u8; holonomy_seal::DERIVE_SALT_BYTES],
+    },
+    Open {
+        header: Box<LineHeader>,
+    },
+}
+
+impl PreparedDocument {
+    /// Calibrates and derives on a worker; creation remains exclusive and deferred to finish.
+    pub fn create(path: &Path, passphrase: &[u8]) -> Result<Self, StoreError> {
+        let input = normalize_for_create(passphrase)?;
+        let params = calibrate().params;
+        Self::create_input(path, &input, params)
+    }
+
+    fn create_input(
+        path: &Path,
+        passphrase: &PassphraseInput,
+        params: KdfParamsRecord,
+    ) -> Result<Self, StoreError> {
+        let salt = generate_kdf_salt().map_err(|_| StoreError::Params)?;
+        let keys = passphrase
+            .with_bytes(|bytes| MasterKeys::prepare_with(bytes, &salt, &params))
+            .map_err(|_| StoreError::Params)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            keys,
+            kind: PreparedKind::Create { params, salt },
+        })
+    }
+
+    /// Reads the public header and performs the memory-hard derivation, without exposing keys.
+    pub fn open(path: &Path, passphrase: &[u8]) -> Result<Self, StoreError> {
+        let input = normalize_for_open(passphrase)?;
+        Self::open_input(path, &input)
+    }
+
+    fn open_input(path: &Path, passphrase: &PassphraseInput) -> Result<Self, StoreError> {
+        let header = LineHeader::read(path).map_err(map_open)?;
+        let keys = passphrase
+            .with_bytes(|bytes| MasterKeys::prepare_with(bytes, &header.salt, &header.kdf_params))
+            .map_err(|_| StoreError::Refused)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            keys,
+            kind: PreparedKind::Open {
+                header: Box::new(header),
+            },
+        })
+    }
+
+    /// Installs locked capabilities on the calling thread and authenticates the world-line.
+    /// Open never becomes create; a changed header while the worker ran is refused.
+    pub fn finish(self) -> Result<Document, StoreError> {
+        let keys = self.keys.finish(None);
+        let line = match self.kind {
+            PreparedKind::Create { params, salt } => {
+                let (capsule, dem) =
+                    create_capsule_for(keys.unwrap_key(), None).map_err(|_| StoreError::Params)?;
+                let header = LineHeader::new(params, salt, capsule)
+                    .map_err(|error| StoreError::Line(error.to_string()))?;
+                WorldLine::create(&self.path, header, dem).map_err(map_open)?
+            }
+            PreparedKind::Open { header } => {
+                if LineHeader::read(&self.path).map_err(map_open)?.epoch_id() != header.epoch_id() {
+                    return Err(StoreError::Refused);
+                }
+                let dem = open_capsule_for(keys.unwrap_key(), &header.capsule, None)
+                    .map_err(|_| StoreError::Refused)?;
+                let opened = WorldLine::open(&self.path, dem).map_err(map_open)?;
+                if opened.header().epoch_id() != header.epoch_id() {
+                    return Err(StoreError::Refused);
+                }
+                opened
+            }
+        };
+        Ok(Document {
+            line: Rc::new(RefCell::new(Line {
+                path: self.path,
+                keys,
+                line,
+            })),
+        })
+    }
+}
+
 impl Document {
     /// Creates a document, calibrating this host's Argon2 schedule first.
     ///
@@ -191,22 +288,7 @@ impl Document {
         passphrase: &PassphraseInput,
         params: KdfParamsRecord,
     ) -> Result<Self, StoreError> {
-        let salt = generate_kdf_salt().map_err(|_| StoreError::Params)?;
-        let keys = passphrase
-            .with_bytes(|bytes| MasterKeys::derive_with(bytes, &salt, None, &params))
-            .map_err(|_| StoreError::Params)?;
-        let (capsule, dem) =
-            create_capsule_for(keys.unwrap_key(), None).map_err(|_| StoreError::Params)?;
-        let header = LineHeader::new(params, salt, capsule)
-            .map_err(|error| StoreError::Line(error.to_string()))?;
-        let line = WorldLine::create(path, header, dem).map_err(map_open)?;
-        Ok(Self {
-            line: Rc::new(RefCell::new(Line {
-                path: path.to_path_buf(),
-                keys,
-                line,
-            })),
-        })
+        PreparedDocument::create_input(path, passphrase, params)?.finish()
     }
 
     /// Opens an existing document.
@@ -230,22 +312,7 @@ impl Document {
     /// [`StoreError::Refused`] for a wrong passphrase or an altered file, and [`StoreError::Io`]
     /// if the file cannot be read.
     pub fn open_input(path: &Path, passphrase: &PassphraseInput) -> Result<Self, StoreError> {
-        let header = LineHeader::read(path).map_err(map_open)?;
-        let keys = passphrase
-            .with_bytes(|bytes| {
-                MasterKeys::derive_with(bytes, &header.salt, None, &header.kdf_params)
-            })
-            .map_err(|_| StoreError::Refused)?;
-        let dem = open_capsule_for(keys.unwrap_key(), &header.capsule, None)
-            .map_err(|_| StoreError::Refused)?;
-        let line = WorldLine::open(path, dem).map_err(map_open)?;
-        Ok(Self {
-            line: Rc::new(RefCell::new(Line {
-                path: path.to_path_buf(),
-                keys,
-                line,
-            })),
-        })
+        PreparedDocument::open_input(path, passphrase)?.finish()
     }
 
     /// The file this document is.
@@ -1003,5 +1070,78 @@ mod durability_error_tests {
             }
             _ => panic!("unsupported durability must remain a platform error"),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod prepared_document_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "holonomy-prepared-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )))
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn worker_result_is_send_and_cancelled_create_never_touches_disk() {
+        fn assert_send<T: Send>() {}
+        assert_send::<PreparedDocument>();
+        let fixture = Fixture::new();
+        let input = normalize_for_create(b"prepared document passphrase").unwrap();
+        let cancelled = PreparedDocument::create_input(&fixture.0, &input, test_params()).unwrap();
+        assert!(!fixture.0.exists());
+        drop(cancelled);
+        assert!(!fixture.0.exists());
+    }
+
+    #[test]
+    fn worker_open_is_byte_compatible_and_changed_epoch_is_refused() {
+        let fixture = Fixture::new();
+        drop(
+            Document::create_with(&fixture.0, b"prepared document passphrase", test_params())
+                .unwrap(),
+        );
+        let path = fixture.0.clone();
+        let prepared = std::thread::spawn(move || {
+            PreparedDocument::open(&path, b"prepared document passphrase").unwrap()
+        })
+        .join()
+        .unwrap();
+        let document = prepared.finish().unwrap();
+        assert_eq!(document.path(), fixture.0);
+        drop(document);
+        let prepared = PreparedDocument::open(&fixture.0, b"prepared document passphrase").unwrap();
+        std::fs::remove_file(&fixture.0).unwrap();
+        drop(
+            Document::create_with(&fixture.0, b"prepared document passphrase", test_params())
+                .unwrap(),
+        );
+        assert!(matches!(prepared.finish(), Err(StoreError::Refused)));
+    }
+
+    #[test]
+    fn prepared_create_remains_exclusive_and_wrong_password_remains_coarse() {
+        let fixture = Fixture::new();
+        let input = normalize_for_create(b"prepared document passphrase").unwrap();
+        let first = PreparedDocument::create_input(&fixture.0, &input, test_params()).unwrap();
+        let second = PreparedDocument::create_input(&fixture.0, &input, test_params()).unwrap();
+        drop(first.finish().unwrap());
+        assert!(second.finish().is_err());
+        let wrong = PreparedDocument::open(&fixture.0, b"wrong passphrase").unwrap();
+        assert!(matches!(wrong.finish(), Err(StoreError::Refused)));
+        assert!(Document::open(&fixture.0, b"prepared document passphrase").is_ok());
     }
 }

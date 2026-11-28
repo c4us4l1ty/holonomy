@@ -13,9 +13,10 @@ fixture create
 app_pid=''
 held_path="${HOLONOMY_NATIVE_SMOKE_PATH}.held-$$"
 held=false
+export HOLONOMY_NATIVE_CREATE_PATH="${HOLONOMY_NATIVE_SMOKE_PATH}.created.wavefunction"
 cleanup() {
   if [[ -n "$app_pid" ]]; then kill "$app_pid" 2>/dev/null || true; fi
-  rm -f "$HOLONOMY_NATIVE_SMOKE_PATH"
+  rm -f "$HOLONOMY_NATIVE_SMOKE_PATH" "$HOLONOMY_NATIVE_CREATE_PATH"
   if $held; then rm -f "$held_path"; fi
 }
 trap cleanup EXIT
@@ -73,9 +74,42 @@ import -window "$window" native-refused-save.png
 # previous committed version, never a partial or silently advanced save.
 xdotool key ctrl+shift+Escape
 timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' >/dev/null
+import -window "$window" native-home.png
+xdotool windowsize --sync "$window" 640 560
+xdotool key ctrl+shift+t
+sleep 1
+kill -0 "$app_pid"
+import -window "$window" native-compact.png
 xdotool key ctrl+q
 # Bounded wait without relying on an indefinite shell wait if shutdown breaks.
 timeout 20 tail --pid="$app_pid" -f /dev/null
 wait "$app_pid"
 app_pid=''
 fixture verify
+
+# At 200%, exercise REAL calibrated create, not the cheap test key schedule. A theme
+# repaint while the title is still Working proves the window processes input during KDF.
+if [[ "$GPUI_X11_SCALE_FACTOR" == 2 ]]; then
+  [[ ! -e "$HOLONOMY_NATIVE_CREATE_PATH" ]]
+  target/debug/holonomy-gui &
+  app_pid=$!
+  window=$(timeout 45 xdotool search --sync --onlyvisible --name '^Holonomy Native$' | head -1)
+  xdotool windowfocus --sync "$window"
+  xdotool key ctrl+n
+  xdotool type --clearmodifiers --delay 5 "$HOLONOMY_NATIVE_CREATE_PATH"
+  xdotool key Tab
+  xdotool type --clearmodifiers --delay 5 'native responsive create passphrase'
+  xdotool key Return
+  timeout 20 xdotool search --sync --onlyvisible --name 'Working - Light$' >/dev/null
+  xdotool key ctrl+shift+t
+  timeout 20 xdotool search --sync --onlyvisible --name 'Working - Dark$' >/dev/null
+  import -window "$window" native-busy.png
+  timeout 60 xdotool search --sync --onlyvisible --name 'native-smoke.wavefunction.created.wavefunction' >/dev/null
+  xdotool type --clearmodifiers --delay 20 'Created without blocking the window'
+  xdotool key ctrl+s
+  xdotool key ctrl+q
+  timeout 20 tail --pid="$app_pid" -f /dev/null
+  wait "$app_pid"
+  app_pid=''
+  fixture verify_created
+fi

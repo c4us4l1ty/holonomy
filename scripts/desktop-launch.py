@@ -15,6 +15,7 @@ import urllib.request
 REPOSITORY = "c4us4l1ty/holonomy"
 ASSET = "holonomy-linux-x86_64.tar.gz"
 BINARIES = {"holonomy-gui", "holonomy-native"}
+MEMBERS = BINARIES | {"THIRD-PARTY-NOTICES.txt"}
 MAX_DOWNLOAD = 512 * 1024 * 1024
 
 
@@ -33,7 +34,7 @@ def download(url, destination, limit=MAX_DOWNLOAD):
 
 
 def unpack_verified(archive, checksum, destination):
-    """Validate before extracting only two regular executable files, never links or paths."""
+    """Validate two executables and their license notice, never links or arbitrary paths."""
     fields = checksum.read_text().split()
     if not fields:
         raise ValueError("empty desktop checksum")
@@ -48,7 +49,7 @@ def unpack_verified(archive, checksum, destination):
         raise ValueError("desktop checksum mismatch; refusing to install")
     with tarfile.open(archive, "r:gz") as bundle:
         members = bundle.getmembers()
-        if len(members) != 2 or {member.name for member in members} != BINARIES:
+        if len(members) != len(MEMBERS) or {member.name for member in members} != MEMBERS:
             raise ValueError("unexpected desktop bundle contents")
         if any(not member.isfile() or member.size > MAX_DOWNLOAD for member in members):
             raise ValueError("desktop bundle must contain only bounded regular files")
@@ -59,18 +60,18 @@ def unpack_verified(archive, checksum, destination):
                     if not chunk:
                         break
                     output.write(chunk)
-            (destination / member.name).chmod(0o755)
+            (destination / member.name).chmod(0o755 if member.name in BINARIES else 0o644)
 
 
 def install(root, revision):
     cache = root / "target" / "desktop-prebuilt" / revision
-    if not all((cache / name).is_file() for name in BINARIES):
+    if not all((cache / name).is_file() for name in MEMBERS):
         cache.parent.mkdir(parents=True, exist_ok=True)
         # flock serializes concurrent first launches and is automatically released on failure.
         import fcntl
         with (cache.parent / ".install.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            if not all((cache / name).is_file() for name in BINARIES):
+            if not all((cache / name).is_file() for name in MEMBERS):
                 if cache.exists():
                     raise ValueError(f"incomplete desktop cache: remove {cache} and retry")
                 base = f"https://github.com/{REPOSITORY}/releases/download/desktop-{revision}"

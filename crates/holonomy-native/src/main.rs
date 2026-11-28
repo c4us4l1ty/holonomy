@@ -1,6 +1,8 @@
 //! Opt-in GPUI editor: native vector glyphs, with the existing encrypted session underneath.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod design;
+
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgb, size, App, Application, Bounds, Context,
     FocusHandle, KeyDownEvent, MouseButton, PathBuilder, Pixels, Window, WindowBounds,
@@ -10,6 +12,11 @@ use holonomy_native::{BoxRect, SecretInput, Session, VectorFrame};
 use holonomy_shell::{Intent, Move};
 use holonomy_text::{StylePatch, TriState};
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
+use std::time::Duration;
 use zeroize::Zeroize;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -19,6 +26,19 @@ enum Screen {
     Editor,
     Find,
     Bookmark,
+}
+
+struct UnlockWorker(Arc<AtomicBool>);
+
+impl Drop for UnlockWorker {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+struct PendingUnlock {
+    receiver: mpsc::Receiver<std::result::Result<holonomy_gui::store::PreparedDocument, String>>,
+    timeout: Option<Duration>,
 }
 
 struct NativeHome {
@@ -34,6 +54,8 @@ struct NativeHome {
     query: SecretInput,
     search_index: u64,
     session: Option<Session>,
+    pending_unlock: Option<PendingUnlock>,
+    unlock_worker_active: Arc<AtomicBool>,
     status: String,
     bounds: Bounds<Pixels>,
     dragging: bool,
@@ -44,12 +66,47 @@ fn button(id: &'static str, label: impl Into<gpui::SharedString>) -> gpui::State
     div()
         .id(id)
         .cursor_pointer()
-        .px_3()
-        .py_2()
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .h(px(design::TOOL_HEIGHT))
+        .px_2()
         .rounded_md()
-        .border_1()
-        .border_color(rgb(0x888888))
+        .text_size(px(12.))
+        .whitespace_nowrap()
+        .hover(|style| style.bg(gpui::rgba(0x88888818)))
         .child(label.into())
+}
+
+fn field(
+    id: &'static str,
+    label: String,
+    active: bool,
+    palette: design::Palette,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .cursor_text()
+        .flex()
+        .items_center()
+        .w_full()
+        .min_w_0()
+        .h(px(design::CONTROL_HEIGHT + 8.))
+        .flex_shrink_0()
+        .px_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(if active {
+            palette.muted
+        } else {
+            palette.border
+        }))
+        .bg(rgb(palette.page))
+        .text_size(px(14.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .child(label)
 }
 
 impl NativeHome {
@@ -66,6 +123,7 @@ impl NativeHome {
                 .await;
             if this
                 .update(cx, |this, cx| {
+                    this.poll_unlock(cx);
                     if this.session.as_ref().is_some_and(Session::tripped) {
                         this.wipe(cx);
                         cx.notify();
@@ -90,11 +148,33 @@ impl NativeHome {
             query: SecretInput::default(),
             search_index: 0,
             session: None,
+            pending_unlock: None,
+            unlock_worker_active: Arc::new(AtomicBool::new(false)),
             status: String::new(),
             bounds: Bounds::default(),
             dragging: false,
             show_history: false,
         }
+    }
+
+    fn begin_document(&mut self, create: bool) {
+        if !self.composition_ready() {
+            return;
+        }
+        if self.session.is_some() {
+            self.home();
+            if self.session.is_some() {
+                return;
+            }
+        }
+        self.create = create;
+        if create {
+            self.path.clear();
+        }
+        self.passphrase.zeroize();
+        self.editing_path = true;
+        self.screen = Screen::Unlock;
+        self.status.clear();
     }
 
     fn report(&mut self, result: holonomy_native::Result<()>, success: &str) {
@@ -107,6 +187,11 @@ impl NativeHome {
     // A composition belongs to the current field, selection and document view. Never route
     // its later platform commit into a different destination or move its insertion point.
     fn composition_ready(&mut self) -> bool {
+        if self.pending_unlock.is_some() {
+            self.status =
+                "Unlocking securely… You can cancel while the derivation finishes.".into();
+            return false;
+        }
         composition_ready(&self.preedit, &mut self.status)
     }
 
@@ -124,6 +209,10 @@ impl NativeHome {
     }
 
     fn save(&mut self) -> bool {
+        if self.pending_unlock.is_some() {
+            self.status = "Cancel the in-progress unlock before closing.".into();
+            return false;
+        }
         if let Err(error) = ensure_no_composition(&self.preedit) {
             self.status = error.to_string();
             return false;
@@ -150,6 +239,9 @@ impl NativeHome {
     }
 
     fn unlock(&mut self) {
+        if self.pending_unlock.is_some() {
+            return;
+        }
         if let Err(error) = ensure_no_composition(&self.preedit) {
             self.status = error.to_string();
             return;
@@ -170,31 +262,91 @@ impl NativeHome {
             self.status = "Choose a document path.".into();
             return;
         }
-        // Never convert a refused open into create. Create itself uses exclusive file creation.
-        let result = if self.create {
-            Session::create(Path::new(&self.path), self.passphrase.as_bytes())
-        } else {
-            Session::open(Path::new(&self.path), self.passphrase.as_bytes())
-        };
-        self.preedit.zeroize();
-        self.passphrase.zeroize();
-        match result {
-            Ok(mut session) => {
-                if let Some(timeout) = timeout {
-                    if let Err(error) = session.set_deadman(timeout) {
-                        self.status = error.to_string();
-                        return;
-                    }
+        if self.unlock_worker_active.swap(true, Ordering::AcqRel) {
+            self.status =
+                "The cancelled derivation is still clearing. Please wait a moment.".into();
+            return;
+        }
+        let worker = UnlockWorker(Arc::clone(&self.unlock_worker_active));
+        // Move, never copy, the bounded passphrase. No locked key owners or editor Rc state
+        // cross threads. Dropping the receiver on Cancel makes a late result zeroize on drop.
+        let passphrase = std::mem::take(&mut self.passphrase);
+        let path = self.path.clone();
+        let create = self.create;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("holonomy-unlock".into())
+            .spawn(move || {
+                let _worker = worker;
+                let result = holonomy_native::prepare_document(
+                    Path::new(&path),
+                    passphrase.as_bytes(),
+                    create,
+                );
+                drop(passphrase);
+                let _ = sender.send(result);
+            }) {
+            Ok(_) => {
+                self.pending_unlock = Some(PendingUnlock { receiver, timeout });
+                self.status = if create {
+                    "Preparing encryption…"
+                } else {
+                    "Unlocking securely…"
                 }
+                .into();
+            }
+            Err(error) => self.status = format!("Could not start unlock worker: {error}"),
+        }
+    }
+
+    fn poll_unlock(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = &self.pending_unlock else {
+            return;
+        };
+        let result = match pending.receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("Unlock worker stopped. Please retry.".into())
+            }
+        };
+        let timeout = self
+            .pending_unlock
+            .take()
+            .and_then(|pending| pending.timeout);
+        let result = result.and_then(|prepared| {
+            let document = prepared.finish().map_err(|error| error.to_string())?;
+            let mut session = Session::from_document(Path::new(&self.path), document)
+                .map_err(|error| error.to_string())?;
+            if let Some(timeout) = timeout {
+                session
+                    .set_deadman(timeout)
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(session)
+        });
+        match result {
+            Ok(session) => {
                 self.session = Some(session);
                 self.screen = Screen::Editor;
                 self.status.clear();
             }
             Err(error) => {
-                self.status = error.to_string();
+                self.status = error;
                 self.editing_path = false;
             }
         }
+        cx.notify();
+    }
+
+    fn cancel_unlock(&mut self) {
+        self.pending_unlock.take();
+        self.preedit.zeroize();
+        self.passphrase.zeroize();
+        self.screen = Screen::Home;
+        self.status =
+            "Cancelled. Any in-flight derivation clears its temporary secret when it finishes."
+                .into();
     }
 
     fn format(&mut self, kind: u8) {
@@ -227,6 +379,8 @@ impl NativeHome {
     }
 
     fn wipe(&mut self, cx: &mut Context<Self>) {
+        let cancelled_worker = self.pending_unlock.take().is_some()
+            || self.unlock_worker_active.load(Ordering::Acquire);
         let verified = self.session.as_mut().map_or(true, Session::wipe);
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
         self.session.take();
@@ -234,7 +388,9 @@ impl NativeHome {
         self.passphrase.zeroize();
         self.query.zeroize();
         self.screen = Screen::Home;
-        self.status = if verified {
+        self.status = if cancelled_worker {
+            "Unlock cancelled. In-flight derivation cleanup completes when its worker returns; no document was exposed."
+        } else if verified {
             "Resident text/keys wiped; clipboard cleared. GPU memory and clipboard history are not qualified."
         } else {
             "Key wipe could not be confirmed."
@@ -271,6 +427,12 @@ impl NativeHome {
         } else {
             mods.control
         };
+        if command && mods.shift && key == "t" {
+            self.dark = !self.dark;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if command && mods.shift && key == "escape" {
             self.wipe(cx);
             cx.notify();
@@ -282,6 +444,14 @@ impl NativeHome {
             .is_some_and(|session| session.activity().is_err())
         {
             self.wipe(cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if self.pending_unlock.is_some() {
+            if key == "escape" {
+                self.cancel_unlock();
+            }
             cx.stop_propagation();
             cx.notify();
             return;
@@ -299,6 +469,12 @@ impl NativeHome {
                 cx.stop_propagation();
                 cx.notify();
             }
+            return;
+        }
+        if command && (key == "n" || key == "o") {
+            self.begin_document(key == "n");
+            cx.stop_propagation();
+            cx.notify();
             return;
         }
         if self.screen == Screen::Unlock {
@@ -445,6 +621,9 @@ impl NativeHome {
     }
 
     fn commit_text(&mut self, text: &str) {
+        if self.pending_unlock.is_some() {
+            return;
+        }
         if let Some(session) = &self.session {
             if let Err(error) = session.activity() {
                 self.status = error.to_string();
@@ -481,6 +660,9 @@ impl NativeHome {
     }
 
     fn pointer(&mut self, position: gpui::Point<Pixels>, extend: bool) {
+        if !self.composition_ready() {
+            return;
+        }
         let x = f32::from(position.x - self.bounds.origin.x) - 24.;
         let y = f32::from(position.y - self.bounds.origin.y) - 24.;
         if let Some(session) = &mut self.session {
@@ -542,7 +724,16 @@ fn paint_frame(bounds: Bounds<Pixels>, frame: VectorFrame, ink: u32, window: &mu
 impl Render for NativeHome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_window_title(&self.session.as_ref().map_or_else(
-            || "Holonomy Native".to_string(),
+            || {
+                if self.pending_unlock.is_some() {
+                    format!(
+                        "Holonomy Native - Working - {}",
+                        if self.dark { "Dark" } else { "Light" }
+                    )
+                } else {
+                    "Holonomy Native".to_string()
+                }
+            },
             |session| {
                 format!(
                     "Holonomy Native — {}",
@@ -554,87 +745,147 @@ impl Render for NativeHome {
                 )
             },
         ));
-        let (bg, panel, ink, muted) = if self.dark {
-            (0x191b1e, 0x222529, 0xeeeeec, 0xa8acae)
-        } else {
-            (0xfaf9f6, 0xffffff, 0x242628, 0x666b70)
-        };
-        let mut body = div().flex_1().min_h_0().flex().flex_col().gap_4().p_4();
+        let palette = design::Palette::new(self.dark);
+        let (bg, panel, ink, muted) = (palette.page, palette.page, palette.ink, palette.muted);
+        let viewport = window.viewport_size();
+        let sidebar_width = design::sidebar_width(f32::from(viewport.width));
+        let hero_size = if sidebar_width == 0. { 28. } else { 36. };
+        let mut body = div()
+            .id("workspace")
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .px_6()
+            .py_4();
         match self.screen {
             Screen::Home => {
-                body = body.child(div().text_size(px(30.)).child("A quiet place to write"))
-                    .child("Native vector rendering · encrypted .wavefunction documents")
-                    .child(div().flex().gap_4()
-                        .child(button("new", "New encrypted document").on_click(cx.listener(|this,_,_,cx| { this.create=true; this.path.clear(); this.passphrase.zeroize(); this.editing_path=true; this.screen=Screen::Unlock; this.status.clear(); cx.notify(); })))
-                        .child(button("open", "Open encrypted document").on_click(cx.listener(|this,_,_,cx| { this.create=false; this.passphrase.zeroize(); this.editing_path=true; this.screen=Screen::Unlock; this.status.clear(); cx.notify(); }))))
-                    .child("Development frontend: IME, accessibility, suspend/USB integration and GPU scene cleanup are not qualified. Use test documents only.")
-                    .child(div().text_size(px(12.)).child("12 px · Hamburgefontsiv 0123456789 Il1 O0"))
-                    .child(div().text_size(px(24.)).child("24 px · Native-resolution text"));
+                body = body.max_w(px(760.)).w_full().mx_auto().justify_center()
+                    .child(div().text_size(px(12.)).text_color(rgb(muted)).child("YOUR PRIVATE WORKSPACE"))
+                    .child(div().text_size(px(hero_size)).child("Room for your thoughts."))
+                    .child(div().text_size(px(14.)).text_color(rgb(muted)).child("A quiet page. An encrypted document. Nothing sent anywhere."))
+                    .child(div().flex().flex_wrap().gap_3().mt_4()
+                        .child(button("new", "+  New document").h(px(40.)).px_4().bg(rgb(palette.primary)).text_color(rgb(palette.on_primary))
+                            .on_click(cx.listener(|this,_,_,cx| { this.begin_document(true); cx.notify(); })))
+                        .child(button("open", "Open document").h(px(40.)).px_4().border_1().border_color(rgb(palette.border))
+                            .on_click(cx.listener(|this,_,_,cx| { this.begin_document(false); cx.notify(); }))))
+                    .child(div().mt_6().text_size(px(12.)).text_color(rgb(muted)).child("Experimental build · Start with a test document. Your passphrase is never stored."));
             }
             Screen::Unlock => {
-                body = body
-                    .child(if self.create {
-                        "Create a new encrypted document"
-                    } else {
-                        "Unlock an existing document"
-                    })
-                    .child("Path (Tab switches fields; Enter submits)")
-                    .child(
-                        button(
-                            "path",
-                            if self.path.is_empty() {
-                                "Type an absolute .wavefunction path".to_string()
+                let busy = self.pending_unlock.is_some();
+                let form_hint = if busy {
+                    "Deriving your encryption key. Escape cancels.".to_string()
+                } else if self.status.is_empty() {
+                    "Tab to switch fields · Enter to continue".to_string()
+                } else {
+                    self.status.clone()
+                };
+                body =
+                    body.w_full()
+                        .max_w(px(design::FORM_WIDTH + 48.))
+                        .mx_auto()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(muted))
+                                .child("ENCRYPTED DOCUMENT"),
+                        )
+                        .child(div().text_size(px(28.)).child(if self.create {
+                            "Make space for a new idea."
+                        } else {
+                            "Welcome back."
+                        }))
+                        .child(div().text_size(px(13.)).text_color(rgb(muted)).child(
+                            if self.create {
+                                "Choose a location and a strong passphrase."
                             } else {
-                                self.path.clone()
+                                "Your document stays private. Unlock it to begin."
                             },
+                        ))
+                        .child(div().mt_4().text_size(px(12.)).child("Document location"))
+                        .child(
+                            field(
+                                "path",
+                                if self.path.is_empty() {
+                                    "/home/you/Documents/notes.wavefunction".into()
+                                } else {
+                                    self.path.clone()
+                                },
+                                self.editing_path && !busy,
+                                palette,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.composition_ready() {
+                                    this.editing_path = true;
+                                }
+                                cx.notify();
+                            })),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if !this.composition_ready() {
+                        .child(div().text_size(px(12.)).child("Passphrase"))
+                        .child(
+                            field(
+                                "passphrase",
+                                if self.passphrase.is_empty() {
+                                    "Enter your passphrase".into()
+                                } else {
+                                    "•".repeat(self.passphrase.chars().count().min(64))
+                                },
+                                !self.editing_path && !busy,
+                                palette,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.composition_ready() {
+                                    this.editing_path = false;
+                                }
                                 cx.notify();
-                                return;
-                            }
-                            this.editing_path = true;
-                            cx.notify();
-                        })),
-                    )
-                    .child(if self.editing_path {
-                        "Editing: path"
-                    } else {
-                        "Editing: passphrase"
-                    })
-                    .child(
-                        button(
-                            "passphrase",
-                            format!(
-                                "Passphrase: {}",
-                                "•".repeat(self.passphrase.chars().count().min(64))
-                            ),
+                            })),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if !this.composition_ready() {
-                                cx.notify();
-                                return;
-                            }
-                            this.editing_path = false;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        button("unlock", if self.create { "Create" } else { "Unlock" }).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.unlock();
-                                cx.notify();
-                            }),
-                        ),
-                    )
-                    .child(
-                        button("cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| {
-                            this.preedit.zeroize();
-                            this.passphrase.zeroize();
-                            this.screen = Screen::Home;
-                            cx.notify();
-                        })),
-                    );
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .mt_2()
+                                .child(
+                                    button("cancel", "Cancel")
+                                        .h(px(design::CONTROL_HEIGHT))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cancel_unlock();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    button(
+                                        "unlock",
+                                        if busy {
+                                            "Working securely…"
+                                        } else if self.create {
+                                            "Create document"
+                                        } else {
+                                            "Unlock document"
+                                        },
+                                    )
+                                    .h(px(design::CONTROL_HEIGHT))
+                                    .px_4()
+                                    .bg(rgb(palette.primary))
+                                    .text_color(rgb(palette.on_primary))
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.unlock();
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(muted))
+                                .child(form_hint),
+                        );
             }
             Screen::Editor | Screen::Find | Screen::Bookmark => {
                 let title = self
@@ -653,102 +904,126 @@ impl Render for NativeHome {
                         )
                     })
                     .unwrap_or_default();
-                body = body.child(title).child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            button("home", "Home").on_click(cx.listener(|this, _, _, cx| {
-                                this.home();
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            button("save", "Save").on_click(cx.listener(|this, _, _, cx| {
-                                this.save();
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            button("undo", "Undo").on_click(cx.listener(|this, _, _, cx| {
-                                this.apply(Intent::Undo);
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            button("redo", "Redo").on_click(cx.listener(|this, _, _, cx| {
-                                this.apply(Intent::Redo);
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            button("bold", "Bold").on_click(cx.listener(|this, _, _, cx| {
+                body = body
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(muted))
+                                    .child("Encrypted · Local only"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(rgb(palette.border))
+                            .child(button("home", "Home").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.home();
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("save", "Save").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.save();
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("undo", "↶ Undo").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.apply(Intent::Undo);
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("redo", "↷ Redo").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.apply(Intent::Redo);
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("bold", "B").on_click(cx.listener(|this, _, _, cx| {
                                 this.format(0);
                                 cx.notify();
-                            })),
-                        )
-                        .child(button("italic", "Italic").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.format(1);
-                                cx.notify();
-                            },
-                        )))
-                        .child(button("underline", "Underline").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.format(2);
-                                cx.notify();
-                            },
-                        )))
-                        .child(
-                            button("find", "Find").on_click(cx.listener(|this, _, _, cx| {
-                                if !this.composition_ready() {
+                            })))
+                            .child(
+                                button("italic", "I").on_click(cx.listener(|this, _, _, cx| {
+                                    this.format(1);
                                     cx.notify();
-                                    return;
-                                }
-                                this.screen = Screen::Find;
-                                this.query.zeroize();
-                                this.search_index = 0;
-                                cx.notify();
-                            })),
-                        )
-                        .child(button("history", "History").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if !this.composition_ready() {
+                                })),
+                            )
+                            .child(button("underline", "U").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.format(2);
                                     cx.notify();
-                                    return;
-                                }
-                                this.show_history = !this.show_history;
-                                cx.notify();
-                            },
-                        )))
-                        .child(button("bookmark", "Bookmark").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if !this.composition_ready() {
+                                },
+                            )))
+                            .child(button("find", "Find").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if !this.composition_ready() {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.screen = Screen::Find;
+                                    this.query.zeroize();
+                                    this.search_index = 0;
                                     cx.notify();
-                                    return;
-                                }
-                                this.query.zeroize();
-                                this.screen = Screen::Bookmark;
-                                cx.notify();
-                            },
-                        )))
-                        .child(button("verify", "Verify").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(s) = &this.session {
-                                    let result = s.verify();
-                                    this.report(result, "World-line authenticated.");
-                                }
-                                cx.notify();
-                            },
-                        )))
-                        .child(button("wipe", "Emergency wipe").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.wipe(cx);
-                                cx.notify();
-                            },
-                        ))),
-                );
+                                },
+                            )))
+                            .child(button("history", "History").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if !this.composition_ready() {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.show_history = !this.show_history;
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("bookmark", "Bookmark").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if !this.composition_ready() {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.query.zeroize();
+                                    this.screen = Screen::Bookmark;
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("verify", "Verify").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(s) = &this.session {
+                                        let result = s.verify();
+                                        this.report(result, "World-line authenticated.");
+                                    }
+                                    cx.notify();
+                                },
+                            )))
+                            .child(button("wipe", "Emergency wipe").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.wipe(cx);
+                                    cx.notify();
+                                },
+                            ))),
+                    );
                 if self.screen != Screen::Editor {
                     body = body.child(format!(
                         "{} · Enter confirms · Escape cancels",
@@ -848,6 +1123,9 @@ impl Render for NativeHome {
                         .min_h_0()
                         .overflow_hidden()
                         .bg(rgb(panel))
+                        .w_full()
+                        .max_w(px(design::DOCUMENT_WIDTH))
+                        .mx_auto()
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -907,6 +1185,23 @@ impl Render for NativeHome {
                 .w_full(),
             );
         }
+        if matches!(self.screen, Screen::Home | Screen::Unlock) {
+            // A scroll viewport and a natural-height content column must be separate. Making
+            // the constrained flex column itself scrollable lets wrapped text shrink/overlap.
+            body = body
+                .flex_none()
+                .min_h(px((f32::from(viewport.height) - 82.).max(0.)));
+            if f32::from(viewport.height) < 640. {
+                body = body.justify_start();
+            }
+            body = div()
+                .id("page-scroll")
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .overflow_y_scroll()
+                .child(body);
+        }
         let input_entity = cx.entity();
         let focus = self.focus.clone();
         let input = canvas(
@@ -921,44 +1216,189 @@ impl Render for NativeHome {
         )
         .absolute()
         .size_full();
-        div()
+        let mut shell = div()
             .size_full()
-            .track_focus(&self.focus)
             .flex()
-            .flex_col()
             .bg(rgb(bg))
             .text_color(rgb(ink))
-            .text_size(px(15.))
+            .text_size(px(14.))
+            .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
-            .child(input)
-            .child(
+            .child(input);
+        if sidebar_width > 0. {
+            shell = shell.child(
                 div()
+                    .w(px(sidebar_width))
+                    .h_full()
+                    .flex_shrink_0()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .p_4()
-                    .border_b_1()
-                    .border_color(rgb(muted))
-                    .child("Holonomy · native development frontend")
-                    .child(button("theme", "Toggle theme").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.dark = !this.dark;
-                            cx.notify();
-                        },
-                    ))),
-            )
-            .child(body)
-            .child(
-                div()
-                    .p_3()
-                    .text_size(px(12.))
-                    .text_color(rgb(muted))
-                    .child(format!(
-                        "Device scale {:.2}× · {}",
-                        window.scale_factor(),
-                        self.status
-                    )),
-            )
+                    .flex_col()
+                    .bg(rgb(palette.rail))
+                    .px_3()
+                    .py_4()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .px_2()
+                            .pb_6()
+                            .child(
+                                div()
+                                    .size(px(28.))
+                                    .rounded_lg()
+                                    .bg(rgb(palette.primary))
+                                    .text_color(rgb(palette.on_primary))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child("h"),
+                            )
+                            .child("Holonomy"),
+                    )
+                    .child(
+                        button("rail-home", "Overview")
+                            .justify_start()
+                            .h(px(36.))
+                            .px_3()
+                            .bg(rgb(if self.screen == Screen::Home {
+                                palette.selected
+                            } else {
+                                palette.rail
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.session.is_some() {
+                                    this.home();
+                                } else {
+                                    this.cancel_unlock();
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        button("rail-new", "+  New document")
+                            .justify_start()
+                            .h(px(36.))
+                            .px_3()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_document(true);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        button("rail-open", "Open document")
+                            .justify_start()
+                            .h(px(36.))
+                            .px_3()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_document(false);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .mt_6()
+                            .px_3()
+                            .text_size(px(11.))
+                            .text_color(rgb(muted))
+                            .child("WORKSPACE"),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .text_size(px(12.))
+                            .text_color(rgb(muted))
+                            .child("Encrypted files stay on your device."),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .border_t_1()
+                            .border_color(rgb(palette.border))
+                            .pt_3()
+                            .px_3()
+                            .text_size(px(11.))
+                            .text_color(rgb(muted))
+                            .child("Private by design"),
+                    ),
+            );
+        }
+        shell.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(52.))
+                        .flex_shrink_0()
+                        .px_6()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .border_b_1()
+                        .border_color(rgb(palette.border))
+                        .child(button("workspace-home", "Workspace").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if this.session.is_some() {
+                                    this.home();
+                                } else {
+                                    this.cancel_unlock();
+                                }
+                                cx.notify();
+                            },
+                        )))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(button("header-open", "Open").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.begin_document(false);
+                                        cx.notify();
+                                    },
+                                )))
+                                .child(
+                                    button("theme", if self.dark { "Light" } else { "Dark" })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.dark = !this.dark;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+                .child(body)
+                .child(
+                    div()
+                        .h(px(30.))
+                        .flex_shrink_0()
+                        .px_6()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .text_size(px(11.))
+                        .text_color(rgb(muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(self.status.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
+                                .child(format!("{:.2}× · Local workspace", window.scale_factor())),
+                        ),
+                ),
+        )
     }
 }
 
@@ -1020,6 +1460,9 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pending_unlock.is_some() {
+            return;
+        }
         let range = range.unwrap_or(0..self.preedit.encode_utf16().count());
         if !self.preedit.replace_utf16(range, text) {
             self.status =
@@ -1039,6 +1482,9 @@ impl gpui::EntityInputHandler for NativeHome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pending_unlock.is_some() {
+            return;
+        }
         let range = range.unwrap_or(0..self.preedit.encode_utf16().count());
         if !self.preedit.replace_utf16(range, text) {
             self.status = "Composition range is unsupported or exceeds the 4096-byte limit.".into();
@@ -1132,6 +1578,15 @@ fn ensure_no_composition(preedit: &SecretInput) -> holonomy_native::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unlock_worker_guard_releases_single_flight_gate_on_drop() {
+        let active = Arc::new(AtomicBool::new(true));
+        let guard = UnlockWorker(Arc::clone(&active));
+        assert!(active.load(Ordering::Acquire));
+        drop(guard);
+        assert!(!active.load(Ordering::Acquire));
+    }
+
     #[test]
     fn composition_transition_guard_preserves_pending_text_and_reports_refusal() {
         let mut input = SecretInput::default();

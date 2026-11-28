@@ -17,6 +17,22 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 type Core = Editor<DocumentSink, DocumentSource, FontSet>;
 
+/// Runs only the worker-safe authentication preparation. The editor and locked capabilities
+/// are installed later on the UI thread; unsupported durability is refused before KDF work.
+pub fn prepare_document(
+    path: &Path,
+    passphrase: &[u8],
+    create: bool,
+) -> std::result::Result<store::PreparedDocument, String> {
+    require_durability().map_err(|error| error.to_string())?;
+    if create {
+        store::PreparedDocument::create(path, passphrase)
+    } else {
+        store::PreparedDocument::open(path, passphrase)
+    }
+    .map_err(|error| error.to_string())
+}
+
 /// A glyph's closed contours, already positioned in logical viewport coordinates.
 ///
 /// There are no document strings in this representation. It is not a claim that GPU-visible
@@ -217,8 +233,13 @@ impl Session {
         if self.tripped() {
             return;
         }
-        self.width = fixed(width.max(40.));
-        self.height = fixed(height.max(40.));
+        let width = fixed(width.max(40.));
+        let height = fixed(height.max(40.));
+        if self.width == width && self.height == height {
+            return;
+        }
+        self.width = width;
+        self.height = height;
         self.editor.resize(self.width, self.height);
         if let Some(history) = &mut self.history {
             history.resize(self.width, self.height);
@@ -944,6 +965,20 @@ mod ui_smoke_fixture {
             .unwrap();
         session.save().unwrap();
     }
+    #[test]
+    #[ignore = "checks the real calibrated create/responsiveness UI drill"]
+    fn verify_created() {
+        let path = PathBuf::from(
+            std::env::var_os("HOLONOMY_NATIVE_CREATE_PATH").expect("explicit create fixture path"),
+        );
+        let mut session = Session::open(&path, b"native responsive create passphrase").unwrap();
+        assert_eq!(
+            session.editor.frame().unwrap().text(),
+            "Created without blocking the window"
+        );
+        session.verify().unwrap();
+    }
+
     #[test]
     #[ignore = "checks the file saved by the Xvfb native UI qualification job"]
     fn verify() {
